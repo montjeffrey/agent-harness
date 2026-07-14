@@ -38,10 +38,12 @@ fi
 HOOKS_FLAG="--hooks"
 EXTRA_ARGS=""
 CHECK_ONLY=0
+BUILD_GRAPH=0
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --no-hooks) HOOKS_FLAG="" ;;
         --check) CHECK_ONLY=1 ;;
+        --build-graph) BUILD_GRAPH=1 ;;
         --agents) EXTRA_ARGS="$EXTRA_ARGS --agents $2"; shift ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
@@ -57,8 +59,17 @@ fi
 # shellcheck disable=SC2086
 "$PYTHON" "$HARNESS_ROOT/install.py" "$PROJECT_DIR" $HOOKS_FLAG $EXTRA_ARGS
 
+if [ "$BUILD_GRAPH" -eq 1 ] && [ ! -f "$PROJECT_DIR/graphify-out/graph.json" ]; then
+    echo
+    echo "No code graph yet -- building one (--build-graph). This can take a while..."
+    "$PYTHON" "$HARNESS_ROOT/harness/graph_refresh.py" "$PROJECT_DIR" --full
+fi
+
 echo
 echo "Next steps:"
-echo "  1. Build the code graph:  $PYTHON \"$HARNESS_ROOT/harness/graph_refresh.py\" \"$PROJECT_DIR\" --full"
-echo "  2. Query it:              $PYTHON \"$HARNESS_ROOT/harness/graph_query.py\" find <term>"
-echo "  3. Re-run anytime -- the install is idempotent."
+if [ ! -f "$PROJECT_DIR/graphify-out/graph.json" ]; then
+    echo "  1. Build the code graph:  $PYTHON \"$HARNESS_ROOT/harness/graph_refresh.py\" \"$PROJECT_DIR\" --full"
+    echo "     (or rerun setup with --build-graph)"
+fi
+echo "  - Query the graph:  $PYTHON \"$HARNESS_ROOT/harness/graph_query.py\" find <term>"
+echo "  - Re-run anytime -- the install is idempotent."

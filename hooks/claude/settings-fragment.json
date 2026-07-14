@@ -10,6 +10,16 @@
           }
         ]
       }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"<harness>/harness/graph_check.py\""
+          }
+        ]
+      }
     ]
   }
 }

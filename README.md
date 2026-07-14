@@ -16,6 +16,9 @@ four capabilities inside any project:
 4. **Token-efficiency conventions** -- a PreToolUse hook (Claude Code) that
    blocks direct reads of `graph.json` and redirects to the query CLI, plus
    guidance baked into the instruction block.
+5. **Self-healing graph checks** -- a SessionStart hook (Claude Code) that
+   detects a missing or stale graph at the start of every session and hands
+   the agent the exact build/refresh command.
 
 This project only *generalizes* tooling -- it does not replace project-specific
 CI, git hooks, or CRM/business logic. Install it into any repo with one
@@ -41,7 +44,9 @@ git clone <this-repo> agent-harness
 
 Useful flags (both scripts): `--check` / `-Check` reports the environment and
 installs nothing; `--no-hooks` / `-NoHooks` skips the Claude Code hook merge;
-`--agents claude,codex` / `-Agents claude,codex` limits the pointer files.
+`--build-graph` / `-BuildGraph` builds the code graph immediately after
+install if none exists; `--agents claude,codex` / `-Agents claude,codex`
+limits the pointer files.
 
 Prefer plain Python? The setup scripts are thin wrappers around:
 

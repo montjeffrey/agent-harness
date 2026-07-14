@@ -11,6 +11,7 @@ param(
     [string]$ProjectDir,
     [switch]$NoHooks,
     [switch]$Check,
+    [switch]$BuildGraph,
     [string]$Agents = ''
 )
 
@@ -46,8 +47,19 @@ if (-not $NoHooks) { $installArgs += '--hooks' }
 & $python @installArgs
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+$graphJson = Join-Path $ProjectDir 'graphify-out\graph.json'
+if ($BuildGraph -and -not (Test-Path $graphJson)) {
+    Write-Host ''
+    Write-Host 'No code graph yet -- building one (-BuildGraph). This can take a while...'
+    & $python (Join-Path $harnessRoot 'harness\graph_refresh.py') $ProjectDir --full
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}
+
 Write-Host ''
 Write-Host 'Next steps:'
-Write-Host "  1. Build the code graph:  $python `"$harnessRoot\harness\graph_refresh.py`" `"$ProjectDir`" --full"
-Write-Host "  2. Query it:              $python `"$harnessRoot\harness\graph_query.py`" find <term>"
-Write-Host '  3. Re-run anytime -- the install is idempotent.'
+if (-not (Test-Path $graphJson)) {
+    Write-Host "  1. Build the code graph:  $python `"$harnessRoot\harness\graph_refresh.py`" `"$ProjectDir`" --full"
+    Write-Host '     (or rerun setup with -BuildGraph)'
+}
+Write-Host "  - Query the graph:  $python `"$harnessRoot\harness\graph_query.py`" find <term>"
+Write-Host '  - Re-run anytime -- the install is idempotent.'

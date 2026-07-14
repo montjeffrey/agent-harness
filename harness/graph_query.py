@@ -44,9 +44,11 @@ def find_graph_path(start: Path | None = None) -> Path:
         graph_path = candidate / GRAPH_RELATIVE_PATH
         if graph_path.exists():
             return graph_path
+    refresh = Path(__file__).resolve().parent / "graph_refresh.py"
     raise SystemExit(
-        f"graph.json not found under {current} or any parent directory -- "
-        "run graph_refresh.py first, or pass --graph PATH."
+        f"graph.json not found under {current} or any parent directory.\n"
+        f'Build one:  python "{refresh}" "{current}" --full\n'
+        "Or pass --graph PATH to an existing graph.json."
     )
 
 
