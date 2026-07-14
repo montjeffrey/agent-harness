@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -c \"import json,sys; d=json.load(sys.stdin); p=d.get('tool_input',{}).get('file_path','').replace(chr(92),'/'); (sys.stderr.write('Use: python <harness>/harness/graph_query.py ... (graph.json wastes a full context window)\\n'), sys.exit(2)) if p.endswith('graphify-out/graph.json') else sys.exit(0)\""
+          }
+        ]
+      }
+    ]
+  }
+}
