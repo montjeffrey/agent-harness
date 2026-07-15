@@ -208,6 +208,18 @@ def _ensure_dir(path: Path, txn: InstallTransaction | None) -> None:
         path.mkdir(parents=True, exist_ok=True)
 
 
+def _read_preserving_newlines(path: Path, *, encoding: str = "utf-8") -> str:
+    """Read text with newline translation disabled so CRLF/LF round-trips exactly.
+
+    `Path.read_text(newline=...)` only exists on CPython 3.13+, but the harness
+    supports 3.11+. `Path.open(newline="")` has accepted the argument for far
+    longer, so route through it to keep byte-for-byte newline preservation on
+    every supported interpreter.
+    """
+    with path.open("r", encoding=encoding, newline="") as fh:
+        return fh.read()
+
+
 def render_agents_block(harness_path: Path) -> str:
     template = (TEMPLATES_DIR / "AGENTS.harness.md").read_text(encoding="utf-8")
     return template.replace("{HARNESS_PATH}", str(harness_path))
@@ -225,7 +237,7 @@ def upsert_marker_block(file_path: Path, block: str, txn: InstallTransaction | N
         _write(file_path, block + "\n", txn)
         return "created"
 
-    original = file_path.read_text(encoding="utf-8", newline="")
+    original = _read_preserving_newlines(file_path)
     start_idx = original.find(MARKER_START)
     end_idx = original.find(MARKER_END)
 
@@ -261,7 +273,7 @@ def ensure_gitignore_entry(project_dir: Path, txn: InstallTransaction | None = N
         _write(gitignore_path, GITIGNORE_ENTRY + "\n", txn)
         return "created"
 
-    content = gitignore_path.read_text(encoding="utf-8", newline="")
+    content = _read_preserving_newlines(gitignore_path)
     existing_lines = {line.strip() for line in content.splitlines()}
     if GITIGNORE_ENTRY.strip("/") in {line.strip("/") for line in existing_lines}:
         return "unchanged"
@@ -290,7 +302,7 @@ def install_vault_files(
     blueprint_dest = templates_dir / "feature-blueprint.md"
     blueprint_src = TEMPLATES_DIR / "feature-blueprint.md"
     blueprint_content = blueprint_src.read_text(encoding="utf-8")
-    if not blueprint_dest.exists() or blueprint_dest.read_text(encoding="utf-8", newline="") != blueprint_content:
+    if not blueprint_dest.exists() or _read_preserving_newlines(blueprint_dest) != blueprint_content:
         _write(blueprint_dest, blueprint_content, txn)
         actions.append("docs/vault/templates/feature-blueprint.md: written")
     else:
@@ -298,7 +310,7 @@ def install_vault_files(
 
     readme_dest = project_dir / "docs" / "vault" / "README.md"
     readme_content = VAULT_README_TEMPLATE.format(harness_path=harness_path)
-    if not readme_dest.exists() or readme_dest.read_text(encoding="utf-8", newline="") != readme_content:
+    if not readme_dest.exists() or _read_preserving_newlines(readme_dest) != readme_content:
         _write(readme_dest, readme_content, txn)
         actions.append("docs/vault/README.md: written")
     else:
