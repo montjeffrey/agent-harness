@@ -136,3 +136,165 @@ def test_main_returns_nonzero_on_missing_node(
     assert exit_code == 1
     captured = capsys.readouterr()
     assert "no node matches" in captured.err
+
+
+def test_build_index_missing_nodes_key_raises_clear_diagnostic() -> None:
+    """A graph.json missing its top-level 'nodes' list must fail with a
+    clear SystemExit message (this module's existing error convention),
+    not an uncaught KeyError/TypeError traceback."""
+    with pytest.raises(SystemExit, match="nodes"):
+        graph_query.build_index({"links": []})
+
+
+def test_build_index_non_list_nodes_raises_clear_diagnostic() -> None:
+    with pytest.raises(SystemExit, match="nodes"):
+        graph_query.build_index({"nodes": "not-a-list", "links": []})
+
+
+# --- single discovery path (Wave 3 requirement 1) --------------------------
+
+
+def test_find_graph_path_delegates_to_graph_location(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """graph_query must use `graph_location.find_graph_in_repo` as its ONLY
+    discovery mechanism -- no independent walk-up logic of its own."""
+    sentinel = tmp_path / "graphify-out" / "graph.json"
+    calls: list[Path] = []
+
+    def fake_find(start: Path | None = None) -> Path:
+        calls.append(start)
+        return sentinel
+
+    monkeypatch.setattr(graph_query, "find_graph_in_repo", fake_find)
+    found = graph_query.find_graph_path(tmp_path)
+    assert found == sentinel
+    assert calls == [tmp_path.resolve()]
+
+
+def test_find_graph_path_missing_defers_to_graph_location_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(graph_query, "find_graph_in_repo", lambda start=None: None)
+    with pytest.raises(SystemExit):
+        graph_query.find_graph_path(tmp_path)
+
+
+# --- canonical links vs legacy edges (Wave 3 requirement 2) ----------------
+
+
+CYCLE_NODES = [
+    {"id": "a", "label": "a", "source_file": "a.py", "source_location": "1", "community_name": "", "metadata": {}},
+    {"id": "b", "label": "b", "source_file": "b.py", "source_location": "1", "community_name": "", "metadata": {}},
+    {"id": "c", "label": "c", "source_file": "c.py", "source_location": "1", "community_name": "", "metadata": {}},
+]
+
+# a -> b -> c -> a (cycle), plus a linear tail c -> d for transitive-closure coverage
+TAIL_NODE = {
+    "id": "d", "label": "d", "source_file": "d.py", "source_location": "1", "community_name": "", "metadata": {},
+}
+
+
+def _canonical_graph(nodes: list[dict], edges: list[tuple[str, str, str]]) -> dict:
+    return {
+        "nodes": nodes,
+        "links": [{"source": s, "target": t, "relation": r} for s, t, r in edges],
+    }
+
+
+def _legacy_graph(nodes: list[dict], edges: list[tuple[str, str, str]]) -> dict:
+    """Legacy edge format: top-level 'edges' key, from/to/type field names."""
+    return {
+        "nodes": nodes,
+        "edges": [{"from": s, "to": t, "type": r} for s, t, r in edges],
+    }
+
+
+CYCLE_EDGES = [("a", "b", "calls"), ("b", "c", "calls"), ("c", "a", "calls")]
+
+
+@pytest.mark.parametrize("graph_factory", [_canonical_graph, _legacy_graph])
+def test_canonical_and_legacy_formats_produce_equivalent_results(
+    tmp_path: Path, graph_factory
+) -> None:
+    g = graph_factory(CYCLE_NODES, CYCLE_EDGES)
+    path = tmp_path / "graph.json"
+    path.write_text(json.dumps(g), encoding="utf-8")
+    loaded = graph_query.load_graph(path)
+    index = graph_query.build_index(loaded)
+
+    # callers of b: only a (direct)
+    assert set(graph_query.traverse("b", index.in_edges, "source", 1)) == {"a"}
+    # callees of a: only b (direct)
+    assert set(graph_query.traverse("a", index.out_edges, "target", 1)) == {"b"}
+    # impact (transitive callers) of c: b and a
+    assert set(graph_query.traverse("c", index.in_edges, "source", None)) == {"a", "b"}
+
+
+def test_unrecognized_edge_schema_is_dropped_not_fabricated_as_empty_string(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An edge whose field names match none of the known source/target
+    aliases (e.g. a schema this module has never seen) must be skipped, not
+    silently defaulted to "" -- a ""-keyed phantom edge would make
+    callers/callees/impact under-report with no indication anything went
+    wrong. It must also surface a diagnostic instead of failing silently."""
+    g = {
+        "nodes": CYCLE_NODES,
+        "links": [{"origin": "a", "destination": "b", "kind_of_thing": "calls"}],
+    }
+    index = graph_query.build_index(g)
+
+    # no phantom ""-keyed edge was fabricated
+    assert "" not in index.out_edges
+    assert "" not in index.in_edges
+    assert sum(len(v) for v in index.out_edges.values()) == 0
+    assert sum(len(v) for v in index.in_edges.values()) == 0
+
+    # a diagnostic was surfaced, not a silent no-op
+    captured = capsys.readouterr()
+    assert captured.err.strip() != ""
+    assert "1" in captured.err  # one edge was dropped
+
+
+# --- true transitive traversal, cycle-safe (Wave 3 requirement 3) ----------
+
+
+def test_impact_cyclic_graph_terminates_no_double_count() -> None:
+    """A -> B -> C -> A must not infinite-loop and must not double-count."""
+    g = _canonical_graph(CYCLE_NODES, CYCLE_EDGES)
+    index = graph_query.build_index(g)
+    lines = graph_query.cmd_traverse(index, "a", "impact", 1)
+    assert "2 transitive dependent(s) of a:" in lines[0]
+    joined = "\n".join(lines)
+    assert joined.count(" b ") + joined.count("b  [") >= 0  # sanity: no crash/hang
+    found = graph_query.traverse("a", index.in_edges, "source", None)
+    assert found == {"c": 1, "b": 2}
+
+
+def test_impact_full_transitive_closure_beyond_direct_neighbors() -> None:
+    """impact of the tail's dependency chain must include every ancestor,
+    not just the direct caller -- full closure, not one hop."""
+    nodes = [*CYCLE_NODES, TAIL_NODE]
+    edges = [*CYCLE_EDGES, ("c", "d", "calls")]  # d calls -> wait: direction below
+    # d is called BY c: c -> d, so impact of d (callers) should include c, b, a transitively.
+    g = _canonical_graph(nodes, edges)
+    index = graph_query.build_index(g)
+    found = graph_query.traverse("d", index.in_edges, "source", None)
+    assert found == {"c": 1, "b": 2, "a": 3}
+
+
+def test_impact_not_bounded_by_a_fixed_depth_cap() -> None:
+    """A long linear chain deeper than any hardcoded depth cap must still
+    resolve to the full transitive closure."""
+    chain_len = 150
+    nodes = [
+        {"id": f"n{i}", "label": f"n{i}", "source_file": "x.py", "source_location": "1", "community_name": "", "metadata": {}}
+        for i in range(chain_len)
+    ]
+    edges = [(f"n{i}", f"n{i + 1}", "calls") for i in range(chain_len - 1)]
+    g = _canonical_graph(nodes, edges)
+    index = graph_query.build_index(g)
+    found = graph_query.traverse(f"n{chain_len - 1}", index.in_edges, "source", None)
+    assert len(found) == chain_len - 1
+    assert found[f"n0"] == chain_len - 1

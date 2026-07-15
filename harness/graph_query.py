@@ -27,8 +27,9 @@ from collections import defaultdict
 from pathlib import Path
 from typing import NamedTuple
 
+from harness.graph_location import find_graph_in_repo
+
 MAX_ROWS = 60
-GRAPH_RELATIVE_PATH = Path("graphify-out") / "graph.json"
 
 
 class GraphIndex(NamedTuple):
@@ -38,12 +39,16 @@ class GraphIndex(NamedTuple):
 
 
 def find_graph_path(start: Path | None = None) -> Path:
-    """Walk upward from `start` (default: cwd) looking for graphify-out/graph.json."""
+    """Repo-bound discovery of graphify-out/graph.json (default start: cwd).
+
+    Thin CLI-facing wrapper around `harness.graph_location.find_graph_in_repo`
+    -- raises SystemExit with build guidance when nothing is found, instead
+    of returning None, to match this module's existing CLI error contract.
+    """
     current = (start or Path.cwd()).resolve()
-    for candidate in (current, *current.parents):
-        graph_path = candidate / GRAPH_RELATIVE_PATH
-        if graph_path.exists():
-            return graph_path
+    graph_path = find_graph_in_repo(current)
+    if graph_path is not None:
+        return graph_path
     refresh = Path(__file__).resolve().parent / "graph_refresh.py"
     raise SystemExit(
         f"graph.json not found under {current} or any parent directory.\n"
@@ -64,13 +69,86 @@ def node_line(n: dict) -> str:
     return f"{n['id']}  [{n.get('community_name', '')}]  {n.get('label', '')}  ({loc})"
 
 
+# Edge-list container key: canonical graphify graphs use "links" (matching
+# the node/link convention shared with d3 and networkx exports). Older
+# graphify graphs used "edges" instead. Both are accepted; if a graph somehow
+# has both, canonical "links" wins.
+EDGE_LIST_KEYS = ("links", "edges")
+
+# Per-edge field names: canonical is source/target/relation.
+#
+# PROVISIONAL/UNVERIFIED: from/to/type and src/dst/kind are this module's
+# best guess at prior graphify edge schemas -- no real legacy graphify
+# export was available to verify against (per this program's constraint on
+# using real company data in fixtures/tests). If a real legacy sample
+# surfaces a different schema, add its field names here. Any edge whose
+# fields match NONE of these aliases is deliberately dropped rather than
+# guessed at -- see `normalize_edge`.
+_SOURCE_KEYS = ("source", "from", "src")
+_TARGET_KEYS = ("target", "to", "dst")
+_RELATION_KEYS = ("relation", "type", "kind")
+
+_UNSET = object()
+
+
+def _first_present(edge: dict, keys: tuple[str, ...], default=_UNSET):
+    for key in keys:
+        if key in edge:
+            return edge[key]
+    return default
+
+
+def get_raw_edges(g: dict) -> list[dict]:
+    """Return this graph's edge list, whichever container key it uses."""
+    for key in EDGE_LIST_KEYS:
+        if key in g:
+            return g[key]
+    return []
+
+
+def normalize_edge(e: dict) -> dict | None:
+    """Normalize one edge (canonical or legacy field names) into the
+    canonical source/target/relation shape used internally by every query.
+
+    Returns None when `e` has no recognizable source AND/OR target field --
+    such an edge is dropped by the caller rather than silently coerced into
+    a phantom ""-keyed edge, which would make callers/callees/impact
+    under-report with no indication anything went wrong. `relation` is not
+    load-bearing for graph topology, so it may still default to "".
+    """
+    source = _first_present(e, _SOURCE_KEYS)
+    target = _first_present(e, _TARGET_KEYS)
+    if source is _UNSET or target is _UNSET:
+        return None
+    relation = _first_present(e, _RELATION_KEYS, default="")
+    return {"source": source, "target": target, "relation": relation}
+
+
 def build_index(g: dict) -> GraphIndex:
-    nodes = {n["id"]: n for n in g["nodes"]}
+    raw_nodes = g.get("nodes")
+    if not isinstance(raw_nodes, list):
+        got = "nothing" if raw_nodes is None else type(raw_nodes).__name__
+        raise SystemExit(
+            f"graph.json malformed: expected a top-level 'nodes' list, got {got}"
+        )
+    nodes = {n["id"]: n for n in raw_nodes}
     out_edges: dict[str, list[dict]] = defaultdict(list)
     in_edges: dict[str, list[dict]] = defaultdict(list)
-    for e in g["links"]:
+    dropped = 0
+    for raw in get_raw_edges(g):
+        e = normalize_edge(raw)
+        if e is None:
+            dropped += 1
+            continue
         out_edges[e["source"]].append(e)
         in_edges[e["target"]].append(e)
+    if dropped:
+        print(
+            f"[graph_query] WARNING: {dropped} edge(s) skipped -- unrecognized "
+            f"source/target field names (expected one of {_SOURCE_KEYS} or "
+            f"{_TARGET_KEYS}); traversal results may be incomplete.",
+            file=sys.stderr,
+        )
     return GraphIndex(nodes, out_edges, in_edges)
 
 
@@ -94,10 +172,25 @@ def resolve_id(term: str, nodes: dict[str, dict]) -> str:
     raise SystemExit("\n".join(lines))
 
 
-def traverse(start: str, edges: dict[str, list[dict]], key: str, depth: int) -> dict[str, int]:
+def traverse(
+    start: str, edges: dict[str, list[dict]], key: str, depth: int | None
+) -> dict[str, int]:
+    """Breadth-first, visited-set traversal from `start`.
+
+    `depth` bounds how many hops to follow; `depth=None` means unbounded --
+    walk until the frontier is exhausted, which is what a true transitive
+    closure (`impact`) requires instead of an arbitrary hard depth cap.
+
+    Cycle-safe and complete: `seen` is a dict keyed by node id, so a node
+    already visited (including `start` reappearing via a cycle) is never
+    re-added and never re-expanded, guaranteeing termination on cyclic
+    graphs with no double-counting.
+    """
     seen: dict[str, int] = {}
     frontier = [start]
-    for d in range(1, depth + 1):
+    d = 0
+    while frontier and (depth is None or d < depth):
+        d += 1
         nxt: list[str] = []
         for nid in frontier:
             for e in edges.get(nid, []):
@@ -106,8 +199,6 @@ def traverse(start: str, edges: dict[str, list[dict]], key: str, depth: int) -> 
                     seen[other] = d
                     nxt.append(other)
         frontier = nxt
-        if not frontier:
-            break
     return seen
 
 
@@ -165,7 +256,7 @@ def cmd_traverse(index: GraphIndex, nid: str, mode: str, depth: int) -> list[str
     edges, key = (
         (index.in_edges, "source") if mode in ("callers", "impact") else (index.out_edges, "target")
     )
-    eff_depth = 99 if mode == "impact" else depth
+    eff_depth = None if mode == "impact" else depth
     found = traverse(nid, edges, key, eff_depth)
     label = {
         "callers": "dependent(s)",
