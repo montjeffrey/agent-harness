@@ -52,6 +52,7 @@ def graph_file(tmp_path: Path) -> Path:
 
 
 def test_find_graph_path_walks_up(tmp_path: Path, graph_file: Path) -> None:
+    (tmp_path / ".git").mkdir()  # repo boundary -- walk-up must have somewhere to stop
     nested = tmp_path / "a" / "b" / "c"
     nested.mkdir(parents=True)
     found = graph_query.find_graph_path(nested)

@@ -19,13 +19,11 @@ import argparse
 import json
 import logging
 import os
-import shlex
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
-from harness import config_validation
+from harness import config_validation, pathsafe
 
 log = logging.getLogger(__name__)
 
@@ -137,26 +135,15 @@ def _atomic_write_text(path: Path, content: str, *, encoding: str = "utf-8") -> 
 
 
 def _shell_quote(value: str) -> str:
-    """Quote `value` to survive argv tokenization on the current platform.
-
-    Leaves already-safe values (no spaces/specials) bare rather than adding
-    unnecessary quoting. On POSIX, `shlex.quote` covers full `sh`/`bash`
-    metacharacter safety. On Windows, `subprocess.list2cmdline` only
-    implements the MSVCRT/CreateProcess argv-splitting rules (spaces, tabs,
-    quotes, backslashes) -- it does NOT escape cmd.exe shell metacharacters
-    (`% ^ & | < > ( )`). The interpreter/harness paths this function quotes
-    are installer-controlled (repo checkout location, `sys.executable`), not
-    untrusted input, so this is intentionally scoped to argv-splitting
-    safety rather than full interactive-shell metacharacter escaping.
-    """
-    if os.name == "nt":
-        return subprocess.list2cmdline([value])
-    return shlex.quote(value)
+    """Thin alias for `harness.pathsafe.shell_quote` (kept for existing
+    call sites / tests within this module)."""
+    return pathsafe.shell_quote(value)
 
 
 def _json_string_escape(value: str) -> str:
-    """Escape `value` for splicing into an already-open JSON string literal."""
-    return json.dumps(value)[1:-1]
+    """Thin alias for `harness.pathsafe.json_string_escape` (kept for
+    existing call sites / tests within this module)."""
+    return pathsafe.json_string_escape(value)
 
 
 class InstallTransaction:
