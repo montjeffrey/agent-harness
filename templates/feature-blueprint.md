@@ -1,7 +1,6 @@
 # FEATURE: {{Feature Name}}
 
-- **Status:** Pending Human Review  <!-- Human changes to: Approved | Rejected | Needs Changes -->
-- [ ] **Approved** <!-- Human ticks this box to release the agent -->
+- **Status:** Pending Human Review  <!-- Advisory convention, not a technical control -- nothing stops an agent from writing code before this is set. Human changes to: Approved | Rejected | Needs Changes. -->
 - **Date:** {{YYYY-MM-DD}}
 - **Author agent/session:** {{session or agent id}}
 - **Branch:** {{branch the work will land on}}

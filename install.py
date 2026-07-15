@@ -46,6 +46,10 @@ wikilinks, checkboxes, and graph view included.
 
 ## The loop
 
+This is an **advisory convention**, not a technical control: nothing in the
+harness stops an agent from writing code before a blueprint's `Status:` field
+says `Approved`. The loop below only works if agents choose to follow it.
+
 ```
 [ Codebase ] --(graph refresh)--> [ this vault ] --(human review)--> [ Approved ]
      ^                                                                    |
@@ -58,9 +62,9 @@ wikilinks, checkboxes, and graph view included.
    from the template in `templates/feature-blueprint.md`.
 2. **Human reviews**: open the blueprint, inspect linked files/dependencies,
    edit steps directly in Markdown.
-3. **Human approves**: change `Status:` to `Approved` (and tick the box).
+3. **Human approves**: change the blueprint's `Status:` field to `Approved`.
 4. **Agent executes**: on its next run, the agent reads the blueprint, sees
-   `Approved`, and implements -- checking off steps as it lands them.
+   `Status: Approved`, and implements -- checking off steps as it lands them.
 
 ## Folders
 

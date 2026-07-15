@@ -18,10 +18,12 @@ Refresh the graph after merges:
 
 Check staleness by comparing graph.json's `built_at_commit` to `git rev-parse HEAD`.
 
-Feature-scale work (3+ files, migrations, cross-module changes) requires a
+Feature-scale work (3+ files, migrations, cross-module changes) gets a
 blueprint before code changes: copy `docs/vault/templates/feature-blueprint.md`
-into `docs/vault/blueprints/<date>-<slug>.md`, fill it out, then STOP. Do not
-write code until a human sets `Status: Approved` (or ticks the Approved box)
-in that file. Re-read the blueprint immediately before executing -- do not
-trust a stale in-context copy.
+into `docs/vault/blueprints/<date>-<slug>.md`, fill it out, then STOP and wait
+for a human to set the blueprint's `Status:` field to `Approved`. This is an
+advisory convention, not a technical control -- nothing in the harness
+prevents an agent from writing code before that happens; the gate only works
+if the agent chooses to honor it. Re-read the blueprint immediately before
+executing -- do not trust a stale in-context copy.
 <!-- agent-harness:end -->

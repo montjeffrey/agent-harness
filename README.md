@@ -7,9 +7,11 @@ four capabilities inside any project:
 1. **Queryable code relations** -- search, inspect, and traverse a
    [graphify](https://pypi.org/project/graphify/) `graph.json` without ever
    reading the whole file into context.
-2. **A human-in-the-loop blueprint gate** -- feature-scale changes get a
-   Markdown blueprint (viewable natively in Obsidian if the project root is a
-   vault) that a human must approve before an agent writes code.
+2. **An advisory, human-in-the-loop blueprint gate** -- feature-scale changes
+   get a Markdown blueprint (viewable natively in Obsidian if the project
+   root is a vault) that a human is expected to approve before an agent
+   writes code. This is a convention, not a technical control -- the harness
+   does not stop an agent from writing code without approval.
 3. **Agent catch-up** -- a compact, marker-delimited instruction block dropped
    into `AGENTS.md` / `CLAUDE.md` / `GEMINI.md` so any agent picks up the
    conventions on its first read of the project.
@@ -126,14 +128,17 @@ the refresh. The key value is never printed or logged.
 
 ## The blueprint gate
 
-Before feature-scale work (3+ files, migrations, cross-module changes), an
-agent should:
+This is an **advisory convention**, not a technical control -- nothing in
+the harness prevents an agent from writing code before a blueprint is
+approved; the gate only works if the agent chooses to honor it. Before
+feature-scale work (3+ files, migrations, cross-module changes), an agent
+should:
 
 1. Copy `docs/vault/templates/feature-blueprint.md` into
    `docs/vault/blueprints/<date>-<slug>.md` and fill it out, using
    `graph_query.py impact <id>` to populate Impacted Files / Blast Radius.
 2. Stop and wait. A human reviews the blueprint (in Obsidian, or any Markdown
-   editor) and sets `Status: Approved` (or ticks the Approved checkbox).
+   editor) and sets its `Status:` field to `Approved`.
 3. The agent re-reads the blueprint before executing -- never trusts a stale
    in-context copy -- and checks off steps as they land.
 
