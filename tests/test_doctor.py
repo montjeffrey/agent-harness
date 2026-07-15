@@ -38,6 +38,38 @@ def test_check_project_invalid_claude_settings_fails(tmp_path: Path) -> None:
     assert levels["claude settings"] == "FAIL"
 
 
+def test_check_project_claude_settings_that_is_a_list_fails(tmp_path: Path) -> None:
+    """A syntactically valid JSON array is still not a usable settings object."""
+    settings = tmp_path / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text("[1, 2, 3]", encoding="utf-8")
+    results = doctor.check_project(tmp_path)
+    levels = {r.name: r.level for r in results}
+    assert levels["claude settings"] == "FAIL"
+
+
+def test_check_project_uses_shared_config_validation(tmp_path: Path, monkeypatch) -> None:
+    """doctor.check_project must route through the shared validator, not its
+    own ad hoc json.loads -- proven by making the shared validator raise for
+    input doctor's old inline check would have accepted.
+    """
+    from harness import config_validation
+
+    settings = tmp_path / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(json.dumps({"hooks": {}}), encoding="utf-8")
+
+    def _boom(_path):
+        raise config_validation.ConfigValidationError("forced failure for test")
+
+    monkeypatch.setattr(doctor.config_validation, "load_json_object", _boom)
+    results = doctor.check_project(tmp_path)
+    levels = {r.name: r.level for r in results}
+    assert levels["claude settings"] == "FAIL"
+    details = {r.name: r.detail for r in results}
+    assert "forced failure for test" in details["claude settings"]
+
+
 def test_check_project_valid_claude_settings_passes(tmp_path: Path) -> None:
     settings = tmp_path / ".claude" / "settings.json"
     settings.parent.mkdir(parents=True)
@@ -70,6 +102,15 @@ def test_check_backend_key_fails_on_broken_key_command(monkeypatch, tmp_path: Pa
         json.dumps({"key_command": "exit 1", "key_env": "NVIDIA_API_KEY"}),
         encoding="utf-8",
     )
+    result = doctor.check_backend_key(config_path=config)
+    assert result.level == "FAIL"
+
+
+def test_check_backend_key_fails_on_malformed_config_json(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("HARNESS_GRAPH_BACKEND", "nvidia-nim")
+    monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
+    config = tmp_path / "config.json"
+    config.write_text("{not json", encoding="utf-8")
     result = doctor.check_backend_key(config_path=config)
     assert result.level == "FAIL"
 

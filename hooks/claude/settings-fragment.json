@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python -c \"import json,sys; d=json.load(sys.stdin); p=d.get('tool_input',{}).get('file_path','').replace(chr(92),'/'); (sys.stderr.write('Use: python <harness>/harness/graph_query.py ... (graph.json wastes a full context window)\\n'), sys.exit(2)) if p.endswith('graphify-out/graph.json') else sys.exit(0)\""
+            "command": "<python> <harness>/hooks/claude/graph_read_guard.py"
           }
         ]
       }
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"<harness>/harness/graph_check.py\""
+            "command": "<python> <harness>/harness/graph_check.py"
           }
         ]
       }

@@ -27,6 +27,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 HARNESS_ROOT = Path(__file__).resolve().parent.parent
+
+try:
+    from harness import config_validation
+except ImportError:  # running as `python harness/doctor.py`, not `-m harness.doctor`
+    sys.path.insert(0, str(HARNESS_ROOT))
+    from harness import config_validation
 DEFAULT_CONFIG_PATH = Path.home() / ".agent-harness" / "config.json"
 
 MIN_PYTHON = (3, 10)
@@ -127,8 +133,8 @@ def check_backend_key(config_path: Path = DEFAULT_CONFIG_PATH) -> CheckResult:
             f'create it with {{"key_command": "...", "key_env": "{env_var}"}}',
         )
     try:
-        config = json.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        config = config_validation.load_json_object(config_path)
+    except config_validation.ConfigValidationError as exc:
         return CheckResult("FAIL", "graph backend", f"{config_path} unreadable/invalid JSON: {exc}")
 
     key_command = config.get("key_command")
@@ -189,9 +195,9 @@ def check_project(project_dir: Path) -> list[CheckResult]:
     settings_path = project_dir / ".claude" / "settings.json"
     if settings_path.exists():
         try:
-            json.loads(settings_path.read_text(encoding="utf-8"))
+            config_validation.load_json_object(settings_path)
             results.append(CheckResult("PASS", "claude settings", ".claude/settings.json is valid JSON"))
-        except (OSError, json.JSONDecodeError) as exc:
+        except config_validation.ConfigValidationError as exc:
             results.append(CheckResult(
                 "FAIL", "claude settings",
                 f".claude/settings.json is invalid ({exc}) -- fix it before --hooks merge",

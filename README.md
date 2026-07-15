@@ -164,6 +164,14 @@ short pointer so the harness content lives in one place.
 python -m pytest tests/ -q
 ```
 
+## Security model
+
+The only external command this toolkit ever executes on your behalf is the
+`key_command` you write into your own `~/.agent-harness/config.json` -- it is
+run as your user, its output is exported into the named env var for the
+duration of a graph refresh, and it is never printed or logged. Nothing else
+reads credentials, and no telemetry leaves your machine.
+
 ## License
 
-Choose and add a LICENSE file appropriate for your use before publishing.
+[MIT](LICENSE)
