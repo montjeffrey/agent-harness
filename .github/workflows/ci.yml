@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dev + build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+          python -m pip install build setuptools wheel
+
+      - name: Run full test suite
+        run: python -m pytest tests/ -q
+
+      - name: Build wheel and sdist
+        run: python -m build
+
+      - name: Smoke-test installed console scripts (outside the checkout)
+        shell: bash
+        run: |
+          set -eu
+          python -m venv /tmp/agent-harness-smoke-venv
+          if [ -f /tmp/agent-harness-smoke-venv/bin/python ]; then
+            VENV_PY=/tmp/agent-harness-smoke-venv/bin/python
+          else
+            VENV_PY=/tmp/agent-harness-smoke-venv/Scripts/python.exe
+          fi
+          WHEEL=$(ls dist/*.whl | head -n1)
+          "$VENV_PY" -m pip install --quiet "$WHEEL"
+          mkdir -p /tmp/agent-harness-smoke-outside
+          cd /tmp/agent-harness-smoke-outside
+          "$VENV_PY" -m harness.doctor

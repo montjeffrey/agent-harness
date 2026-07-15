@@ -28,7 +28,7 @@ foreach ($candidate in @('python', 'python3', 'py')) {
     }
 }
 if (-not $python) {
-    Write-Host '[FAIL] python: no Python 3 interpreter found on PATH (need >= 3.10)'
+    Write-Host '[FAIL] python: no Python 3 interpreter found on PATH (need >= 3.11)'
     Write-Host 'Install Python from https://www.python.org/downloads/ and rerun.'
     exit 1
 }

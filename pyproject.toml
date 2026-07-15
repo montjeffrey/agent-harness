@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "agent-harness"
 version = "0.1.0"
@@ -5,10 +9,22 @@ description = "Portable code-relations query, graph refresh, and blueprint-gate 
 requires-python = ">=3.11"
 dependencies = []
 
+[project.scripts]
+agent-harness-query = "harness.graph_query:main"
+agent-harness-doctor = "harness.doctor:main"
+agent-harness-refresh = "harness.graph_refresh:main"
+
 [project.optional-dependencies]
 dev = [
   "pytest>=8",
 ]
+
+[tool.setuptools.packages.find]
+include = ["harness*", "templates*", "hooks*"]
+
+[tool.setuptools.package-data]
+templates = ["*.md"]
+"hooks.claude" = ["*.json"]
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-markers"

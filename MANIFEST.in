@@ -1,0 +1,16 @@
+# Defensive exclusions on top of setuptools' default sdist file discovery.
+# private-plans/ is already gitignored and never tracked, but this makes the
+# exclusion explicit and independent of any single setuptools version's
+# default-inclusion behavior -- see private-plans/05-release-verification-agent.md
+# requirement 6 (artifact scan) and master-plan hard constraint (no private
+# plans/secrets/company data in release artifacts).
+prune private-plans
+prune .github
+prune .git
+exclude install.py
+exclude setup.sh
+exclude setup.ps1
+exclude ROADMAP.md
+global-exclude __pycache__
+global-exclude *.py[cod]
+global-exclude .DS_Store

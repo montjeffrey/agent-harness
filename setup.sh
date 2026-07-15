@@ -30,7 +30,7 @@ for candidate in python3 python py; do
     fi
 done
 if [ -z "$PYTHON" ]; then
-    echo "[FAIL] python: no Python 3 interpreter found on PATH (need >= 3.10)" >&2
+    echo "[FAIL] python: no Python 3 interpreter found on PATH (need >= 3.11)" >&2
     echo "Install Python from https://www.python.org/downloads/ and rerun." >&2
     exit 1
 fi

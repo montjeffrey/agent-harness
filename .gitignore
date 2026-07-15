@@ -11,3 +11,4 @@ htmlcov/
 dist/
 build/
 graphify-out/
+private-plans/

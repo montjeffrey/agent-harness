@@ -35,7 +35,7 @@ except ImportError:  # running as `python harness/doctor.py`, not `-m harness.do
     from harness import config_validation
 DEFAULT_CONFIG_PATH = Path.home() / ".agent-harness" / "config.json"
 
-MIN_PYTHON = (3, 10)
+MIN_PYTHON = (3, 11)
 
 REQUIRED_HARNESS_FILES = (
     "install.py",
@@ -72,7 +72,42 @@ def check_python() -> CheckResult:
     )
 
 
+def _check_installed_resources() -> CheckResult:
+    """Installed-wheel equivalent of the sibling-file check below.
+
+    A pip-installed `agent-harness` has no `install.py` sibling to anchor
+    HARNESS_ROOT against (only the `harness`/`templates`/`hooks` packages
+    ship in the wheel), so the console-script entry points (`agent-harness-
+    doctor` et al.) need a packaging-aware check instead of a filesystem
+    sibling-path check. Uses importlib.resources so this works regardless of
+    where the wheel was installed.
+    """
+    import importlib.resources as res
+
+    missing: list[str] = []
+    try:
+        if not (res.files("templates") / "AGENTS.harness.md").is_file():
+            missing.append("templates/AGENTS.harness.md")
+        if not (res.files("templates") / "feature-blueprint.md").is_file():
+            missing.append("templates/feature-blueprint.md")
+        if not (res.files("hooks.claude") / "settings-fragment.json").is_file():
+            missing.append("hooks/claude/settings-fragment.json")
+    except ModuleNotFoundError as exc:
+        return CheckResult("FAIL", "harness files", f"packaged resources not importable: {exc}")
+    if missing:
+        return CheckResult(
+            "FAIL", "harness files",
+            f"missing packaged resources: {', '.join(missing)} (broken wheel build?)",
+        )
+    return CheckResult("PASS", "harness files", "all packaged resources present (installed wheel)")
+
+
 def check_harness_files(harness_root: Path = HARNESS_ROOT) -> CheckResult:
+    # Only the real default HARNESS_ROOT is eligible for the installed-wheel
+    # fallback -- an explicitly-passed harness_root (as tests do to exercise
+    # the FAIL path) always uses the sibling-file check unchanged below.
+    if harness_root == HARNESS_ROOT and not (harness_root / "install.py").exists():
+        return _check_installed_resources()
     missing = [rel for rel in REQUIRED_HARNESS_FILES if not (harness_root / rel).exists()]
     if missing:
         return CheckResult(
