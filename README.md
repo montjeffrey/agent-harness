@@ -60,13 +60,13 @@ itself)? Both setup scripts locate a Python 3 interpreter, run the preflight
 
 ```bash
 # bash / sh (macOS, Linux, Git Bash)
-git clone <this-repo> agent-harness
+git clone https://github.com/montjeffrey/agent-harness.git
 ./agent-harness/setup.sh /path/to/your/project
 ```
 
 ```powershell
 # Windows PowerShell / pwsh
-git clone <this-repo> agent-harness
+git clone https://github.com/montjeffrey/agent-harness.git
 .\agent-harness\setup.ps1 C:\path\to\your\project
 ```
 
@@ -88,7 +88,7 @@ python harness/doctor.py /path/to/your/project            # same report, standal
 
 | Check | Level if bad | Meaning |
 |---|---|---|
-| Python >= 3.10 | FAIL | harness code won't run |
+| Python >= 3.11 | FAIL | harness code won't run |
 | Harness files complete | FAIL | incomplete clone |
 | Target `.claude/settings.json` valid JSON | FAIL | `--hooks` merge would corrupt it |
 | Target dir writable / is a dir | FAIL | install can't proceed |

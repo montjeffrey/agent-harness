@@ -128,12 +128,16 @@ def _t(*parts: str) -> str:
     return "".join(parts)
 
 
+# The GitHub handle "montjeffrey" is intentionally NOT on this list: the repo
+# is published publicly at github.com/montjeffrey/agent-harness, so the handle
+# legitimately appears in the README's clone URL. It is a public project
+# identifier, not private company data. This denylist guards only genuinely
+# private business identifiers and the author's real name.
 FORBIDDEN_STRINGS = (
     _t("divine", "energy", "solutions"),
     _t("Divine ", "Energy ", "Solutions"),
     _t("DES", " CRM"),
     _t("Orc", "atec"),
-    _t("mont", "jeffrey"),
     _t("Jeffrey ", "Montoya"),
     _t("One", "Drive - ", "divine", "energy", "solutions"),
 )
