@@ -34,6 +34,7 @@ except ImportError:  # running as `python harness/doctor.py`, not `-m harness.do
     sys.path.insert(0, str(HARNESS_ROOT))
     from harness import config_validation
 DEFAULT_CONFIG_PATH = Path.home() / ".agent-harness" / "config.json"
+DEFAULT_TELEMETRY_DIR = Path.home() / ".agent-harness" / "telemetry"
 
 MIN_PYTHON = (3, 11)
 
@@ -256,6 +257,35 @@ def check_agent_clis() -> CheckResult:
     )
 
 
+def check_telemetry(telemetry_dir: Path = DEFAULT_TELEMETRY_DIR) -> CheckResult:
+    """Report local telemetry store state. Absence is normal on a fresh
+    install (telemetry is collected manually via `harness/telemetry.py
+    collect`, never automatically), so this never WARNs or FAILs -- INFO
+    only, both when the dir is missing and when it's present.
+    """
+    if not telemetry_dir.is_dir():
+        return CheckResult("INFO", "telemetry", "no telemetry collected yet")
+
+    try:
+        from harness import telemetry_store
+    except ImportError:
+        sys.path.insert(0, str(HARNESS_ROOT))
+        from harness import telemetry_store
+
+    count = 0
+    agents: set[str] = set()
+    for rec in telemetry_store.iter_events(directory=telemetry_dir):
+        count += 1
+        agent = rec.get("agent")
+        if isinstance(agent, str):
+            agents.add(agent)
+
+    if count == 0:
+        return CheckResult("INFO", "telemetry", "telemetry dir present but no valid records found")
+    agents_str = ", ".join(sorted(agents)) or "none"
+    return CheckResult("INFO", "telemetry", f"{count} record(s) from agent(s): {agents_str}")
+
+
 def check_project(project_dir: Path) -> list[CheckResult]:
     results: list[CheckResult] = []
     project_dir = project_dir.resolve()
@@ -356,6 +386,7 @@ def run_checks(project_dir: Path | None = None) -> list[CheckResult]:
         check_backend_key(),
         check_semantic(project_dir),
         check_agent_clis(),
+        check_telemetry(),
     ]
     if project_dir is not None:
         results.extend(check_project(project_dir))

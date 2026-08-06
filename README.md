@@ -302,13 +302,48 @@ short pointer so the harness content lives in one place.
 python -m pytest tests/ -q
 ```
 
+## Telemetry
+
+An entirely local, opt-in-by-running-it usage log for Claude Code, Codex
+CLI, and Gemini CLI / Antigravity session history -- nothing here runs
+automatically (no hook, no background process); it only collects when you
+invoke the CLI below, and it never opens a network socket. Events are
+appended as JSONL to `~/.agent-harness/telemetry/events-YYYYMM.jsonl`
+(month-sharded, never auto-deleted in this phase).
+
+| Field | Type | Notes |
+|---|---|---|
+| `schema` | int | always `1` for this phase |
+| `ts` | string | ISO 8601 UTC, `Z` suffix |
+| `agent` | string | `claude-code` \| `codex` \| `gemini` |
+| `event` | string | `session_start` \| `session_end` \| `usage` \| `rate_limit` \| `collector_error` |
+| `project` | string \| null | optional |
+| `session_id` | string \| null | optional |
+| `input_tokens` / `output_tokens` | int | optional, omitted (not `0`) when unknown |
+| `cost_usd` | float | optional, only when the source reports it directly -- no price-estimation table |
+| `model` | string | optional |
+| `limit_remaining` / `limit_kind` | int/float / string | optional pair (`requests`\|`tokens`\|`percent`); `limit_kind` required whenever `limit_remaining` is present |
+| `source` | string | optional, local file path |
+
+```bash
+python harness/telemetry.py collect [--agent claude-code|codex|gemini]
+python harness/telemetry.py tail [-n N] [--agent AGENT] [--project P]
+python harness/telemetry.py aggregate [--by agent|project] [--since ISO8601]
+```
+
+Collectors are best-effort: a missing or unrecognized log format degrades
+to zero events (or a single `collector_error` record) rather than crashing
+`collect`. See `harness/collectors/*.py` for what each collector actually
+reads on-disk (module docstrings document exact discovery findings).
+
 ## Security model
 
 The only external command this toolkit ever executes on your behalf is the
 `key_command` you write into your own `~/.agent-harness/config.json` -- it is
 run as your user, its output is exported into the named env var for the
 duration of a graph refresh, and it is never printed or logged. Nothing else
-reads credentials, and no telemetry leaves your machine.
+reads credentials, and no telemetry leaves your machine -- the telemetry
+store above is written, read, and aggregated entirely locally.
 
 The optional `[semantic]` extra follows the same rule: it uses ChromaDB's
 default **local** embedding model (ONNX all-MiniLM-L6-v2), so node text

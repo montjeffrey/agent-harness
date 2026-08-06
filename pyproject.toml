@@ -15,6 +15,7 @@ agent-harness-doctor = "harness.doctor:main"
 agent-harness-refresh = "harness.graph_refresh:main"
 agent-harness-mcp = "harness.mcp_server:main"
 agent-harness-install = "harness.install_cli:main"
+agent-harness-telemetry = "harness.telemetry:main"
 
 [project.optional-dependencies]
 dev = [
@@ -37,6 +38,8 @@ semantic = [
 
 [tool.setuptools.packages.find]
 include = ["harness*", "templates*", "hooks*"]
+# "harness*" already covers harness.collectors (a subpackage under harness/)
+# -- no separate include entry is needed for it.
 
 [tool.setuptools.package-data]
 templates = ["*.md"]
