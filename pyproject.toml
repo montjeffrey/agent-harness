@@ -13,10 +13,22 @@ dependencies = []
 agent-harness-query = "harness.graph_query:main"
 agent-harness-doctor = "harness.doctor:main"
 agent-harness-refresh = "harness.graph_refresh:main"
+agent-harness-mcp = "harness.mcp_server:main"
 
 [project.optional-dependencies]
 dev = [
   "pytest>=8",
+]
+# Floor chosen as the last 1.x line: v1.2.0 is where FastMCP's stdio API
+# (`from mcp.server.fastmcp import FastMCP`, `.tool()`, `.run(transport="stdio")`)
+# became the broadly-stable, documented way to build a Python MCP server.
+# Capped below 2.0.0 because the SDK's v2 release renamed FastMCP to
+# MCPServer and reworked the low-level Server API -- pin here to avoid
+# `harness.mcp_server`'s `from mcp.server.fastmcp import FastMCP` import
+# breaking on install. Re-verify this floor/cap against the SDK's current
+# release notes before merging (see PR description).
+mcp = [
+  "mcp>=1.2.0,<2.0.0",
 ]
 
 [tool.setuptools.packages.find]

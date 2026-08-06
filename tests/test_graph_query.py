@@ -284,6 +284,45 @@ def test_impact_full_transitive_closure_beyond_direct_neighbors() -> None:
     assert found == {"c": 1, "b": 2, "a": 3}
 
 
+
+# --- library-safe query() entry point ---------------------------------------
+
+
+def test_query_returns_lines(graph_file: Path) -> None:
+    lines = graph_query.query("find", "createUser", graph=graph_file)
+    assert isinstance(lines, list)
+    assert "2 node(s) match 'createUser':" in lines[0]
+    joined = "\n".join(lines)
+    assert "n1" in joined and "n3" in joined
+
+
+def test_query_raises_valueerror_on_ambiguous(graph_file: Path) -> None:
+    with pytest.raises(ValueError):
+        graph_query.query("node", "create", graph=graph_file)
+
+
+def test_query_raises_filenotfound_without_graph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(graph_query, "find_graph_in_repo", lambda start=None: None)
+    with pytest.raises(FileNotFoundError):
+        graph_query.query("find", "anything")
+
+
+def test_query_raises_valueerror_on_unknown_command(graph_file: Path) -> None:
+    with pytest.raises(ValueError):
+        graph_query.query("bogus-command", "term", graph=graph_file)
+
+
+def test_query_raises_filenotfound_on_explicit_missing_graph(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError):
+        graph_query.query("find", "anything", graph=tmp_path / "does-not-exist.json")
+
+
+def test_query_callers_matches_cli(graph_file: Path) -> None:
+    lines = graph_query.query("callers", "n1", graph=graph_file)
+    assert "1 dependent(s) of n1:" in lines[0]
+
+
 def test_impact_not_bounded_by_a_fixed_depth_cap() -> None:
     """A long linear chain deeper than any hardcoded depth cap must still
     resolve to the full transitive closure."""

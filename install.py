@@ -383,17 +383,85 @@ def install_hooks(project_dir: Path, harness_path: Path, txn: InstallTransaction
     return "updated" if existing else "created"
 
 
+MCP_SERVER_NAME = "agent-harness"
+
+
+def install_mcp_registration(
+    project_dir: Path, harness_path: Path, txn: InstallTransaction | None = None
+) -> str:
+    """Register the agent-harness MCP server in the target project's
+    top-level `.mcp.json` (Claude Code's project-scoped MCP server config --
+    NOT `.claude/settings.json`, which stays hooks/permissions only).
+
+    Idempotent, same load-validate-merge-compare-write shape as
+    `install_hooks`: returns "unchanged"/"created"/"updated". Refuses
+    (raises `InstallError`, no write) if `.mcp.json` exists but is invalid
+    JSON, or if it already has a DIFFERENT `"agent-harness"` entry -- this
+    never silently overwrites someone else's server definition of the same
+    name.
+
+    Does NOT set `enableAllProjectMcpServers` -- approval is left to the
+    user via Claude Code's normal project-MCP-server prompt.
+    """
+    python_display = str(Path(sys.executable)).replace("\\", "/")
+    harness_display = str(harness_path).replace("\\", "/")
+
+    server_entry = {
+        "command": python_display,
+        "args": ["-m", "harness.mcp_server"],
+        "env": {"PYTHONPATH": harness_display},
+    }
+
+    mcp_json_path = project_dir / ".mcp.json"
+
+    if mcp_json_path.exists():
+        try:
+            existing = config_validation.load_json_object(mcp_json_path)
+        except config_validation.ConfigValidationError as exc:
+            raise InstallError(
+                f"{mcp_json_path} is invalid; refusing to modify MCP registration ({exc})"
+            ) from exc
+    else:
+        existing = {}
+
+    servers = dict(existing.get("mcpServers", {}))
+    current = servers.get(MCP_SERVER_NAME)
+    if current is not None and current != server_entry:
+        raise InstallError(
+            f"{mcp_json_path} already has a different '{MCP_SERVER_NAME}' MCP server entry; "
+            "refusing to overwrite it. Remove or rename the existing entry and rerun --mcp."
+        )
+
+    merged = dict(existing)
+    servers[MCP_SERVER_NAME] = server_entry
+    merged["mcpServers"] = servers
+
+    if merged == existing:
+        return "unchanged"
+
+    _write(mcp_json_path, json.dumps(merged, indent=2) + "\n", txn)
+    return "updated" if existing else "created"
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("project_dir", type=Path, help="target project directory")
     parser.add_argument("--agents", default="claude,codex,gemini", help="comma-separated: claude,codex,gemini")
     parser.add_argument("--hooks", action="store_true", help="install the Claude Code PreToolUse hook fragment")
+    parser.add_argument(
+        "--mcp", action="store_true", help="register the agent-harness MCP server in .mcp.json (Claude Code)"
+    )
     parser.add_argument("--check", action="store_true", help="run preflight checks only; install nothing")
     parser.add_argument("--skip-checks", action="store_true", help="install without running preflight checks")
     return parser.parse_args(argv)
 
 
-def run_install(project_dir: Path, agents: list[str], install_hooks_flag: bool) -> list[str]:
+def run_install(
+    project_dir: Path,
+    agents: list[str],
+    install_hooks_flag: bool,
+    install_mcp_flag: bool = False,
+) -> list[str]:
     """Install the harness into `project_dir`.
 
     Every write in this run shares one `InstallTransaction`. If any step
@@ -433,6 +501,10 @@ def run_install(project_dir: Path, agents: list[str], install_hooks_flag: bool) 
         if install_hooks_flag:
             hooks_action = install_hooks(project_dir, HARNESS_ROOT, txn)
             summary.append(f".claude/settings.json: {hooks_action}")
+
+        if install_mcp_flag:
+            mcp_action = install_mcp_registration(project_dir, HARNESS_ROOT, txn)
+            summary.append(f".mcp.json: {mcp_action}")
     except Exception:
         txn.rollback()
         raise
@@ -462,7 +534,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
-        summary = run_install(args.project_dir, agents, args.hooks)
+        summary = run_install(args.project_dir, agents, args.hooks, args.mcp)
     except InstallError as exc:
         print(f"Install failed -- nothing was left applied: {exc}")
         return 1

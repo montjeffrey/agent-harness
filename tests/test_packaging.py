@@ -26,6 +26,7 @@ CONSOLE_SCRIPTS = {
     "agent-harness-query": "harness.graph_query:main",
     "agent-harness-doctor": "harness.doctor:main",
     "agent-harness-refresh": "harness.graph_refresh:main",
+    "agent-harness-mcp": "harness.mcp_server:main",
 }
 
 
@@ -45,7 +46,7 @@ requires_build_tooling = pytest.mark.skipif(
 )
 
 
-def test_pyproject_declares_the_three_console_scripts() -> None:
+def test_pyproject_declares_the_four_console_scripts() -> None:
     data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     scripts = data["project"]["scripts"]
     assert scripts == CONSOLE_SCRIPTS
@@ -85,6 +86,7 @@ def test_wheel_contains_expected_packages_and_resources(built_artifacts: dict[st
     assert "harness/doctor.py" in names
     assert "harness/graph_query.py" in names
     assert "harness/graph_refresh.py" in names
+    assert "harness/mcp_server.py" in names
     assert "templates/AGENTS.harness.md" in names
     assert "templates/feature-blueprint.md" in names
     assert "hooks/claude/settings-fragment.json" in names
