@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 import install
+from harness import install_cli
 
 
 def test_first_install_writes_expected_files(tmp_path: Path) -> None:
@@ -148,7 +149,14 @@ def test_simulated_failure_mid_install_rolls_back_fully(tmp_path: Path, monkeypa
     def _boom(*_args, **_kwargs):
         raise RuntimeError("simulated failure mid-install")
 
-    monkeypatch.setattr(install, "install_hooks", _boom)
+    # `install.run_install` is the same function object as
+    # `harness.install_cli.run_install`; it resolves `install_hooks` as a
+    # bare name against its OWN module globals (harness.install_cli), not
+    # against whatever the `install` shim module currently binds that name
+    # to. So the collaborator being replaced must be patched on
+    # `harness.install_cli`, not on the shim, for the patch to actually take
+    # effect at call time.
+    monkeypatch.setattr(install_cli, "install_hooks", _boom)
 
     with pytest.raises(RuntimeError, match="simulated failure mid-install"):
         install.run_install(project, ["claude", "codex", "gemini"], install_hooks_flag=True)
@@ -228,7 +236,10 @@ def test_install_hooks_wraps_invalid_fragment_json_as_install_error(tmp_path: Pa
     project.mkdir()
     bad_fragment = tmp_path / "bad-fragment.json"
     bad_fragment.write_text("{ this is not valid json <python> <harness>", encoding="utf-8")
-    monkeypatch.setattr(install, "HOOK_FRAGMENT_PATH", bad_fragment)
+    # See the comment in test_simulated_failure_mid_install_rolls_back_fully:
+    # `install_hooks` reads `HOOK_FRAGMENT_PATH` from its own module globals
+    # (harness.install_cli), so the patch target must be that module.
+    monkeypatch.setattr(install_cli, "HOOK_FRAGMENT_PATH", bad_fragment)
 
     with pytest.raises(install.InstallError):
         install.install_hooks(project, install.HARNESS_ROOT)

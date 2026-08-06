@@ -92,6 +92,8 @@ def _check_installed_resources() -> CheckResult:
             missing.append("templates/feature-blueprint.md")
         if not (res.files("hooks.claude") / "settings-fragment.json").is_file():
             missing.append("hooks/claude/settings-fragment.json")
+        if importlib.util.find_spec("harness.install_cli") is None:
+            missing.append("harness.install_cli (broken wheel build?)")
     except ModuleNotFoundError as exc:
         return CheckResult("FAIL", "harness files", f"packaged resources not importable: {exc}")
     if missing:
