@@ -62,6 +62,20 @@ def test_pyproject_targets_cpython_311_plus() -> None:
     assert data["project"]["requires-python"] == ">=3.11"
 
 
+def test_pyproject_core_dependencies_stay_empty() -> None:
+    """The core package must remain stdlib-only -- the [semantic] extra
+    (chromadb) must never leak into the unconditional install."""
+    data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    assert data["project"]["dependencies"] == []
+
+
+def test_pyproject_declares_semantic_extra_with_chromadb_floor() -> None:
+    data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    extras = data["project"]["optional-dependencies"]
+    assert "semantic" in extras
+    assert any(dep.startswith("chromadb>=0.5") for dep in extras["semantic"])
+
+
 @pytest.fixture(scope="module")
 def built_artifacts(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
     if not _build_tooling_available():

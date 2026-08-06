@@ -100,11 +100,41 @@ python harness/graph_query.py callees <id> [depth]
 python harness/graph_query.py impact <id>
 python harness/graph_query.py file <path-fragment>
 python harness/graph_query.py community <name-fragment>
+python harness/graph_query.py search <text>            # requires the [semantic] extra
 ```
 
 By default the query CLI walks up from the current working directory looking
 for `graphify-out/graph.json`. Pass `--graph PATH` to point at a specific
 file instead.
+
+### Semantic search (`[semantic]` extra)
+
+`search` adds a ChromaDB-backed semantic query over node text (label,
+metadata summary/docstring, community name) on top of the exact/substring
+matching the other subcommands do. It's an opt-in extra so the core harness
+stays stdlib-only:
+
+```bash
+pip install "agent-harness[semantic]"
+python harness/graph_refresh.py <repo-root>       # builds/updates the semantic index too
+python harness/graph_query.py search "sends a welcome email"
+```
+
+Notes:
+
+- The index lives at `graphify-out/semantic-index/`, a sibling of
+  `graph.json` inside the directory the harness already gitignores.
+- `search` never builds the index implicitly. If it's missing, the error
+  message points you at `graph_refresh.py`; a normal graph refresh keeps the
+  semantic index in sync as a best-effort last step (it never fails the
+  refresh if the index update itself fails).
+- Without the extra installed, `search` fails fast with an actionable
+  `pip install "agent-harness[semantic]"` message instead of a traceback.
+- Embedding uses Chroma's default local model (ONNX all-MiniLM-L6-v2) --
+  fully local, no API key required. The first time it runs, Chroma downloads
+  that model (~80MB) to a local cache; after that, embedding is offline.
+- Output mirrors `find`: a count header plus one row per match, each row
+  prefixed with a 2-decimal relevance score (higher is more relevant).
 
 ## Refreshing the graph
 
@@ -215,6 +245,8 @@ short pointer so the harness content lives in one place.
   `pip install -e ".[dev]"`)
 - [graphify](https://pypi.org/project/graphify/) installed separately and
   available as `python -m graphify ...` if you want to build/refresh graphs
+- `chromadb>=0.5` (`pip install "agent-harness[semantic]"`) only if you want
+  the `search` subcommand -- everything else works without it
 
 ## Tests
 
@@ -229,6 +261,16 @@ The only external command this toolkit ever executes on your behalf is the
 run as your user, its output is exported into the named env var for the
 duration of a graph refresh, and it is never printed or logged. Nothing else
 reads credentials, and no telemetry leaves your machine.
+
+The optional `[semantic]` extra follows the same rule: it uses ChromaDB's
+default **local** embedding model (ONNX all-MiniLM-L6-v2), so node text
+(labels, metadata summaries/docstrings, community names) is embedded and
+indexed entirely on your machine -- no API key, no per-query network call,
+nothing sent anywhere. The only network activity is a one-time ~80MB
+download of the local model itself the first time Chroma needs it, cached
+locally afterward. `harness/graph_index.py` never imports `chromadb` at
+module scope, so the core package -- and every other subcommand -- keeps
+working with zero dependencies even if the extra is never installed.
 
 ## License
 

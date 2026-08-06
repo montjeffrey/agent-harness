@@ -207,6 +207,42 @@ def check_backend_key(config_path: Path = DEFAULT_CONFIG_PATH) -> CheckResult:
     return CheckResult("PASS", "graph backend", f"'{backend}' key sourced via key_command (value not shown)")
 
 
+def check_semantic(project_dir: Path | None = None) -> CheckResult:
+    """Optional `[semantic]` extra: the ChromaDB-backed `search` subcommand.
+
+    NEVER returns FAIL -- this extra is opt-in, and installs (and the rest
+    of the harness) must keep working perfectly well without it.
+    """
+    try:
+        from harness import graph_index
+    except ImportError:  # pragma: no cover -- harness.graph_index always ships
+        sys.path.insert(0, str(HARNESS_ROOT))
+        from harness import graph_index
+
+    if not graph_index.chromadb_available():
+        return CheckResult(
+            "WARN", "semantic search",
+            "chromadb not importable -- the `search` subcommand is unavailable; "
+            'pip install "agent-harness[semantic]" to enable it',
+        )
+    if project_dir is None:
+        return CheckResult("PASS", "semantic search", "chromadb importable")
+
+    graph_path = project_dir.resolve() / "graphify-out" / "graph.json"
+    index_dir = graph_index.index_path_for(graph_path)
+    if not index_dir.exists():
+        return CheckResult(
+            "INFO", "semantic search",
+            "chromadb importable; no semantic index yet -- run harness/graph_refresh.py to build one",
+        )
+    if graph_index.index_is_stale(index_dir, graph_path):
+        return CheckResult(
+            "WARN", "semantic search",
+            "semantic index is older than graph.json -- run harness/graph_refresh.py to rebuild it",
+        )
+    return CheckResult("PASS", "semantic search", "chromadb importable; semantic index present and up to date")
+
+
 def check_agent_clis() -> CheckResult:
     found = [label for cmd, label in AGENT_CLIS if shutil.which(cmd)]
     if found:
@@ -316,6 +352,7 @@ def run_checks(project_dir: Path | None = None) -> list[CheckResult]:
         check_graphify(),
         check_mcp(),
         check_backend_key(),
+        check_semantic(project_dir),
         check_agent_clis(),
     ]
     if project_dir is not None:

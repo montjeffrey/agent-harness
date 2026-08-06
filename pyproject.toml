@@ -30,6 +30,9 @@ dev = [
 mcp = [
   "mcp>=1.2.0,<2.0.0",
 ]
+semantic = [
+  "chromadb>=0.5",
+]
 
 [tool.setuptools.packages.find]
 include = ["harness*", "templates*", "hooks*"]

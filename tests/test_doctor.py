@@ -195,3 +195,81 @@ def test_run_checks_includes_project_section(tmp_path: Path) -> None:
     without_project = doctor.run_checks()
     with_project = doctor.run_checks(tmp_path)
     assert len(with_project) > len(without_project)
+
+
+# --- check_semantic: WARN/PASS/INFO matrix, and never FAIL ------------------
+
+
+def test_check_semantic_warns_when_chromadb_unavailable(monkeypatch) -> None:
+    from harness import graph_index
+
+    monkeypatch.setattr(graph_index, "chromadb_available", lambda: False)
+    result = doctor.check_semantic()
+    assert result.level == "WARN"
+    assert "agent-harness[semantic]" in result.detail
+
+
+def test_check_semantic_passes_when_available_no_project_dir(monkeypatch) -> None:
+    from harness import graph_index
+
+    monkeypatch.setattr(graph_index, "chromadb_available", lambda: True)
+    result = doctor.check_semantic()
+    assert result.level == "PASS"
+
+
+def test_check_semantic_info_when_no_index_yet(monkeypatch, tmp_path: Path) -> None:
+    from harness import graph_index
+
+    monkeypatch.setattr(graph_index, "chromadb_available", lambda: True)
+    result = doctor.check_semantic(tmp_path)
+    assert result.level == "INFO"
+    assert "no semantic index yet" in result.detail
+
+
+def test_check_semantic_warns_when_index_stale(monkeypatch, tmp_path: Path) -> None:
+    from harness import graph_index
+
+    monkeypatch.setattr(graph_index, "chromadb_available", lambda: True)
+    graph_path = tmp_path / "graphify-out" / "graph.json"
+    graph_path.parent.mkdir(parents=True)
+    graph_path.write_text("{}", encoding="utf-8")
+    index_dir = graph_index.index_path_for(graph_path)
+    index_dir.mkdir()
+    (index_dir / "chroma.sqlite3").write_text("x", encoding="utf-8")
+
+    monkeypatch.setattr(graph_index, "index_is_stale", lambda _idx, _g: True)
+    result = doctor.check_semantic(tmp_path)
+    assert result.level == "WARN"
+    assert "older than graph.json" in result.detail
+
+
+def test_check_semantic_passes_when_index_fresh(monkeypatch, tmp_path: Path) -> None:
+    from harness import graph_index
+
+    monkeypatch.setattr(graph_index, "chromadb_available", lambda: True)
+    graph_path = tmp_path / "graphify-out" / "graph.json"
+    graph_path.parent.mkdir(parents=True)
+    graph_path.write_text("{}", encoding="utf-8")
+    index_dir = graph_index.index_path_for(graph_path)
+    index_dir.mkdir()
+    (index_dir / "chroma.sqlite3").write_text("x", encoding="utf-8")
+
+    monkeypatch.setattr(graph_index, "index_is_stale", lambda _idx, _g: False)
+    result = doctor.check_semantic(tmp_path)
+    assert result.level == "PASS"
+
+
+def test_check_semantic_never_fails(monkeypatch, tmp_path: Path) -> None:
+    from harness import graph_index
+
+    for available in (True, False):
+        monkeypatch.setattr(graph_index, "chromadb_available", lambda a=available: a)
+        for project_dir in (None, tmp_path):
+            result = doctor.check_semantic(project_dir)
+            assert result.level != "FAIL"
+
+
+def test_run_checks_includes_semantic_search_check(tmp_path: Path) -> None:
+    results = doctor.run_checks(tmp_path)
+    names = {r.name for r in results}
+    assert "semantic search" in names

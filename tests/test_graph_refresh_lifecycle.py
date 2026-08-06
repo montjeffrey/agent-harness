@@ -251,6 +251,80 @@ def test_load_user_config_accepts_owner_only_config(tmp_path: Path) -> None:
     }
 
 
+# --- semantic index update: best-effort, never fatal to refresh() ----------
+
+
+def test_update_semantic_index_noop_when_chromadb_unavailable(monkeypatch, tmp_path: Path, caplog) -> None:
+    from harness import graph_index
+
+    monkeypatch.setattr(graph_index, "chromadb_available", lambda: False)
+    with caplog.at_level("INFO"):
+        graph_refresh.update_semantic_index(tmp_path)  # must not raise
+    assert "chromadb not installed" in caplog.text
+
+
+def test_update_semantic_index_failure_is_logged_not_raised(monkeypatch, tmp_path: Path, caplog) -> None:
+    from harness import graph_index
+
+    monkeypatch.setattr(graph_index, "chromadb_available", lambda: True)
+    graph_path = tmp_path / "graphify-out" / "graph.json"
+    graph_path.parent.mkdir(parents=True)
+    graph_path.write_text('{"nodes": [], "links": []}', encoding="utf-8")
+
+    def boom(*args, **kwargs):  # noqa: ANN001
+        raise RuntimeError("index exploded")
+
+    monkeypatch.setattr(graph_index, "update_index", boom)
+
+    with caplog.at_level("WARNING"):
+        graph_refresh.update_semantic_index(tmp_path)  # must not raise
+    assert "index exploded" in caplog.text
+
+
+def test_refresh_calls_update_semantic_index_as_final_step(monkeypatch, tmp_path: Path) -> None:
+    """refresh() must call update_semantic_index(repo_root) after the
+    graphify steps -- proven by monkeypatching it and checking the call."""
+    monkeypatch.setattr(graph_refresh, "detect_graphify", lambda: graph_refresh.GraphifyStatus(True, "1.0"))
+
+    def fake_run(cmd, check=False, **kwargs):  # noqa: ANN001
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(graph_refresh.subprocess, "run", fake_run)
+
+    calls: list[Path] = []
+    monkeypatch.setattr(graph_refresh, "update_semantic_index", calls.append)
+
+    graph_refresh.refresh(tmp_path, "auto", full=False)
+    assert calls == [tmp_path]
+
+
+def test_refresh_completes_when_semantic_index_update_self_protects(monkeypatch, tmp_path: Path, caplog) -> None:
+    """End-to-end: refresh() completes normally even when the underlying
+    chromadb update raises, because update_semantic_index catches it."""
+    from harness import graph_index
+
+    monkeypatch.setattr(graph_refresh, "detect_graphify", lambda: graph_refresh.GraphifyStatus(True, "1.0"))
+
+    def fake_run(cmd, check=False, **kwargs):  # noqa: ANN001
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(graph_refresh.subprocess, "run", fake_run)
+    monkeypatch.setattr(graph_index, "chromadb_available", lambda: True)
+
+    graph_path = tmp_path / "graphify-out" / "graph.json"
+    graph_path.parent.mkdir(parents=True)
+    graph_path.write_text('{"nodes": [], "links": []}', encoding="utf-8")
+
+    def boom(*args, **kwargs):  # noqa: ANN001
+        raise RuntimeError("index exploded")
+
+    monkeypatch.setattr(graph_index, "update_index", boom)
+
+    with caplog.at_level("WARNING"):
+        graph_refresh.refresh(tmp_path, "auto", full=False)  # must not raise
+    assert "index exploded" in caplog.text
+
+
 def test_refresh_never_performs_a_real_graphify_or_network_call(monkeypatch, tmp_path: Path) -> None:
     """Belt-and-suspenders: every subprocess.run call during refresh() must
     be routed through our fake, never the real interpreter/module."""

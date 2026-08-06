@@ -227,6 +227,52 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def update_semantic_index(repo_root: Path) -> None:
+    """Best-effort semantic-index refresh, run after every graph rebuild.
+
+    This is intentionally decoupled from the rest of `refresh()`: the
+    optional `[semantic]` extra (ChromaDB) may not be installed, and even
+    when it is, an index update failure must never fail an otherwise-
+    successful graph refresh. Two independent safety nets enforce that:
+
+    1. When chromadb isn't importable, this no-ops with a log.info -- the
+       core harness (and graphify) must keep working without the extra.
+    2. Once chromadb IS available, the actual update is wrapped in a broad
+       `except Exception` that logs `log.warning(...)` and returns --
+       nothing here is allowed to raise out of `refresh()`.
+    """
+    try:
+        from harness import graph_index
+    except ImportError as exc:  # pragma: no cover -- harness.graph_index always ships
+        log.warning("could not import harness.graph_index; skipping semantic index update: %s", exc)
+        return
+
+    if not graph_index.chromadb_available():
+        log.info(
+            'chromadb not installed; skipping semantic index update '
+            '(pip install "agent-harness[semantic]" to enable `graph_query.py search`)'
+        )
+        return
+
+    try:
+        from harness.graph_location import GRAPH_RELATIVE_PATH
+
+        graph_path = repo_root / GRAPH_RELATIVE_PATH
+        if not graph_path.exists():
+            log.info("no graph.json at %s; skipping semantic index update", graph_path)
+            return
+        with graph_path.open(encoding="utf-8") as fh:
+            graph = json.load(fh)
+        index_dir = graph_index.index_path_for(graph_path)
+        stats = graph_index.update_index(graph, index_dir)
+        log.info(
+            "semantic index updated: %d added, %d updated, %d deleted, %d unchanged",
+            stats.added, stats.updated, stats.deleted, stats.unchanged,
+        )
+    except Exception as exc:  # noqa: BLE001 -- must never break refresh()
+        log.warning("semantic index update failed (non-fatal): %s", exc)
+
+
 def refresh(repo_root: Path, backend: str, full: bool) -> None:
     status = detect_graphify()
     if not status.available:
@@ -244,6 +290,8 @@ def refresh(repo_root: Path, backend: str, full: bool) -> None:
 
         run_step(build_graphify_command("update", repo_root, backend), "graphify update")
         run_step(build_graphify_command("label", repo_root, backend), "graphify label")
+
+    update_semantic_index(repo_root)
 
 
 def _quote_for_display(value: str) -> str:

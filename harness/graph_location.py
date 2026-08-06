@@ -30,6 +30,7 @@ Public API (stable -- consumed by graph_query.py, graph_check.py,
 graph_refresh.py, and the Wave 3 Query Contract Agent):
 
     GRAPH_RELATIVE_PATH            -- Path("graphify-out") / "graph.json"
+    INDEX_RELATIVE_PATH            -- Path("graphify-out") / "semantic-index"
     GraphHealth                    -- str Enum: FRESH/STALE/DIRTY/UNKNOWN/INVALID/MISSING
     find_repo_root(start)          -> Path | None
     find_graph_in_repo(start=None) -> Path | None   (never raises)
@@ -47,6 +48,13 @@ from enum import Enum
 from pathlib import Path
 
 GRAPH_RELATIVE_PATH = Path("graphify-out") / "graph.json"
+
+# Sibling of GRAPH_RELATIVE_PATH, inside the same (already-gitignored)
+# graphify-out/ directory. This is the single source of truth for where the
+# optional [semantic] extra's ChromaDB-backed index lives -- harness.graph_index
+# and harness.doctor both derive from this constant rather than duplicating
+# the literal "semantic-index" path fragment.
+INDEX_RELATIVE_PATH = Path("graphify-out") / "semantic-index"
 
 
 class GraphHealth(str, Enum):

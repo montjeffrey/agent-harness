@@ -247,6 +247,15 @@ def test_load_graph_metadata_returns_none_for_truncated_file(tmp_path: Path) -> 
     assert graph_location.load_graph_metadata(path) is None
 
 
+# --- INDEX_RELATIVE_PATH: shared constant for the optional semantic index --
+
+
+def test_index_relative_path_is_sibling_of_graph_relative_path() -> None:
+    assert graph_location.INDEX_RELATIVE_PATH.parent == graph_location.GRAPH_RELATIVE_PATH.parent
+    assert graph_location.INDEX_RELATIVE_PATH.name == "semantic-index"
+    assert graph_location.INDEX_RELATIVE_PATH != graph_location.GRAPH_RELATIVE_PATH
+
+
 def test_load_graph_metadata_parses_valid_graph(tmp_path: Path) -> None:
     path = tmp_path / "graph.json"
     path.write_text(json.dumps({"nodes": [], "links": [], "built_at_commit": "abc123"}), encoding="utf-8")
