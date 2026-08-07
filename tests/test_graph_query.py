@@ -343,6 +343,96 @@ def test_query_callers_matches_cli(graph_file: Path) -> None:
     assert "1 dependent(s) of n1:" in lines[0]
 
 
+# --- search subcommand: graceful degradation without the [semantic] extra --
+
+
+def test_search_without_chromadb_exits_nonzero_with_actionable_message(
+    graph_file: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When chromadb isn't installed, `search` must fail fast with a clear
+    `pip install "agent-harness[semantic]"` message and exit 1 -- never a
+    traceback, and it must never attempt to build/query an index."""
+    from harness import graph_index
+
+    monkeypatch.setattr(graph_index, "chromadb_available", lambda: False)
+    exit_code = graph_query.main(["--graph", str(graph_file), "search", "welcome email"])
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert 'pip install "agent-harness[semantic]"' in captured.err
+
+
+def test_search_with_chromadb_but_no_index_points_at_graph_refresh(
+    graph_file: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """chromadb importable but no semantic-index/ dir yet -- search must
+    never auto-build the index; it should point the user at graph_refresh.py."""
+    from harness import graph_index
+
+    monkeypatch.setattr(graph_index, "chromadb_available", lambda: True)
+    exit_code = graph_query.main(["--graph", str(graph_file), "search", "welcome email"])
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert "graph_refresh.py" in captured.err
+
+
+def test_search_with_partially_built_index_points_at_graph_refresh(
+    graph_file: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """index_dir exists (so the missing-directory check doesn't fire) but a
+    prior update_index run never got as far as populating the collection --
+    query_index surfaces that as FileNotFoundError (see
+    test_graph_index.test_query_index_raises_file_not_found_when_collection_missing),
+    and search must translate it into the same actionable message as the
+    missing-index-directory case, not a zero-results answer or a traceback."""
+    from harness import graph_index
+
+    monkeypatch.setattr(graph_index, "chromadb_available", lambda: True)
+    index_dir = graph_index.index_path_for(graph_file)
+    index_dir.mkdir(parents=True)
+
+    def fake_query_index(_index_dir, _text, _limit, client_factory=None, embedding_function=None):
+        raise FileNotFoundError("no collection named 'graph_nodes' in this semantic index")
+
+    monkeypatch.setattr(graph_index, "query_index", fake_query_index)
+    exit_code = graph_query.main(["--graph", str(graph_file), "search", "welcome email"])
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert "graph_refresh.py" in captured.err
+    assert "no semantic index found" in captured.err
+
+
+def test_search_returns_scored_rows_via_fake_index(
+    graph_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With chromadb 'available' and an index present, search output mirrors
+    cmd_find(): a count header + node_line() rows, each prefixed with a
+    2-decimal relevance score."""
+    from harness import graph_index
+
+    monkeypatch.setattr(graph_index, "chromadb_available", lambda: True)
+    index_dir = graph_index.index_path_for(graph_file)
+    index_dir.mkdir(parents=True)
+
+    def fake_query_index(_index_dir, _text, _limit, client_factory=None, embedding_function=None):
+        return [("n2", 0.0), ("n1", 1.0)]
+
+    monkeypatch.setattr(graph_index, "query_index", fake_query_index)
+    lines = graph_query.run(["--graph", str(graph_file), "search", "welcome email"])
+    assert "2 node(s) match 'welcome email' (semantic):" in lines[0]
+    joined = "\n".join(lines)
+    assert "1.00" in joined  # score for distance 0.0
+    assert "0.50" in joined  # score for distance 1.0
+    assert "n2" in joined
+    assert "n1" in joined
+
+
+def test_search_all_other_subcommands_unaffected(graph_file: Path) -> None:
+    """Sanity check that adding `search` didn't change the choices/behavior
+    of the pre-existing subcommands (byte-identical output)."""
+    lines = graph_query.run(["--graph", str(graph_file), "find", "createUser"])
+    assert "2 node(s) match 'createUser':" in lines[0]
+
+
 def test_impact_not_bounded_by_a_fixed_depth_cap() -> None:
     """A long linear chain deeper than any hardcoded depth cap must still
     resolve to the full transitive closure."""

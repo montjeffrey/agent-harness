@@ -8,6 +8,7 @@ Usage:
     python graph_query.py impact <id>             # transitive dependents (blast radius)
     python graph_query.py file <path-fragment>    # nodes defined in matching files
     python graph_query.py community <name-frag>   # nodes in matching communities
+    python graph_query.py search <text>            # semantic search (needs [semantic] extra)
 
 Options:
     --graph PATH   explicit path to graph.json (skips auto-discovery)
@@ -16,6 +17,11 @@ By default the graph is located by walking up from the current working
 directory looking for a `graphify-out/graph.json`. Complements graphify's
 own CLI: `python -m graphify explain "X"` and `python -m graphify path "A" "B"`.
 Refresh the graph with graph_refresh.py.
+
+`search` is a ChromaDB-backed semantic query over node text and requires the
+optional `[semantic]` extra (`pip install "agent-harness[semantic]"`) plus an
+explicit index build/refresh via graph_refresh.py -- it never builds an
+index implicitly on first use.
 """
 
 from __future__ import annotations
@@ -34,7 +40,7 @@ MAX_ROWS = 60
 # Commands accepted by both the CLI (`argparse` choices) and the library-safe
 # `query()` entry point -- kept as one tuple so the two surfaces can never
 # drift apart.
-VALID_COMMANDS = ("find", "node", "callers", "callees", "impact", "file", "community")
+VALID_COMMANDS = ("find", "node", "callers", "callees", "impact", "file", "community", "search")
 
 
 class GraphIndex(NamedTuple):
@@ -288,11 +294,66 @@ def cmd_traverse(index: GraphIndex, nid: str, mode: str, depth: int) -> list[str
     return [f"{len(found)} {label} of {nid}:", *format_rows(rows)]
 
 
+def _no_semantic_index_message(index_dir: Path) -> str:
+    """Actionable SystemExit text for "there's no usable semantic index at
+    index_dir yet" -- shared by both ways `cmd_search` can discover that:
+    `index_dir` doesn't exist at all, or it exists but a prior index build
+    failed partway through and left its collection missing/unpopulated
+    (see `harness.graph_index._get_existing_collection`)."""
+    refresh = Path(__file__).resolve().parent / "graph_refresh.py"
+    return (
+        f"no semantic index found at {index_dir}.\n"
+        f'Build one first:  python "{refresh}" <repo-root>\n'
+        "(graph_refresh.py updates the semantic index automatically as "
+        "part of a normal graph refresh)."
+    )
+
+
+def cmd_search(g: dict, graph_path: Path, term: str) -> list[str]:
+    """Semantic search over node text via the optional ChromaDB-backed
+    index (see harness.graph_index). Degrades with an actionable SystemExit
+    message -- never a traceback -- when the [semantic] extra isn't
+    installed, or when the index hasn't been built yet (including a
+    partially-built index: the directory exists but its collection doesn't,
+    e.g. because a prior build failed after `index_dir.mkdir()`).
+
+    Output mirrors cmd_find(): a count header + node_line() rows (capped by
+    MAX_ROWS via format_rows), each row prefixed with a 2-decimal relevance
+    score (1 / (1 + distance) -- higher is more relevant).
+    """
+    from harness import graph_index  # lazy: only this command needs it
+
+    if not graph_index.chromadb_available():
+        raise SystemExit(
+            "chromadb is not installed -- the `search` subcommand needs the "
+            'optional [semantic] extra: pip install "agent-harness[semantic]"'
+        )
+    index_dir = graph_index.index_path_for(graph_path)
+    if not index_dir.exists():
+        raise SystemExit(_no_semantic_index_message(index_dir))
+
+    nodes = {n["id"]: n for n in g["nodes"]}
+    try:
+        results = graph_index.query_index(index_dir, term, MAX_ROWS + 1)
+    except FileNotFoundError:
+        # index_dir exists but its collection doesn't -- a prior build
+        # failed partway through. Same guidance as the missing-dir case.
+        raise SystemExit(_no_semantic_index_message(index_dir))
+    rows = []
+    for nid, distance in results:
+        node = nodes.get(nid)
+        if node is None:
+            continue
+        score = 1.0 / (1.0 + distance)
+        rows.append(f"{score:.2f}  {node_line(node)}")
+    return [f"{len(rows)} node(s) match '{term}' (semantic):", *format_rows(rows)]
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--graph", type=Path, default=None, help="explicit path to graph.json")
     parser.add_argument("command", choices=list(VALID_COMMANDS))
-    parser.add_argument("term", help="node id, label fragment, file fragment, or community fragment")
+    parser.add_argument("term", help="node id, label fragment, file fragment, community fragment, or search text")
     parser.add_argument("depth", nargs="?", type=int, default=1, help="traversal depth for callers/callees")
     return parser
 
@@ -334,6 +395,8 @@ def query(command: str, term: str, depth: int = 1, graph: Path | None = None) ->
             return cmd_file(g, term)
         if command == "community":
             return cmd_community(g, term)
+        if command == "search":
+            return cmd_search(g, graph_path, term)
         nid = resolve_id(term, index.nodes)
         if command == "node":
             return cmd_node(index, nid)
