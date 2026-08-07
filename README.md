@@ -336,6 +336,56 @@ to zero events (or a single `collector_error` record) rather than crashing
 `collect`. See `harness/collectors/*.py` for what each collector actually
 reads on-disk (module docstrings document exact discovery findings).
 
+## Memory
+
+A portable, local-first project memory: short-term working context plus
+durable knowledge, in ordinary Markdown and JSONL. Nothing here runs
+automatically, calls an AI model, or opens a network socket -- capture is
+explicit, and every entry is something you (or an agent, on your behalf)
+chose to record.
+
+```bash
+agent-harness-memory init [PATH]
+agent-harness-memory remember --type decision --summary "Chose X over Y."
+agent-harness-memory status
+
+# Source-checkout/module fallback
+python -m harness.memory init
+```
+
+Project storage is created in the repo so memory travels with the code:
+
+```text
+.agent-harness/
+  scope.md                  purpose, boundaries, exclusions, acceptance criteria
+  memory/active.md          bounded working context
+  memory/durable.md         stable project knowledge
+  memory/inbox.jsonl        proposed entries awaiting review
+  memory/archive/           immutable weekly records
+```
+
+Machine-scope memory (`~/.agent-harness/memory/`) holds the project registry
+and reusable cross-project knowledge. It is local by default and is never
+committed into a project.
+
+| Entry field | Notes |
+|---|---|
+| `id` | `mem-YYYY-MM-DD-NNN`, unique per store |
+| `type` | `decision` \| `discovery` \| `task` \| `blocker` \| `lesson` \| `relationship` |
+| `status` | `proposed` \| `accepted` \| `superseded` \| `resolved` |
+| `confidence` | `confirmed` \| `inferred` |
+| `source` | `{commit, file, project, manual}` |
+
+Two trust rules are enforced in the store, so every writer inherits them: an
+**inferred** entry can never be recorded as accepted (review is what promotes
+it), and an **accepted** entry needs real evidence -- a commit, a file, or an
+explicit `--manual` attestation. The project id attached to every entry is
+attribution, not evidence, and does not satisfy that rule. Anything that
+looks like a credential is rejected before it can reach an inbox.
+
+Exit codes: `0` success, `1` nothing to do (e.g. `status` before `init`),
+`2` input rejected.
+
 ## Security model
 
 The only external command this toolkit ever executes on your behalf is the

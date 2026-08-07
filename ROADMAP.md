@@ -27,6 +27,21 @@
 - Keep collectors best-effort and non-blocking: a missing or malformed
   session log must not break the agent's actual work.
 
+## Portable hierarchical memory
+
+Design: `docs/superpowers/specs/2026-07-22-portable-hierarchical-memory-design.md`.
+
+- Shipped: storage model and schema-1 entry contract, project + machine
+  scopes, stable entry ids, credential rejection, and the
+  `agent-harness-memory init | remember | status` command surface.
+- Remaining: `review` (accept/reject/supersede proposals), `compact` (weekly
+  deterministic archive + durable promotion), `context` (token-budgeted
+  packet for any agent), scope-drift detection, cross-project relationships,
+  and the optional Obsidian visualization add-on.
+- The command surface is exposed as `agent-harness-memory <subcommand>` to
+  match this project's existing console-script convention, rather than the
+  bare `harness <subcommand>` used in the design prose.
+
 ## Phase 3 -- Question router
 
 - CLI that takes a prompt/task description and classifies it (e.g. quick
