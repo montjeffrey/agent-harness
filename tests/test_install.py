@@ -386,7 +386,7 @@ def test_mcp_write_rolls_back_on_failure(tmp_path: Path, monkeypatch) -> None:
     def _boom(*_args, **_kwargs):
         raise RuntimeError("simulated failure during mcp registration")
 
-    monkeypatch.setattr(install, "install_mcp_registration", _boom)
+    monkeypatch.setattr(install_cli, "install_mcp_registration", _boom)
 
     with pytest.raises(RuntimeError, match="simulated failure during mcp registration"):
         install.run_install(project, ["claude", "codex", "gemini"], install_hooks_flag=False, install_mcp_flag=True)
