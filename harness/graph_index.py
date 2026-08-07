@@ -9,7 +9,7 @@ functions that actually need it (`_default_client`, via `client_factory`).
 Install the optional extra to use this module for anything beyond
 `chromadb_available()`/`index_path_for()`:
 
-    pip install "agent-harness[semantic]"
+    pip install "agent-harness-kit[semantic]"
 
 The index lives at `graphify-out/semantic-index/` (see
 `harness.graph_location.INDEX_RELATIVE_PATH`), a sibling of graph.json

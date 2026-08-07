@@ -156,7 +156,7 @@ def check_mcp() -> CheckResult:
         return CheckResult("PASS", "mcp sdk", "python module importable -- MCP server available")
     return CheckResult(
         "WARN", "mcp sdk",
-        "module not importable -- MCP tool server unavailable (pip install agent-harness[mcp])",
+        "module not importable -- MCP tool server unavailable (pip install agent-harness-kit[mcp])",
     )
 
 
@@ -226,7 +226,7 @@ def check_semantic(project_dir: Path | None = None) -> CheckResult:
         return CheckResult(
             "WARN", "semantic search",
             "chromadb not importable -- the `search` subcommand is unavailable; "
-            'pip install "agent-harness[semantic]" to enable it',
+            'pip install "agent-harness-kit[semantic]" to enable it',
         )
     if project_dir is None:
         return CheckResult("PASS", "semantic search", "chromadb importable")

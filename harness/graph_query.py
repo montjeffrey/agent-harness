@@ -19,7 +19,7 @@ own CLI: `python -m graphify explain "X"` and `python -m graphify path "A" "B"`.
 Refresh the graph with graph_refresh.py.
 
 `search` is a ChromaDB-backed semantic query over node text and requires the
-optional `[semantic]` extra (`pip install "agent-harness[semantic]"`) plus an
+optional `[semantic]` extra (`pip install "agent-harness-kit[semantic]"`) plus an
 explicit index build/refresh via graph_refresh.py -- it never builds an
 index implicitly on first use.
 """
@@ -326,7 +326,7 @@ def cmd_search(g: dict, graph_path: Path, term: str) -> list[str]:
     if not graph_index.chromadb_available():
         raise SystemExit(
             "chromadb is not installed -- the `search` subcommand needs the "
-            'optional [semantic] extra: pip install "agent-harness[semantic]"'
+            'optional [semantic] extra: pip install "agent-harness-kit[semantic]"'
         )
     index_dir = graph_index.index_path_for(graph_path)
     if not index_dir.exists():

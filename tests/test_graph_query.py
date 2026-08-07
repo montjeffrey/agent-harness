@@ -350,7 +350,7 @@ def test_search_without_chromadb_exits_nonzero_with_actionable_message(
     graph_file: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """When chromadb isn't installed, `search` must fail fast with a clear
-    `pip install "agent-harness[semantic]"` message and exit 1 -- never a
+    `pip install "agent-harness-kit[semantic]"` message and exit 1 -- never a
     traceback, and it must never attempt to build/query an index."""
     from harness import graph_index
 
@@ -358,7 +358,7 @@ def test_search_without_chromadb_exits_nonzero_with_actionable_message(
     exit_code = graph_query.main(["--graph", str(graph_file), "search", "welcome email"])
     assert exit_code == 1
     captured = capsys.readouterr()
-    assert 'pip install "agent-harness[semantic]"' in captured.err
+    assert 'pip install "agent-harness-kit[semantic]"' in captured.err
 
 
 def test_search_with_chromadb_but_no_index_points_at_graph_refresh(

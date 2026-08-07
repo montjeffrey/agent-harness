@@ -143,7 +143,7 @@ def test_check_mcp_warns_when_sdk_missing(monkeypatch) -> None:
     monkeypatch.setattr(doctor.importlib.util, "find_spec", lambda name: None)
     result = doctor.check_mcp()
     assert result.level == "WARN"
-    assert "agent-harness[mcp]" in result.detail
+    assert "agent-harness-kit[mcp]" in result.detail
 
 
 def test_check_mcp_registered_in_run_checks() -> None:
@@ -206,7 +206,7 @@ def test_check_semantic_warns_when_chromadb_unavailable(monkeypatch) -> None:
     monkeypatch.setattr(graph_index, "chromadb_available", lambda: False)
     result = doctor.check_semantic()
     assert result.level == "WARN"
-    assert "agent-harness[semantic]" in result.detail
+    assert "agent-harness-kit[semantic]" in result.detail
 
 
 def test_check_semantic_passes_when_available_no_project_dir(monkeypatch) -> None:

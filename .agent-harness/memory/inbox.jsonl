@@ -1,0 +1,1 @@
+{"type": "decision", "scope": "project", "summary": "Enrolled agent-harness in its own memory system.", "confidence": "inferred", "status": "proposed", "tags": ["setup"], "source": {"project": "agent-harness-5409ce1d"}, "schema": 1, "ts": "2026-08-07T18:41:06Z", "id": "mem-2026-08-07-001"}

@@ -12,3 +12,11 @@ dist/
 build/
 graphify-out/
 private-plans/
+
+# Local git worktrees (including agent-spawned ones)
+.worktrees/
+.claude/worktrees/
+
+# Nested Obsidian vault state -- the memory design keeps Obsidian optional
+# and explicitly out of version control.
+/agent-harness/

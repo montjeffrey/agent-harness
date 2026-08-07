@@ -28,29 +28,72 @@ command; nothing here is specific to any one company, user, or codebase.
 
 ## Quickstart
 
-Install the CLI, then point it at any project. [pipx](https://pypa.github.io/pipx/)
-keeps it in its own isolated environment -- no local clone needed:
+Two steps: set up the machine once, then enroll each project you work in.
 
-```bash
-pipx install agent-harness
-agent-harness-install /path/to/your/project --hooks
+> [!IMPORTANT]
+> **Do not run `pipx install agent-harness`.** The name `agent-harness` on
+> PyPI belongs to an unrelated project, so that command installs a stranger's
+> package. This project is not published yet; install it from a clone until
+> it ships under a name it owns.
+
+**Once per machine** — clone, then run the bootstrapper. It checks your
+Python, installs [pipx](https://pypa.github.io/pipx/) if missing, and
+installs this checkout as an isolated pipx app so the `agent-harness-*`
+commands work from any directory:
+
+```powershell
+.\bootstrap.ps1
 ```
 
-The installer runs the preflight **doctor** automatically first (which
-tells you exactly what is missing) and installs only if nothing FAILs.
-Useful flags:
+Pass `-NoSemantic` to skip chromadb + onnxruntime (a few hundred MB);
+everything still works, with deterministic context selection. On macOS or
+Linux, do the same by hand:
 
 ```bash
-agent-harness-install /path/to/your/project --check       # preflight report only, installs nothing
-agent-harness-install /path/to/your/project --skip-checks  # install without preflight
+python -m pip install --user pipx && python -m pipx ensurepath
+python -m pipx install --force "/path/to/agent-harness-kit[semantic]"
 ```
 
-`--agents claude,codex,gemini` (default: all three) limits which pointer
-files get written; see `agent-harness-install --help` for the full list.
+Bootstrap registers the SessionStart context hook and the MCP server at
+**user** scope, so they apply to every project you open. That is deliberate:
+one copy of the configuration instead of one per project, drifting apart.
 
-`pip install agent-harness` works too if you'd rather manage the venv
-yourself; `pipx` is just the recommended path since this is a CLI tool, not
-a library you import.
+**Once per project** — one idempotent command, re-runnable any time:
+
+```bash
+agent-harness-enroll /path/to/your/project
+```
+
+That creates `.agent-harness/` (memory), builds the code graph if graphify
+is available, and builds the semantic index. It **writes no instruction
+files** — no AGENTS.md, no CLAUDE.md, no project-local settings. Memory is
+set up first and independently, so a project without a graph still gets
+working memory.
+
+**Or never run it at all.** Set these two once and any project under your
+workspace gets its memory created the first time you open a session in it:
+
+```powershell
+setx AGENT_HARNESS_AUTO_ENROLL 1
+setx AGENT_HARNESS_WORKSPACE "C:\path\to\your\workspace"
+```
+
+Both are required. The flag is the intent; the workspace is the blast
+radius. Without the workspace check, opening a repo you cloned to read for
+five minutes would scaffold committed files into it.
+
+If you want a project-local instruction block anyway, that is still its own
+command:
+
+```bash
+agent-harness-install /path/to/your/project --hooks --mcp
+agent-harness-memory init /path/to/your/project
+```
+
+The installer runs the preflight **doctor** first (which tells you exactly
+what is missing) and installs only if nothing FAILs. `--agents
+claude,codex,gemini` (default: all three) limits which pointer files get
+written; see `agent-harness-install --help` for the full list.
 
 ### Install from source
 
@@ -153,7 +196,7 @@ matching the other subcommands do. It's an opt-in extra so the core harness
 stays stdlib-only:
 
 ```bash
-pip install "agent-harness[semantic]"
+pip install "agent-harness-kit[semantic]"
 python harness/graph_refresh.py <repo-root>       # builds/updates the semantic index too
 python harness/graph_query.py search "sends a welcome email"
 ```
@@ -167,7 +210,7 @@ Notes:
   semantic index in sync as a best-effort last step (it never fails the
   refresh if the index update itself fails).
 - Without the extra installed, `search` fails fast with an actionable
-  `pip install "agent-harness[semantic]"` message instead of a traceback.
+  `pip install "agent-harness-kit[semantic]"` message instead of a traceback.
 - Embedding uses Chroma's default local model (ONNX all-MiniLM-L6-v2) --
   fully local, no API key required. The first time it runs, Chroma downloads
   that model (~80MB) to a local cache; after that, embedding is offline.
@@ -293,7 +336,7 @@ short pointer so the harness content lives in one place.
   `pip install -e ".[dev]"`)
 - [graphify](https://pypi.org/project/graphify/) installed separately and
   available as `python -m graphify ...` if you want to build/refresh graphs
-- `chromadb>=0.5` (`pip install "agent-harness[semantic]"`) only if you want
+- `chromadb>=0.5` (`pip install "agent-harness-kit[semantic]"`) only if you want
   the `search` subcommand -- everything else works without it
 
 ## Tests
@@ -349,6 +392,15 @@ agent-harness-memory init [PATH]
 agent-harness-memory remember --type decision --summary "Chose X over Y."
 agent-harness-memory status
 
+agent-harness-memory review list                  # what is awaiting review
+agent-harness-memory review accept mem-2026-08-07-001
+agent-harness-memory review resolve mem-2026-08-07-002 --commit a5f6f70
+agent-harness-memory review supersede mem-2026-08-07-001 --summary "Chose Z."
+
+agent-harness-memory context                      # budgeted packet, Markdown
+agent-harness-memory context --json --query "rate limiting"
+agent-harness-memory index                        # build the semantic index
+
 # Source-checkout/module fallback
 python -m harness.memory init
 ```
@@ -372,7 +424,7 @@ committed into a project.
 |---|---|
 | `id` | `mem-YYYY-MM-DD-NNN`, unique per store |
 | `type` | `decision` \| `discovery` \| `task` \| `blocker` \| `lesson` \| `relationship` |
-| `status` | `proposed` \| `accepted` \| `superseded` \| `resolved` |
+| `status` | `proposed` \| `accepted` \| `rejected` \| `superseded` \| `resolved` |
 | `confidence` | `confirmed` \| `inferred` |
 | `source` | `{commit, file, project, manual}` |
 
@@ -382,6 +434,84 @@ it), and an **accepted** entry needs real evidence -- a commit, a file, or an
 explicit `--manual` attestation. The project id attached to every entry is
 attribution, not evidence, and does not satisfy that rule. Anything that
 looks like a credential is rejected before it can reach an inbox.
+
+### Approving work in-session
+
+You do not have to open a file to approve a plan. An agent presents it in
+chat; you agree (or object) in chat; the agent calls `memory_confirm`, which
+records the plan as an accepted `decision` plus one tracked `task` per step
+— and stores **your actual words** as `source.confirmation`. That text is
+the audit trail: it is what makes the entry accepted, and what you can read
+back later to disagree with.
+
+```bash
+agent-harness-memory review list         # what an agent proposed on its own
+```
+
+Tasks are closed with evidence (`memory_task_done`, or `review resolve`),
+never silently. `memory_tasks` lists open work in priority order along with
+**bottlenecks** — topics that work keeps piling up on, scored by how many
+items are open, how many are blocking, and how long they have sat. Those
+surface automatically in the context packet's *Priorities and bottlenecks*
+section, so the next session opens already knowing what keeps stalling.
+
+The honest caveat: an agent that called `memory_confirm` without you having
+agreed would be recording an approval that never happened, and nothing can
+detect that mechanically. Storing your words verbatim is what makes it
+reviewable after the fact.
+
+`review` remains the path from `proposed` to `accepted` for anything an
+agent recorded on its own initiative via `memory_remember`. Accepting stamps
+`confidence: confirmed` and, with no commit or file supplied, records
+`source.manual` as your attestation. `supersede` never rewrites an accepted
+entry: the original is kept with a `superseded_by` pointer and a replacement
+is appended, so what was believed and when survives. Writes splice one line
+and replace the file atomically, carrying any unparseable line across
+untouched.
+
+### Context packets and selection
+
+`context` emits one budget-bounded packet -- the same contract for every
+agent -- in Markdown or JSON:
+
+| Section | Contents |
+|---|---|
+| `scope` | purpose, boundaries, exclusions, acceptance criteria |
+| `active` | current phase, plus unresolved tasks and blockers |
+| `project_durable` | live project-scope entries, relevance-ranked |
+| `machine_durable` | live machine-scope entries |
+| `relationships` | accepted cross-project links |
+| warnings | staleness, unreviewed proposals, untouched scope |
+
+Each section has its own character budget and the packet has a hard ceiling
+(`--max-chars`, default 8000). Entries are included whole or omitted whole
+with a reported count -- a record is never cut in half, because a truncated
+record reads to a model as a complete one. `--query` sets what to select for
+and defaults to the active objective in `scope.md`; `--id` pins specific
+entries to the front of their section.
+
+**Selection is ChromaDB-backed by default.** `--strategy auto` (the default)
+uses semantic ranking whenever `chromadb` is installed *and* an index exists,
+and otherwise falls back to deterministic tag/keyword/recency ranking with a
+note printed on the packet, so a fallback is never silent. Pass
+`--strategy semantic` to make an unavailable index a hard error (exit 1)
+rather than a fallback, and `--strategy deterministic` to force the baseline
+-- that pairing is what makes the two comparable on your own models.
+
+```bash
+pip install "agent-harness-kit[semantic]"
+agent-harness-memory index
+```
+
+The index is built only by that explicit command, never by `context`:
+Chroma's first embedding call downloads an ~80MB local model, and the agent
+hot path must stay free of network access. (Running `index` first is what
+makes that true in practice -- it warms the model cache, so the later
+`context` query embedding is purely local.) It lives machine-side under
+`~/.agent-harness/memory/index/<project-id>/` rather than in the repo, since
+project memory is committed and a binary index should not be. Embedding is
+local (all-MiniLM-L6-v2, ONNX) -- no API key, and summaries never leave the
+machine. Without the extra, everything above still works deterministically.
 
 Exit codes: `0` success, `1` nothing to do (e.g. `status` before `init`),
 `2` input rejected.

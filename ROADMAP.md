@@ -34,10 +34,61 @@ Design: `docs/superpowers/specs/2026-07-22-portable-hierarchical-memory-design.m
 - Shipped: storage model and schema-1 entry contract, project + machine
   scopes, stable entry ids, credential rejection, and the
   `agent-harness-memory init | remember | status` command surface.
-- Remaining: `review` (accept/reject/supersede proposals), `compact` (weekly
-  deterministic archive + durable promotion), `context` (token-budgeted
-  packet for any agent), scope-drift detection, cross-project relationships,
-  and the optional Obsidian visualization add-on.
+- Shipped: `review` (accept/reject/resolve/supersede, atomic line-level
+  splice, resolution evidence, supersession history) and `context` (the
+  token-budgeted packet contract -- fixed section order, per-section and
+  whole-packet character budgets, unit-atomic omission with counts, Markdown
+  and JSON).
+- Shipped: ChromaDB-backed semantic selection as the **default** strategy.
+  `context --strategy auto` prefers it and falls back to deterministic
+  ranking with a visible note when the `semantic` extra or the index is
+  absent; `--strategy semantic|deterministic` pins one for benchmarking. The
+  index is built by the explicit `index` command only and lives machine-side
+  at `~/.agent-harness/memory/index/<project-id>/`.
+- Shipped: automatic surfaces. A SessionStart hook
+  (`hooks/claude/memory_context_hook.py`) injects the packet at session
+  start -- deterministic and small-budget by design, because each hook run
+  is a fresh process and `auto` would import chromadb every time
+  (`AGENT_HARNESS_HOOK_STRATEGY=auto` opts in). Three MCP tools
+  (`memory_context`, `memory_status`, `memory_remember`) expose memory to
+  agents; the long-lived server is where semantic selection belongs. There
+  is deliberately no MCP review/accept tool, and `memory_remember` hardcodes
+  `proposed`/`inferred` -- an agent must not be able to promote its own
+  guesses.
+- Shipped: machine-scope memory has its own shared index rather than being
+  copied into every project's, and `bootstrap.ps1` +
+  `agent-harness-enroll` reduce setup to one command per machine and one
+  per project.
+- Remaining: `compact` (weekly deterministic archive + durable promotion),
+  scope-drift detection, cross-project relationship proposals, and the
+  optional Obsidian visualization add-on.
+- Shipped: in-session approval. `memory_confirm` records a plan the human
+  approved in chat as an accepted decision plus one tracked `task` per step,
+  storing their actual words as `source.confirmation` -- the audit trail
+  that replaces a blueprint file and a checkbox. `memory_task_done` closes a
+  task with evidence, and `memory_tasks` lists open work in priority order.
+  Bottlenecks are deterministic tag clustering over open work (count,
+  blocker weight, age past a staleness threshold) and surface in the context
+  packet's `priorities` section, so a session opens knowing what keeps
+  stalling. No new store or schema version -- these are ordinary schema-1
+  entries, so they index, review, supersede, and archive like everything
+  else.
+- Shipped: auto-enrollment. The SessionStart hook creates `.agent-harness/`
+  for a project that has none, gated on BOTH `AGENT_HARNESS_AUTO_ENROLL` and
+  the project living under `AGENT_HARNESS_WORKSPACE`. Memory init only --
+  building a graph or index there would put a multi-second job in front of
+  every session start.
+- Shipped: the distribution is `agent-harness-kit` (the plain
+  `agent-harness` name on PyPI belongs to an unrelated project). Console
+  scripts and the `harness` import package are unchanged. `bootstrap.ps1`
+  installs from the local checkout and registers the SessionStart hook at
+  *user* scope, which is what lets `agent-harness-enroll` be memory + graph
+  + index only and write no instruction files.
+- Note: the design doc lists a vector database as a non-goal "for the first
+  implementation". That still holds for the *core* package -- `chromadb`
+  stays an optional extra and every command works without it -- but semantic
+  selection is now the preferred path when available, rather than an
+  afterthought behind a flag.
 - The command surface is exposed as `agent-harness-memory <subcommand>` to
   match this project's existing console-script convention, rather than the
   bare `harness <subcommand>` used in the design prose.

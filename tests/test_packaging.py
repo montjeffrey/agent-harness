@@ -30,6 +30,7 @@ CONSOLE_SCRIPTS = {
     "agent-harness-install": "harness.install_cli:main",
     "agent-harness-telemetry": "harness.telemetry:main",
     "agent-harness-memory": "harness.memory:main",
+    "agent-harness-enroll": "harness.enroll:main",
 }
 
 
