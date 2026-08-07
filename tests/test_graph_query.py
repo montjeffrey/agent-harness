@@ -375,6 +375,32 @@ def test_search_with_chromadb_but_no_index_points_at_graph_refresh(
     assert "graph_refresh.py" in captured.err
 
 
+def test_search_with_partially_built_index_points_at_graph_refresh(
+    graph_file: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """index_dir exists (so the missing-directory check doesn't fire) but a
+    prior update_index run never got as far as populating the collection --
+    query_index surfaces that as FileNotFoundError (see
+    test_graph_index.test_query_index_raises_file_not_found_when_collection_missing),
+    and search must translate it into the same actionable message as the
+    missing-index-directory case, not a zero-results answer or a traceback."""
+    from harness import graph_index
+
+    monkeypatch.setattr(graph_index, "chromadb_available", lambda: True)
+    index_dir = graph_index.index_path_for(graph_file)
+    index_dir.mkdir(parents=True)
+
+    def fake_query_index(_index_dir, _text, _limit, client_factory=None, embedding_function=None):
+        raise FileNotFoundError("no collection named 'graph_nodes' in this semantic index")
+
+    monkeypatch.setattr(graph_index, "query_index", fake_query_index)
+    exit_code = graph_query.main(["--graph", str(graph_file), "search", "welcome email"])
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert "graph_refresh.py" in captured.err
+    assert "no semantic index found" in captured.err
+
+
 def test_search_returns_scored_rows_via_fake_index(
     graph_file: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

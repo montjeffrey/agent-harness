@@ -294,11 +294,28 @@ def cmd_traverse(index: GraphIndex, nid: str, mode: str, depth: int) -> list[str
     return [f"{len(found)} {label} of {nid}:", *format_rows(rows)]
 
 
+def _no_semantic_index_message(index_dir: Path) -> str:
+    """Actionable SystemExit text for "there's no usable semantic index at
+    index_dir yet" -- shared by both ways `cmd_search` can discover that:
+    `index_dir` doesn't exist at all, or it exists but a prior index build
+    failed partway through and left its collection missing/unpopulated
+    (see `harness.graph_index._get_existing_collection`)."""
+    refresh = Path(__file__).resolve().parent / "graph_refresh.py"
+    return (
+        f"no semantic index found at {index_dir}.\n"
+        f'Build one first:  python "{refresh}" <repo-root>\n'
+        "(graph_refresh.py updates the semantic index automatically as "
+        "part of a normal graph refresh)."
+    )
+
+
 def cmd_search(g: dict, graph_path: Path, term: str) -> list[str]:
     """Semantic search over node text via the optional ChromaDB-backed
     index (see harness.graph_index). Degrades with an actionable SystemExit
     message -- never a traceback -- when the [semantic] extra isn't
-    installed, or when the index hasn't been built yet.
+    installed, or when the index hasn't been built yet (including a
+    partially-built index: the directory exists but its collection doesn't,
+    e.g. because a prior build failed after `index_dir.mkdir()`).
 
     Output mirrors cmd_find(): a count header + node_line() rows (capped by
     MAX_ROWS via format_rows), each row prefixed with a 2-decimal relevance
@@ -313,16 +330,15 @@ def cmd_search(g: dict, graph_path: Path, term: str) -> list[str]:
         )
     index_dir = graph_index.index_path_for(graph_path)
     if not index_dir.exists():
-        refresh = Path(__file__).resolve().parent / "graph_refresh.py"
-        raise SystemExit(
-            f"no semantic index found at {index_dir}.\n"
-            f'Build one first:  python "{refresh}" <repo-root>\n'
-            "(graph_refresh.py updates the semantic index automatically as "
-            "part of a normal graph refresh)."
-        )
+        raise SystemExit(_no_semantic_index_message(index_dir))
 
     nodes = {n["id"]: n for n in g["nodes"]}
-    results = graph_index.query_index(index_dir, term, MAX_ROWS + 1)
+    try:
+        results = graph_index.query_index(index_dir, term, MAX_ROWS + 1)
+    except FileNotFoundError:
+        # index_dir exists but its collection doesn't -- a prior build
+        # failed partway through. Same guidance as the missing-dir case.
+        raise SystemExit(_no_semantic_index_message(index_dir))
     rows = []
     for nid, distance in results:
         node = nodes.get(nid)

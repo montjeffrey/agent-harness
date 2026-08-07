@@ -131,7 +131,12 @@ def index_is_stale(index_dir: Path, graph_path: Path) -> bool:
 def _default_client(index_dir: Path) -> Any:
     import chromadb  # local import -- see module docstring; never at module scope
 
-    return chromadb.PersistentClient(path=str(index_dir))
+    # anonymized_telemetry defaults to True in chromadb's own Settings; leaving
+    # it on would contradict the "no telemetry leaves the machine" promise in
+    # README.md (chromadb<1.x ships this as a real PostHog capture call that
+    # this flag disables outright -- see chromadb.telemetry.product.posthog).
+    settings = chromadb.config.Settings(anonymized_telemetry=False)
+    return chromadb.PersistentClient(path=str(index_dir), settings=settings)
 
 
 def _get_collection(client: Any, embedding_function: Any = None) -> Any:
@@ -139,6 +144,48 @@ def _get_collection(client: Any, embedding_function: Any = None) -> Any:
     if embedding_function is not None:
         kwargs["embedding_function"] = embedding_function
     return client.get_or_create_collection(name=COLLECTION_NAME, **kwargs)
+
+
+def _max_batch_size(client: Any) -> int | None:
+    """The chromadb-enforced max add()/upsert() batch size for `client`
+    (`client.get_max_batch_size()`), or None if the client doesn't expose
+    one -- e.g. a minimal test double. Callers should treat None as "no
+    known limit, don't chunk" rather than raising."""
+    getter = getattr(client, "get_max_batch_size", None)
+    if getter is None:
+        return None
+    try:
+        return getter()
+    except Exception:
+        return None
+
+
+def _add_in_batches(
+    collection: Any,
+    method: str,
+    ids: list[str],
+    docs: list[str],
+    metas: list[dict],
+    batch_size: int | None,
+) -> None:
+    """Call `collection.<method>(ids=..., documents=..., metadatas=...)`
+    once per chunk of at most `batch_size` items.
+
+    Chroma enforces a max batch size per add()/upsert() call (environment-
+    dependent) and raises `chromadb.errors.InvalidArgumentError` when it's
+    exceeded -- without chunking, a first build of a large repo (or a large
+    changed-node set) can blow past it, and `update_semantic_index`'s caller
+    treats that as non-fatal, silently leaving the index empty/stale.
+    `batch_size` of None/<=0 means "no limit known" -- everything goes in
+    one call, matching the pre-chunking behavior.
+    """
+    if not ids:
+        return
+    op = getattr(collection, method)
+    size = batch_size if batch_size and batch_size > 0 else len(ids)
+    for start in range(0, len(ids), size):
+        end = start + size
+        op(ids=ids[start:end], documents=docs[start:end], metadatas=metas[start:end])
 
 
 def update_index(
@@ -199,10 +246,9 @@ def update_index(
         else:
             unchanged += 1
 
-    if add_ids:
-        collection.add(ids=add_ids, documents=add_docs, metadatas=add_metas)
-    if update_ids:
-        collection.upsert(ids=update_ids, documents=update_docs, metadatas=update_metas)
+    max_batch_size = _max_batch_size(client)
+    _add_in_batches(collection, "add", add_ids, add_docs, add_metas, max_batch_size)
+    _add_in_batches(collection, "upsert", update_ids, update_docs, update_metas, max_batch_size)
 
     return IndexStats(
         added=len(add_ids),
@@ -210,6 +256,44 @@ def update_index(
         deleted=len(to_delete),
         unchanged=unchanged,
     )
+
+
+def _get_existing_collection(client: Any, embedding_function: Any = None) -> Any:
+    """Look up the semantic index's collection for the read-only query path.
+
+    Deliberately uses `client.get_collection` -- NOT `get_or_create_collection`
+    (which `_get_collection`/`update_index` use on the write path, where
+    fabricating a fresh collection on first build is the whole point) --
+    so that a missing collection raises instead of silently handing back a
+    brand-new, empty one. Without this, if a prior `update_index` run made
+    it past `index_dir.mkdir()` but crashed before the collection was
+    populated, `query_index` would look successful while always returning
+    zero results, instead of surfacing the same "no semantic index found,
+    build one first" guidance `graph_query.cmd_search` already gives when
+    `index_dir` itself doesn't exist.
+
+    Raises `FileNotFoundError` when the collection doesn't exist, wrapping
+    whatever `client.get_collection` raised for that -- real chromadb raises
+    `InvalidCollectionException` pre-1.0 or `NotFoundError` from 1.0+ (both
+    subclasses of `chromadb.errors.ChromaError`; verified directly against
+    chromadb 0.5.23 and 1.5.9, the ends of the `chromadb>=0.5` range this
+    project declares). The original exception is chained (`from exc`) so
+    anything unexpected is still visible, not silently swallowed; this
+    module is never allowed to import chromadb at module scope (see module
+    docstring), so callers here can't `except chromadb.errors.ChromaError`
+    directly, and a `client_factory` test double naturally won't raise a
+    real chromadb exception type anyway -- translating unconditionally is
+    what makes this work the same whether or not chromadb is installed.
+    """
+    kwargs: dict[str, Any] = {}
+    if embedding_function is not None:
+        kwargs["embedding_function"] = embedding_function
+    try:
+        return client.get_collection(name=COLLECTION_NAME, **kwargs)
+    except Exception as exc:
+        raise FileNotFoundError(
+            f"no collection named '{COLLECTION_NAME}' in this semantic index"
+        ) from exc
 
 
 def query_index(
@@ -224,10 +308,14 @@ def query_index(
     Returns `(node_id, distance)` pairs, closest first. Distance is
     whatever Chroma's configured similarity space returns (squared L2 for
     the default local embedding function) -- lower means more similar.
+
+    Raises `FileNotFoundError` if `index_dir` exists but the index's
+    collection doesn't (e.g. a prior `update_index` build failed partway
+    through) -- see `_get_existing_collection`.
     """
     factory = client_factory or _default_client
     client = factory(index_dir)
-    collection = _get_collection(client, embedding_function)
+    collection = _get_existing_collection(client, embedding_function)
     result = collection.query(query_texts=[text], n_results=limit)
     ids = (result.get("ids") or [[]])[0]
     distances = (result.get("distances") or [[]])[0]
