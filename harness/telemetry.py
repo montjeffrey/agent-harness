@@ -15,11 +15,20 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
-from harness import telemetry_store
-from harness.collectors import run_collector
+HARNESS_ROOT = Path(__file__).resolve().parent.parent
+
+try:
+    from harness import telemetry_store
+    from harness.collectors import run_collector
+except ImportError:  # running as `python harness/telemetry.py`, not `-m harness.telemetry`
+    sys.path.insert(0, str(HARNESS_ROOT))
+    from harness import telemetry_store
+    from harness.collectors import run_collector
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -55,15 +64,79 @@ def _parse_since(value: str | None) -> datetime | None:
         raise SystemExit(f"--since is not a valid ISO 8601 timestamp: {value!r}") from None
 
 
+def _collect_state_path() -> Path:
+    return telemetry_store.telemetry_dir() / ".collect_state.json"
+
+
+def _load_collect_state() -> dict[str, str]:
+    """Return the persisted per-agent watermark map (agent -> ISO 8601 ts).
+
+    Missing file, unreadable file, or malformed JSON all degrade to "no
+    watermarks yet" rather than raising -- the same tolerant-reader posture
+    as the rest of this module.
+    """
+    try:
+        text = _collect_state_path().read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_collect_state(state: dict[str, str]) -> None:
+    path = _collect_state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _record_ts(rec: dict) -> datetime | None:
+    ts = rec.get("ts")
+    if not isinstance(ts, str):
+        return None
+    try:
+        return telemetry_store.parse_ts(ts)
+    except ValueError:
+        return None
+
+
 def cmd_collect(args: argparse.Namespace) -> int:
     agents = [args.agent] if args.agent else list(telemetry_store.AGENTS)
+    state = _load_collect_state()
     total_written = 0
     for agent in agents:
-        records = run_collector(agent)
+        watermark_str = state.get(agent)
+        since = telemetry_store.parse_ts(watermark_str) if watermark_str else None
+
+        records = run_collector(agent, since)
         errors = sum(1 for r in records if r.get("event") == "collector_error")
-        written = telemetry_store.append_events(records) if records else 0
+
+        # Collectors filter inclusively (ts >= since), so the previously-seen
+        # boundary record comes back too -- drop anything at or before the
+        # watermark so a second run never re-appends already-stored events.
+        if since is not None:
+            new_records = [
+                r for r in records
+                if (rts := _record_ts(r)) is None or rts > since
+            ]
+        else:
+            new_records = records
+
+        written = telemetry_store.append_events(new_records) if new_records else 0
         total_written += written
+
+        latest = since
+        for r in new_records:
+            rts = _record_ts(r)
+            if rts is not None and (latest is None or rts > latest):
+                latest = rts
+        if latest is not None:
+            state[agent] = telemetry_store.format_ts(latest)
+
         print(f"{agent}: collected {len(records)} record(s), {errors} error(s), wrote {written}")
+    _save_collect_state(state)
     print(f"total written: {total_written}")
     return 0
 

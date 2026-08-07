@@ -184,17 +184,17 @@ def _collect_from_file(session_file: Path, since: datetime | None) -> list[dict]
                     "source": str(session_file),
                 }
                 input_tokens = usage.get("input_tokens")
-                cached = usage.get("cached_input_tokens")
-                total_input = 0
-                found_any = False
                 if isinstance(input_tokens, (int, float)):
-                    total_input += input_tokens
-                    found_any = True
+                    record["input_tokens"] = int(input_tokens)
+                cached = usage.get("cached_input_tokens")
                 if isinstance(cached, (int, float)):
-                    total_input += cached
-                    found_any = True
-                if found_any:
-                    record["input_tokens"] = int(total_input)
+                    # Codex's `input_tokens` already includes this cached
+                    # subset (see the discovery notes above -- 15984 + 93 =
+                    # 16077 only reconciles that way), so it is never added
+                    # into input_tokens here. Recorded separately as
+                    # informational-only; telemetry_store preserves unknown
+                    # extra fields.
+                    record["cached_input_tokens"] = int(cached)
                 output_tokens = usage.get("output_tokens")
                 if isinstance(output_tokens, (int, float)):
                     record["output_tokens"] = int(output_tokens)

@@ -52,6 +52,37 @@ def test_collect_single_agent_writes_events(monkeypatch: pytest.MonkeyPatch, cap
     assert rec["input_tokens"] == 3
 
 
+def test_collect_persists_watermark_and_skips_duplicates_on_second_run(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    all_events = [
+        {"agent": "codex", "event": "usage", "ts": "2026-08-01T00:00:00Z", "input_tokens": 1},
+        {"agent": "codex", "event": "usage", "ts": "2026-08-02T00:00:00Z", "input_tokens": 2},
+    ]
+
+    def fake_collect(since):
+        # Mirrors the real collector contract: filters inclusively (ts >=
+        # since) when a watermark is supplied, same full history otherwise.
+        if since is None:
+            return list(all_events)
+        return [r for r in all_events if telemetry_store.parse_ts(r["ts"]) >= since]
+
+    _install_fake_collector(monkeypatch, "codex", fake_collect)
+
+    rc1 = telemetry.main(["collect", "--agent", "codex"])
+    assert rc1 == 0
+    assert "total written: 2" in capsys.readouterr().out
+
+    # Second run with the exact same underlying collector data must not
+    # re-append anything it already wrote.
+    rc2 = telemetry.main(["collect", "--agent", "codex"])
+    assert rc2 == 0
+    assert "total written: 0" in capsys.readouterr().out
+
+    records = list(telemetry_store.iter_events())
+    assert len(records) == 2
+
+
 def test_collect_all_agents_still_exits_zero_when_all_fail(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
     def boom(since):
         raise RuntimeError("nope")

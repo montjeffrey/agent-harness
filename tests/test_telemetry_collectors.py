@@ -167,7 +167,10 @@ def test_codex_collect_from_synthetic_log(fake_home: Path) -> None:
     events = {r["event"] for r in records}
     assert events == {"session_start", "usage", "rate_limit"}
     usage = next(r for r in records if r["event"] == "usage")
-    assert usage["input_tokens"] == 120
+    # input_tokens already includes the cached subset upstream -- must not
+    # be summed with cached_input_tokens (that would double count it).
+    assert usage["input_tokens"] == 100
+    assert usage["cached_input_tokens"] == 20
     assert usage["output_tokens"] == 30
     rate = next(r for r in records if r["event"] == "rate_limit")
     assert rate["limit_remaining"] == 79.0
