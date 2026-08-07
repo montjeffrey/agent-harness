@@ -7,10 +7,10 @@
 prune private-plans
 prune .github
 prune .git
-exclude install.py
 exclude setup.sh
 exclude setup.ps1
 exclude ROADMAP.md
+# CHANGELOG.md intentionally ships in the sdist -- do not exclude it.
 global-exclude __pycache__
 global-exclude *.py[cod]
 global-exclude .DS_Store

@@ -1,0 +1,114 @@
+name: Release
+
+# Tag-triggered only. Pushing a `vX.Y.Z` tag is the human's release act --
+# nothing in this repo pushes tags automatically. See CHANGELOG.md for the
+# release policy (version single-sourced in pyproject.toml, tag == version).
+#
+# Publishing uses PyPI/TestPyPI "trusted publishing" (OIDC) exclusively.
+# There are no `secrets.*` references anywhere in this file -- no API tokens
+# are stored in this repo. Trusted-publisher config must be set up on both
+# test.pypi.org and pypi.org (owner/repo, workflow filename `release.yml`,
+# environment name matching the `environment:` below) before a tag push will
+# successfully publish. See the PR description for what's still manual.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Verify tag matches pyproject.toml version
+        run: |
+          python -c "
+          import sys, tomllib
+          from pathlib import Path
+
+          tag = '${{ github.ref_name }}'
+          if not tag.startswith('v'):
+              print(f'unexpected tag ref {tag!r} (expected a v* tag)', file=sys.stderr)
+              sys.exit(1)
+          tag_version = tag[1:]
+
+          data = tomllib.loads(Path('pyproject.toml').read_text(encoding='utf-8'))
+          project_version = data['project']['version']
+
+          if tag_version != project_version:
+              print(
+                  f'tag {tag!r} (version {tag_version!r}) does not match '
+                  f'pyproject.toml [project].version {project_version!r}',
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+
+          print(f'OK: tag {tag!r} matches pyproject.toml version {project_version!r}')
+          "
+
+      - name: Install dev + build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+          python -m pip install build
+
+      - name: Run full test suite
+        run: python -m pytest tests/ -q
+
+      - name: Build wheel and sdist
+        run: python -m build
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish-testpypi:
+    name: Publish to TestPyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment: testpypi
+    permissions:
+      id-token: write
+    steps:
+      - name: Download dist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to TestPyPI (OIDC trusted publishing)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: publish-testpypi
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - name: Download dist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI (OIDC trusted publishing)
+        uses: pypa/gh-action-pypi-publish@release/v1

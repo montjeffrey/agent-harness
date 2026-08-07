@@ -28,9 +28,35 @@ command; nothing here is specific to any one company, user, or codebase.
 
 ## Quickstart
 
-One command, any shell. Both setup scripts locate a Python 3 interpreter,
-run the preflight **doctor** (which tells you exactly what is missing), and
-install only if nothing FAILs:
+Install the CLI, then point it at any project. [pipx](https://pypa.github.io/pipx/)
+keeps it in its own isolated environment -- no local clone needed:
+
+```bash
+pipx install agent-harness
+agent-harness-install /path/to/your/project --hooks
+```
+
+The installer runs the preflight **doctor** automatically first (which
+tells you exactly what is missing) and installs only if nothing FAILs.
+Useful flags:
+
+```bash
+agent-harness-install /path/to/your/project --check       # preflight report only, installs nothing
+agent-harness-install /path/to/your/project --skip-checks  # install without preflight
+```
+
+`--agents claude,codex,gemini` (default: all three) limits which pointer
+files get written; see `agent-harness-install --help` for the full list.
+
+`pip install agent-harness` works too if you'd rather manage the venv
+yourself; `pipx` is just the recommended path since this is a CLI tool, not
+a library you import.
+
+### Install from source
+
+Prefer a git checkout (e.g. to track `main`, or to hack on the harness
+itself)? Both setup scripts locate a Python 3 interpreter, run the preflight
+**doctor**, and install only if nothing FAILs:
 
 ```bash
 # bash / sh (macOS, Linux, Git Bash)
@@ -93,6 +119,18 @@ touched, and unchanged content is left alone.
 ## Using the query CLI directly
 
 ```bash
+agent-harness-query find <term>
+agent-harness-query node <id>
+agent-harness-query callers <id> [depth]
+agent-harness-query callees <id> [depth]
+agent-harness-query impact <id>
+agent-harness-query file <path-fragment>
+agent-harness-query community <name-fragment>
+```
+
+From a source checkout, the equivalent is:
+
+```bash
 python harness/graph_query.py find <term>
 python harness/graph_query.py node <id>
 python harness/graph_query.py callers <id> [depth]
@@ -137,6 +175,13 @@ Notes:
   prefixed with a 2-decimal relevance score (higher is more relevant).
 
 ## Refreshing the graph
+
+```bash
+agent-harness-refresh <repo-root>          # fast: AST update + community re-naming
+agent-harness-refresh <repo-root> --full   # full LLM re-documentation
+```
+
+From a source checkout, the equivalent is:
 
 ```bash
 python harness/graph_refresh.py <repo-root>          # fast: AST update + community re-naming
@@ -239,8 +284,11 @@ short pointer so the harness content lives in one place.
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.11+
 - Standard library only for `harness/` and `install.py`
+- A `pipx install agent-harness` / `pip install agent-harness` install needs
+  no local git clone at all -- the source-checkout path above is only for
+  running from `main` or developing the harness itself
 - `pytest` for running the test suite (`pip install pytest`, or
   `pip install -e ".[dev]"`)
 - [graphify](https://pypi.org/project/graphify/) installed separately and

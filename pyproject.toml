@@ -14,6 +14,7 @@ agent-harness-query = "harness.graph_query:main"
 agent-harness-doctor = "harness.doctor:main"
 agent-harness-refresh = "harness.graph_refresh:main"
 agent-harness-mcp = "harness.mcp_server:main"
+agent-harness-install = "harness.install_cli:main"
 
 [project.optional-dependencies]
 dev = [

@@ -50,3 +50,11 @@ jobs:
           mkdir -p /tmp/agent-harness-smoke-outside
           cd /tmp/agent-harness-smoke-outside
           "$VENV_PY" -m harness.doctor
+
+          if [ -f /tmp/agent-harness-smoke-venv/bin/agent-harness-install ]; then
+            INSTALL_CMD=/tmp/agent-harness-smoke-venv/bin/agent-harness-install
+          else
+            INSTALL_CMD=/tmp/agent-harness-smoke-venv/Scripts/agent-harness-install.exe
+          fi
+          "$INSTALL_CMD" /tmp/agent-harness-smoke-install-target --skip-checks
+          grep -q "agent-harness:start" /tmp/agent-harness-smoke-install-target/AGENTS.md

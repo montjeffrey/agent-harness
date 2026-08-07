@@ -27,6 +27,7 @@ CONSOLE_SCRIPTS = {
     "agent-harness-doctor": "harness.doctor:main",
     "agent-harness-refresh": "harness.graph_refresh:main",
     "agent-harness-mcp": "harness.mcp_server:main",
+    "agent-harness-install": "harness.install_cli:main",
 }
 
 
@@ -101,6 +102,7 @@ def test_wheel_contains_expected_packages_and_resources(built_artifacts: dict[st
     assert "harness/graph_query.py" in names
     assert "harness/graph_refresh.py" in names
     assert "harness/mcp_server.py" in names
+    assert "harness/install_cli.py" in names
     assert "templates/AGENTS.harness.md" in names
     assert "templates/feature-blueprint.md" in names
     assert "hooks/claude/settings-fragment.json" in names
@@ -200,8 +202,10 @@ def test_installed_wheel_console_scripts_run_outside_source_tree(
     scripts_dir = venv_dir / "Scripts" if sys.platform == "win32" else venv_dir / "bin"
     doctor_cmd = scripts_dir / ("agent-harness-doctor.exe" if sys.platform == "win32" else "agent-harness-doctor")
     query_cmd = scripts_dir / ("agent-harness-query.exe" if sys.platform == "win32" else "agent-harness-query")
+    install_cmd = scripts_dir / ("agent-harness-install.exe" if sys.platform == "win32" else "agent-harness-install")
     assert doctor_cmd.exists(), f"console script not installed: {doctor_cmd}"
     assert query_cmd.exists(), f"console script not installed: {query_cmd}"
+    assert install_cmd.exists(), f"console script not installed: {install_cmd}"
 
     # Run from OUTSIDE the source tree entirely -- proves no repo-relative
     # path assumption survived into the installed package.
@@ -223,5 +227,22 @@ def test_installed_wheel_console_scripts_run_outside_source_tree(
     # itself launched, imported harness.graph_query, and produced the
     # module's own clear error rather than crashing on a missing dependency.
     assert "graph.json not found" in (query_result.stdout + query_result.stderr)
+
+    # agent-harness-install: run against a fresh target dir with --skip-checks
+    # (no-prompt install, same flag install.py exposes) -- proves the
+    # installer's packaged resources (templates/hooks) resolve post-install
+    # from OUTSIDE the source tree, exactly like doctor/query above.
+    install_target = outside_cwd / "install-target"
+    install_result = subprocess.run(
+        [str(install_cmd), str(install_target), "--skip-checks"],
+        cwd=str(outside_cwd), capture_output=True, text=True, timeout=60, check=False,
+    )
+    assert install_result.returncode == 0, (
+        f"agent-harness-install failed:\n{install_result.stdout}\n{install_result.stderr}"
+    )
+    blueprint_dest = install_target / "docs" / "vault" / "templates" / "feature-blueprint.md"
+    assert blueprint_dest.exists(), install_result.stdout
+    agents_md = (install_target / "AGENTS.md").read_text(encoding="utf-8")
+    assert "<!-- agent-harness:start -->" in agents_md
 
     shutil.rmtree(venv_dir, ignore_errors=True)

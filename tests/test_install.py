@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 import install
+from harness import install_cli
 
 
 def test_first_install_writes_expected_files(tmp_path: Path) -> None:
@@ -25,7 +26,13 @@ def test_first_install_writes_expected_files(tmp_path: Path) -> None:
     agents_md = (project / "AGENTS.md").read_text(encoding="utf-8")
     assert install.MARKER_START in agents_md
     assert install.MARKER_END in agents_md
-    assert "graph_query.py" in agents_md
+    # Graph-query instructions are present -- checked via the invariant part
+    # of the command (its arguments), since the command *prefix* itself
+    # legitimately differs by environment: `agent-harness-query` when the
+    # installed console scripts are resolvable, `<python> -m
+    # harness.graph_query` as the source-checkout fallback otherwise (see
+    # `harness.install_cli._query_command`).
+    assert "find <term>" in agents_md
 
     claude_md = (project / "CLAUDE.md").read_text(encoding="utf-8")
     assert install.CLAUDE_POINTER in claude_md
@@ -148,7 +155,14 @@ def test_simulated_failure_mid_install_rolls_back_fully(tmp_path: Path, monkeypa
     def _boom(*_args, **_kwargs):
         raise RuntimeError("simulated failure mid-install")
 
-    monkeypatch.setattr(install, "install_hooks", _boom)
+    # `install.run_install` is the same function object as
+    # `harness.install_cli.run_install`; it resolves `install_hooks` as a
+    # bare name against its OWN module globals (harness.install_cli), not
+    # against whatever the `install` shim module currently binds that name
+    # to. So the collaborator being replaced must be patched on
+    # `harness.install_cli`, not on the shim, for the patch to actually take
+    # effect at call time.
+    monkeypatch.setattr(install_cli, "install_hooks", _boom)
 
     with pytest.raises(RuntimeError, match="simulated failure mid-install"):
         install.run_install(project, ["claude", "codex", "gemini"], install_hooks_flag=True)
@@ -228,7 +242,10 @@ def test_install_hooks_wraps_invalid_fragment_json_as_install_error(tmp_path: Pa
     project.mkdir()
     bad_fragment = tmp_path / "bad-fragment.json"
     bad_fragment.write_text("{ this is not valid json <python> <harness>", encoding="utf-8")
-    monkeypatch.setattr(install, "HOOK_FRAGMENT_PATH", bad_fragment)
+    # See the comment in test_simulated_failure_mid_install_rolls_back_fully:
+    # `install_hooks` reads `HOOK_FRAGMENT_PATH` from its own module globals
+    # (harness.install_cli), so the patch target must be that module.
+    monkeypatch.setattr(install_cli, "HOOK_FRAGMENT_PATH", bad_fragment)
 
     with pytest.raises(install.InstallError):
         install.install_hooks(project, install.HARNESS_ROOT)
@@ -369,7 +386,7 @@ def test_mcp_write_rolls_back_on_failure(tmp_path: Path, monkeypatch) -> None:
     def _boom(*_args, **_kwargs):
         raise RuntimeError("simulated failure during mcp registration")
 
-    monkeypatch.setattr(install, "install_mcp_registration", _boom)
+    monkeypatch.setattr(install_cli, "install_mcp_registration", _boom)
 
     with pytest.raises(RuntimeError, match="simulated failure during mcp registration"):
         install.run_install(project, ["claude", "codex", "gemini"], install_hooks_flag=False, install_mcp_flag=True)
