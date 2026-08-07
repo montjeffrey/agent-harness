@@ -65,7 +65,17 @@ ENTRY_TYPES: tuple[str, ...] = (
 
 SCOPES: tuple[str, ...] = ("project", "machine")
 
-STATUSES: tuple[str, ...] = ("proposed", "accepted", "superseded", "resolved")
+STATUSES: tuple[str, ...] = (
+    "proposed",
+    "accepted",
+    "rejected",
+    "superseded",
+    "resolved",
+)
+
+# Statuses that no longer represent live knowledge. Context selection skips
+# these outright, and review refuses to act on an entry already in one.
+CLOSED_STATUSES: frozenset[str] = frozenset({"rejected", "superseded", "resolved"})
 
 CONFIDENCES: tuple[str, ...] = ("confirmed", "inferred")
 
@@ -292,6 +302,79 @@ def append_entries(
             fh.write(json.dumps(rec, ensure_ascii=False))
             fh.write("\n")
     return len(normalized)
+
+
+def read_lines(directory: Path) -> list[str]:
+    """Every non-blank raw line of ``<directory>/inbox.jsonl``, verbatim.
+
+    Deliberately does no parsing: a caller that intends to rewrite the file
+    needs to see the lines `iter_entries` filters out (malformed JSON, a
+    future schema version) so it can carry them across untouched instead of
+    silently deleting them. An unreadable or missing file yields ``[]``.
+    """
+    path = Path(directory) / "inbox.jsonl"
+    if not path.is_file():
+        return []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    return [line for line in text.splitlines() if line.strip()]
+
+
+def write_lines(lines: Iterable[str], directory: Path) -> int:
+    """Atomically replace ``<directory>/inbox.jsonl`` with `lines`.
+
+    Written to a temp sibling and `replace`d in one step -- the same
+    temp-then-replace shape `save_registry` uses. A concurrent reader
+    therefore sees either the entire old file or the entire new one, never a
+    half-rewritten inbox, and a crash mid-write leaves the original intact.
+    """
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "inbox.jsonl"
+    tmp = path.with_suffix(".jsonl.tmp")
+    written = 0
+    with tmp.open("w", encoding="utf-8") as fh:
+        for line in lines:
+            fh.write(line)
+            fh.write("\n")
+            written += 1
+    tmp.replace(path)
+    return written
+
+
+def rewrite_entries(
+    entries: Iterable[dict],
+    directory: Path,
+    now: datetime | None = None,
+) -> int:
+    """Validate `entries` and atomically replace the inbox with them.
+
+    The append path (`append_entries`) is the normal way in; this is the
+    narrow exception review needs, because a status transition edits a record
+    that is already on disk. Every entry is validated *before* anything is
+    written, so one bad record leaves the existing file untouched.
+
+    Unlike `append_entries` this does NOT allocate ids: a rewrite operates on
+    records that already have one, and inventing ids here would silently
+    renumber the store. An entry without an `id` raises ValueError.
+
+    Note that this drops any line `iter_entries` could not parse. Callers that
+    must preserve unparseable lines should splice at the line level with
+    `read_lines`/`write_lines` instead.
+    """
+    now = now or datetime.now(timezone.utc)
+    normalized = [validate_entry(e, now=now) for e in entries]
+    missing = [r for r in normalized if not r.get("id")]
+    if missing:
+        raise ValueError(
+            f"rewrite_entries requires every entry to carry an id "
+            f"({len(missing)} without one); use append_entries to add new records"
+        )
+    return write_lines(
+        (json.dumps(rec, ensure_ascii=False) for rec in normalized), directory
+    )
 
 
 def iter_entries(
