@@ -30,6 +30,7 @@ from harness.install_cli import (  # noqa: F401
     main,
     parse_args,
     render_agents_block,
+    render_vault_readme,
     run_install,
     upsert_marker_block,
 )

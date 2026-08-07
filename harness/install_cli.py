@@ -29,6 +29,7 @@ import importlib.resources as resources
 import json
 import logging
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -94,13 +95,13 @@ says `Approved`. The loop below only works if agents choose to follow it.
 window. Query it instead:
 
 ```
-python {harness_path}/harness/graph_query.py find <term>       # locate nodes by symbol/file name
-python {harness_path}/harness/graph_query.py node <id>         # details + direct edges
-python {harness_path}/harness/graph_query.py callers <id> [n]  # who depends on it (depth n)
-python {harness_path}/harness/graph_query.py callees <id> [n]  # what it depends on
-python {harness_path}/harness/graph_query.py impact <id>       # full transitive blast radius
-python {harness_path}/harness/graph_query.py file <path-frag>  # nodes defined in a file
-python {harness_path}/harness/graph_query.py community <frag>  # nodes in a module/community
+{query_cmd} find <term>       # locate nodes by symbol/file name
+{query_cmd} node <id>         # details + direct edges
+{query_cmd} callers <id> [n]  # who depends on it (depth n)
+{query_cmd} callees <id> [n]  # what it depends on
+{query_cmd} impact <id>       # full transitive blast radius
+{query_cmd} file <path-frag>  # nodes defined in a file
+{query_cmd} community <frag>  # nodes in a module/community
 ```
 
 Typical blueprint workflow: `find` the touched symbols -> `impact` each ->
@@ -110,8 +111,8 @@ and Blast Radius sections.
 ### Keeping the graph fresh
 
 ```
-python {harness_path}/harness/graph_refresh.py <repo-root>          # fast: AST update + community re-naming
-python {harness_path}/harness/graph_refresh.py <repo-root> --full   # full LLM re-doc
+{refresh_cmd} <repo-root>          # fast: AST update + community re-naming
+{refresh_cmd} <repo-root> --full   # full LLM re-doc
 ```
 
 The graph records the commit it was built from (`built_at_commit` in
@@ -237,9 +238,73 @@ def _read_preserving_newlines(path: Path, *, encoding: str = "utf-8") -> str:
         return fh.read()
 
 
+def _console_scripts_available() -> bool:
+    """True when the `agent-harness-*` console scripts installed by this
+    package are actually resolvable from the current interpreter's
+    environment, i.e. this process is running from a pip/pipx install where
+    setuptools generated entry-point scripts alongside the interpreter.
+
+    A bare source checkout (running `install.py` or
+    `python -m harness.install_cli` straight out of a git clone, with no
+    `pip install` ever having happened) has no such scripts on PATH, so
+    instructions that invoke them by bare name would fail with "command not
+    found" -- detect this instead of assuming it, so the generated
+    instructions are correct either way.
+
+    `shutil.which` alone isn't enough: PATH could contain an unrelated,
+    stale, or wrong-environment script that happens to share the name (e.g.
+    a different pipx-managed `agent-harness` install). Require the resolved
+    script to live in the same `Scripts`/`bin` directory as `sys.executable`
+    -- the directory setuptools/pip actually write entry-point scripts into
+    -- before trusting it.
+    """
+    script_name = "agent-harness-query.exe" if sys.platform == "win32" else "agent-harness-query"
+    found = shutil.which(script_name)
+    if found is None:
+        return False
+    interpreter_dir = Path(sys.executable).resolve().parent
+    return Path(found).resolve().parent == interpreter_dir
+
+
+def _query_command() -> str:
+    """Command prefix for `graph_query.py` subcommands in generated docs.
+
+    Prefers the installed `agent-harness-query` console script (always
+    correct on PATH after a pip/pipx install); falls back to
+    `<this interpreter> -m harness.graph_query`, which -- unlike invoking
+    the `.py` file directly -- puts the repo root on `sys.path` correctly
+    when run from the repo root, for a bare source checkout. The interpreter
+    path is shell-quoted (matching `install_hooks`' handling of the same
+    value) since it's spliced into copy-pasteable command text that may
+    contain spaces (e.g. a Windows `Program Files` install).
+    """
+    if _console_scripts_available():
+        return "agent-harness-query"
+    return f"{pathsafe.shell_quote(sys.executable)} -m harness.graph_query"
+
+
+def _refresh_command() -> str:
+    """Command prefix for `graph_refresh.py` in generated docs; see `_query_command`."""
+    if _console_scripts_available():
+        return "agent-harness-refresh"
+    return f"{pathsafe.shell_quote(sys.executable)} -m harness.graph_refresh"
+
+
 def render_agents_block(harness_path: Path) -> str:
     template = (resources.files("templates") / "AGENTS.harness.md").read_text(encoding="utf-8")
-    return template.replace("{HARNESS_PATH}", str(harness_path))
+    return (
+        template.replace("{HARNESS_PATH}", str(harness_path))
+        .replace("{QUERY_CMD}", _query_command())
+        .replace("{REFRESH_CMD}", _refresh_command())
+    )
+
+
+def render_vault_readme(harness_path: Path) -> str:
+    return VAULT_README_TEMPLATE.format(
+        harness_path=harness_path,
+        query_cmd=_query_command(),
+        refresh_cmd=_refresh_command(),
+    )
 
 
 def upsert_marker_block(file_path: Path, block: str, txn: InstallTransaction | None = None) -> str:
@@ -325,7 +390,7 @@ def install_vault_files(
         actions.append("docs/vault/templates/feature-blueprint.md: unchanged")
 
     readme_dest = project_dir / "docs" / "vault" / "README.md"
-    readme_content = VAULT_README_TEMPLATE.format(harness_path=harness_path)
+    readme_content = render_vault_readme(harness_path)
     if not readme_dest.exists() or _read_preserving_newlines(readme_dest) != readme_content:
         _write(readme_dest, readme_content, txn)
         actions.append("docs/vault/README.md: written")

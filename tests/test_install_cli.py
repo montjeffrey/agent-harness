@@ -11,6 +11,8 @@ of a second run called directly against the new module.
 from __future__ import annotations
 
 import importlib.resources as resources
+import shutil
+import sys
 from pathlib import Path
 
 import install
@@ -29,7 +31,13 @@ def test_run_install_writes_expected_files_via_install_cli_directly(tmp_path: Pa
     agents_md = (project / "AGENTS.md").read_text(encoding="utf-8")
     assert install_cli.MARKER_START in agents_md
     assert install_cli.MARKER_END in agents_md
-    assert "graph_query.py" in agents_md
+    # Graph-query instructions are present -- checked via the invariant part
+    # of the command (its arguments), since the command *prefix* itself
+    # legitimately differs by environment: `agent-harness-query` when the
+    # installed console scripts are resolvable, `<python> -m
+    # harness.graph_query` as the source-checkout fallback otherwise (see
+    # `harness.install_cli._query_command`).
+    assert "find <term>" in agents_md
 
     claude_md = (project / "CLAUDE.md").read_text(encoding="utf-8")
     assert install_cli.CLAUDE_POINTER in claude_md
@@ -75,6 +83,7 @@ _SHIM_PUBLIC_NAMES = (
     "main",
     "parse_args",
     "render_agents_block",
+    "render_vault_readme",
     "run_install",
     "upsert_marker_block",
 )
@@ -106,7 +115,73 @@ def test_agents_harness_template_resolves_via_importlib_resources() -> None:
     rendered = install_cli.render_agents_block(install_cli.HARNESS_ROOT)
     raw_template = (resources.files("templates") / "AGENTS.harness.md").read_text(encoding="utf-8")
 
-    # The rendered block is the raw template with the {HARNESS_PATH}
-    # placeholder substituted -- proving render_agents_block actually reads
-    # the packaged resource rather than some other copy.
-    assert raw_template.replace("{HARNESS_PATH}", str(install_cli.HARNESS_ROOT)) == rendered
+    # The rendered block is the raw template with the {HARNESS_PATH},
+    # {QUERY_CMD}, and {REFRESH_CMD} placeholders substituted -- proving
+    # render_agents_block actually reads the packaged resource rather than
+    # some other copy.
+    expected = (
+        raw_template.replace("{HARNESS_PATH}", str(install_cli.HARNESS_ROOT))
+        .replace("{QUERY_CMD}", install_cli._query_command())
+        .replace("{REFRESH_CMD}", install_cli._refresh_command())
+    )
+    assert expected == rendered
+
+
+# --- Regression coverage for the render_agents_block / vault-README command
+# generation (was: unconditionally emitting `python <HARNESS_PATH>/harness/
+# graph_query.py ...`, which is unusable via the primary pipx install path --
+# bare `python` on PATH resolves outside the pipx venv, and even with the
+# right interpreter, running the .py file directly doesn't put the repo root
+# on sys.path so `from harness...` imports fail). ---
+
+
+def test_query_command_uses_console_script_when_resolvable_in_same_environment(monkeypatch) -> None:
+    interpreter_dir = Path(sys.executable).resolve().parent
+    script_name = "agent-harness-query.exe" if sys.platform == "win32" else "agent-harness-query"
+    monkeypatch.setattr(shutil, "which", lambda name: str(interpreter_dir / script_name))
+
+    assert install_cli._query_command() == "agent-harness-query"
+    assert install_cli._refresh_command() == "agent-harness-refresh"
+
+
+def test_query_command_falls_back_to_module_invocation_when_console_script_unresolvable(monkeypatch) -> None:
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+
+    assert install_cli._query_command() == f"{sys.executable} -m harness.graph_query"
+    assert install_cli._refresh_command() == f"{sys.executable} -m harness.graph_refresh"
+
+
+def test_query_command_ignores_same_named_script_from_a_different_environment(monkeypatch) -> None:
+    """A same-named script resolvable on PATH but living outside this
+    interpreter's own Scripts/bin directory (e.g. a stale or unrelated
+    pipx-managed install) must not be trusted -- fall back to module
+    invocation instead of assuming it's usable."""
+    other_dir = Path(sys.executable).resolve().parent.parent / "some-other-env" / "Scripts"
+    script_name = "agent-harness-query.exe" if sys.platform == "win32" else "agent-harness-query"
+    monkeypatch.setattr(shutil, "which", lambda name: str(other_dir / script_name))
+
+    assert install_cli._query_command() == f"{sys.executable} -m harness.graph_query"
+
+
+def test_render_agents_block_and_vault_readme_agree_and_avoid_broken_raw_script_form(monkeypatch) -> None:
+    """Both generated surfaces (AGENTS.md and the vault README) must agree on
+    which form of the graph-query/refresh commands they tell the agent to
+    run, and neither may fall back to the broken `python <path>/harness/
+    graph_query.py` form this regression covers (note: the vault README's
+    prose still mentions `graph_query.py` by name in passing, so this
+    specifically checks for the old broken *command* form, not any mention
+    of the filename)."""
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+
+    agents_block = install_cli.render_agents_block(install_cli.HARNESS_ROOT)
+    vault_readme = install_cli.render_vault_readme(install_cli.HARNESS_ROOT)
+
+    expected_query = f"{sys.executable} -m harness.graph_query"
+    expected_refresh = f"{sys.executable} -m harness.graph_refresh"
+    old_broken_query = f"python {install_cli.HARNESS_ROOT}/harness/graph_query.py"
+    old_broken_refresh = f"python {install_cli.HARNESS_ROOT}/harness/graph_refresh.py"
+    for text in (agents_block, vault_readme):
+        assert expected_query in text
+        assert expected_refresh in text
+        assert old_broken_query not in text
+        assert old_broken_refresh not in text

@@ -40,7 +40,7 @@ def _agents_block_text() -> str:
 
 
 def _vault_readme_text() -> str:
-    return install.VAULT_README_TEMPLATE.format(harness_path=HARNESS_ROOT)
+    return install.render_vault_readme(HARNESS_ROOT)
 
 
 def _root_readme_text() -> str:

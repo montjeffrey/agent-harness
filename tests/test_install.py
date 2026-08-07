@@ -26,7 +26,13 @@ def test_first_install_writes_expected_files(tmp_path: Path) -> None:
     agents_md = (project / "AGENTS.md").read_text(encoding="utf-8")
     assert install.MARKER_START in agents_md
     assert install.MARKER_END in agents_md
-    assert "graph_query.py" in agents_md
+    # Graph-query instructions are present -- checked via the invariant part
+    # of the command (its arguments), since the command *prefix* itself
+    # legitimately differs by environment: `agent-harness-query` when the
+    # installed console scripts are resolvable, `<python> -m
+    # harness.graph_query` as the source-checkout fallback otherwise (see
+    # `harness.install_cli._query_command`).
+    assert "find <term>" in agents_md
 
     claude_md = (project / "CLAUDE.md").read_text(encoding="utf-8")
     assert install.CLAUDE_POINTER in claude_md
