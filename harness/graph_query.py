@@ -31,11 +31,28 @@ from harness.graph_location import find_graph_in_repo
 
 MAX_ROWS = 60
 
+# Commands accepted by both the CLI (`argparse` choices) and the library-safe
+# `query()` entry point -- kept as one tuple so the two surfaces can never
+# drift apart.
+VALID_COMMANDS = ("find", "node", "callers", "callees", "impact", "file", "community")
+
 
 class GraphIndex(NamedTuple):
     nodes: dict[str, dict]
     out_edges: dict[str, list[dict]]
     in_edges: dict[str, list[dict]]
+
+
+def _no_graph_message(current: Path) -> str:
+    """Shared "graph.json not found" text for both `find_graph_path` (CLI,
+    SystemExit) and `query` (library, FileNotFoundError) -- one copy so the
+    two surfaces can never drift apart on wording."""
+    refresh = Path(__file__).resolve().parent / "graph_refresh.py"
+    return (
+        f"graph.json not found under {current} or any parent directory.\n"
+        f'Build one:  python "{refresh}" "{current}" --full\n'
+        "Or pass --graph PATH to an existing graph.json."
+    )
 
 
 def find_graph_path(start: Path | None = None) -> Path:
@@ -49,12 +66,7 @@ def find_graph_path(start: Path | None = None) -> Path:
     graph_path = find_graph_in_repo(current)
     if graph_path is not None:
         return graph_path
-    refresh = Path(__file__).resolve().parent / "graph_refresh.py"
-    raise SystemExit(
-        f"graph.json not found under {current} or any parent directory.\n"
-        f'Build one:  python "{refresh}" "{current}" --full\n'
-        "Or pass --graph PATH to an existing graph.json."
-    )
+    raise SystemExit(_no_graph_message(current))
 
 
 def load_graph(graph_path: Path) -> dict:
@@ -131,7 +143,12 @@ def build_index(g: dict) -> GraphIndex:
         raise SystemExit(
             f"graph.json malformed: expected a top-level 'nodes' list, got {got}"
         )
-    nodes = {n["id"]: n for n in raw_nodes}
+    try:
+        nodes = {n["id"]: n for n in raw_nodes}
+    except (TypeError, KeyError) as exc:
+        raise SystemExit(
+            f"graph.json malformed: every entry in 'nodes' must be an object with an 'id' field ({exc})"
+        ) from exc
     out_edges: dict[str, list[dict]] = defaultdict(list)
     in_edges: dict[str, list[dict]] = defaultdict(list)
     dropped = 0
@@ -274,31 +291,82 @@ def cmd_traverse(index: GraphIndex, nid: str, mode: str, depth: int) -> list[str
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--graph", type=Path, default=None, help="explicit path to graph.json")
-    parser.add_argument("command", choices=["find", "node", "callers", "callees", "impact", "file", "community"])
+    parser.add_argument("command", choices=list(VALID_COMMANDS))
     parser.add_argument("term", help="node id, label fragment, file fragment, or community fragment")
     parser.add_argument("depth", nargs="?", type=int, default=1, help="traversal depth for callers/callees")
     return parser
 
 
+def query(command: str, term: str, depth: int = 1, graph: Path | None = None) -> list[str]:
+    """Library-safe query entry point.
+
+    Same behavior as the CLI (`run`/`main`), but raises plain `ValueError`
+    (bad command, no match, ambiguous match, malformed graph) or
+    `FileNotFoundError` (no graph.json discoverable/readable) instead of
+    `SystemExit` -- so non-CLI callers (e.g. `harness.mcp_server`) can catch
+    ordinary exceptions instead of intercepting process-exit signals.
+
+    `run()` delegates to this function so CLI and library behavior never
+    drift apart; the exact `SystemExit` message text callers see from the
+    CLI path is preserved because this function reuses the same
+    `find_graph_path`-adjacent discovery (`find_graph_in_repo`) and the same
+    `load_graph`/`build_index`/`resolve_id`/`cmd_*` functions the CLI always
+    used, wrapping their `SystemExit`s rather than reimplementing them.
+    """
+    if command not in VALID_COMMANDS:
+        raise ValueError(f"unknown command '{command}' -- choose from {', '.join(VALID_COMMANDS)}")
+
+    if graph is not None:
+        graph_path = graph
+    else:
+        current = Path.cwd().resolve()
+        found = find_graph_in_repo(current)
+        if found is None:
+            raise FileNotFoundError(_no_graph_message(current))
+        graph_path = found
+
+    try:
+        g = load_graph(graph_path)
+        index = build_index(g)
+        if command == "find":
+            return cmd_find(g, term)
+        if command == "file":
+            return cmd_file(g, term)
+        if command == "community":
+            return cmd_community(g, term)
+        nid = resolve_id(term, index.nodes)
+        if command == "node":
+            return cmd_node(index, nid)
+        return cmd_traverse(index, nid, command, depth)
+    except SystemExit as exc:
+        message = exc.code if isinstance(exc.code, str) else str(exc.code)
+        if message.startswith("graph.json not found at"):
+            raise FileNotFoundError(message) from exc
+        raise ValueError(message) from exc
+    except json.JSONDecodeError as exc:
+        # json.load() in load_graph() raises this directly (not via
+        # SystemExit) when graph.json exists but isn't valid JSON. It IS a
+        # ValueError subclass in the stdlib, but that's an implementation
+        # detail this module shouldn't lean on -- convert explicitly so the
+        # documented ValueError/FileNotFoundError contract holds for every
+        # malformed-graph case, not just the SystemExit ones.
+        raise ValueError(f"graph.json malformed: invalid JSON ({exc})") from exc
+
+
 def run(argv: list[str]) -> list[str]:
-    """Execute a query and return the output lines (used directly by tests)."""
+    """Execute a query and return the output lines (used directly by tests).
+
+    Delegates to `query()` so CLI and library behavior share one
+    implementation; `FileNotFoundError`/`ValueError` from `query()` are
+    re-raised as `SystemExit` here to preserve this module's long-standing
+    CLI error contract (message text is unchanged either way).
+    """
     parser = build_parser()
     args = parser.parse_args(argv)
-    graph_path = args.graph if args.graph else find_graph_path()
-    g = load_graph(graph_path)
-    index = build_index(g)
-
-    if args.command == "find":
-        return cmd_find(g, args.term)
-    if args.command == "file":
-        return cmd_file(g, args.term)
-    if args.command == "community":
-        return cmd_community(g, args.term)
-
-    nid = resolve_id(args.term, index.nodes)
-    if args.command == "node":
-        return cmd_node(index, nid)
-    return cmd_traverse(index, nid, args.command, args.depth)
+    try:
+        return query(args.command, args.term, args.depth, args.graph)
+    except (FileNotFoundError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 def main(argv: list[str] | None = None) -> int:

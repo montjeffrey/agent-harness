@@ -84,6 +84,7 @@ The install writes/updates, inside the target project:
 - `AGENTS.md` (full harness instruction block, marker-delimited)
 - `CLAUDE.md` / `GEMINI.md` (3-line pointer to the AGENTS.md block, if selected)
 - `.claude/settings.json` (PreToolUse hook, only with `--hooks`)
+- `.mcp.json` (agent-harness MCP server registration, only with `--mcp`)
 
 Re-running `install.py` is idempotent: content outside the
 `<!-- agent-harness:start -->` / `<!-- agent-harness:end -->` markers is never
@@ -126,6 +127,58 @@ isn't set, `graph_refresh.py` will look for `~/.agent-harness/config.json`:
 The command's stdout is sourced into the named env var for the duration of
 the refresh. The key value is never printed or logged.
 
+## MCP server (optional)
+
+The same 7 query-CLI commands are also available as typed MCP tools over
+stdio, so Claude Code (and, with manual setup, other MCP-capable clients)
+can call them directly instead of shelling out.
+
+```bash
+pip install -e ".[mcp]"                       # installs the optional `mcp` SDK
+python install.py /path/to/your/project --mcp # registers .mcp.json (Claude Code)
+```
+
+`--mcp` writes/merges a top-level `.mcp.json` in the target project (Claude
+Code's project-scoped MCP server config -- **not** `.claude/settings.json`,
+which stays hooks/permissions only) with an `"agent-harness"` entry that runs
+`python -m harness.mcp_server`. It is idempotent (unchanged/created/updated,
+same as `--hooks`) and refuses to overwrite an existing `"agent-harness"`
+entry that doesn't match, or a `.mcp.json` that isn't valid JSON. It does
+**not** set `enableAllProjectMcpServers` -- Claude Code will still prompt to
+approve the project's MCP servers on first use.
+
+Run the server directly with the console script or as a module:
+
+```bash
+agent-harness-mcp [--graph PATH]
+python -m harness.mcp_server [--graph PATH]
+```
+
+Without `--graph`, the server does the same repo-bound discovery as the CLI
+(walks up from the working directory to `graphify-out/graph.json`, bounded
+to the nearest `.git` repo root).
+
+The 7 tools, each a thin wrapper over `harness/graph_query.py`'s CLI
+commands and capped at the same `MAX_ROWS` the CLI already enforces:
+
+| Tool | Maps to CLI command |
+|---|---|
+| `graph_find` | `find` |
+| `graph_node` | `node` |
+| `graph_callers` | `callers` |
+| `graph_callees` | `callees` |
+| `graph_impact` | `impact` |
+| `graph_file` | `file` |
+| `graph_community` | `community` |
+
+**Codex / Gemini**: documentation-only for now -- their MCP config formats
+differ from Claude Code's `.mcp.json`, so `install.py --mcp` only writes
+Claude Code's file. To wire the server into Codex or Gemini CLI manually,
+point their MCP server config at `python -m harness.mcp_server` (with
+`--graph PATH` if you want to skip auto-discovery) the same way you would
+register any other stdio MCP server for that client -- consult each CLI's
+own MCP documentation for its config file location and schema.
+
 ## The blueprint gate
 
 This is an **advisory convention**, not a technical control -- nothing in
@@ -144,11 +197,11 @@ should:
 
 ## Per-agent support matrix
 
-| Agent | Reads `AGENTS.md`? | Pointer file | PreToolUse hook support |
-|---|---|---|---|
-| Claude Code | Yes | `CLAUDE.md` (3-line pointer) | Yes -- `--hooks` installs the fragment |
-| Codex CLI | Yes (native convention) | -- (uses `AGENTS.md` directly) | No hook mechanism generalized yet |
-| Antigravity / Gemini CLI | Varies by version | `GEMINI.md` (3-line pointer) | No hook mechanism generalized yet |
+| Agent | Reads `AGENTS.md`? | Pointer file | PreToolUse hook support | MCP tools |
+|---|---|---|---|---|
+| Claude Code | Yes | `CLAUDE.md` (3-line pointer) | Yes -- `--hooks` installs the fragment | Yes -- `--mcp` registers `.mcp.json` |
+| Codex CLI | Yes (native convention) | -- (uses `AGENTS.md` directly) | No hook mechanism generalized yet | Manual only (see MCP server section) |
+| Antigravity / Gemini CLI | Varies by version | `GEMINI.md` (3-line pointer) | No hook mechanism generalized yet | Manual only (see MCP server section) |
 
 `AGENTS.md` is written unconditionally -- it is the common-denominator file
 most agent runtimes already read. `CLAUDE.md` and `GEMINI.md` only get the

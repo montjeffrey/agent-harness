@@ -250,6 +250,135 @@ def test_upsert_marker_block_appends_matching_crlf_style_to_fresh_crlf_file(tmp_
     assert b"\n" not in appended.replace(b"\r\n", b"")
 
 
+def test_mcp_flag_creates_mcp_json(tmp_path: Path) -> None:
+    project = tmp_path / "myproject"
+    project.mkdir()
+
+    action = install.install_mcp_registration(project, install.HARNESS_ROOT)
+    assert action == "created"
+
+    mcp_json_path = project / ".mcp.json"
+    config = json.loads(mcp_json_path.read_text(encoding="utf-8"))
+    server = config["mcpServers"]["agent-harness"]
+    assert server["args"] == ["-m", "harness.mcp_server"]
+    assert "enableAllProjectMcpServers" not in config
+
+
+def test_mcp_merge_is_idempotent(tmp_path: Path) -> None:
+    project = tmp_path / "myproject"
+    project.mkdir()
+
+    first_action = install.install_mcp_registration(project, install.HARNESS_ROOT)
+    assert first_action == "created"
+
+    mcp_json_path = project / ".mcp.json"
+    before = mcp_json_path.read_bytes()
+
+    second_action = install.install_mcp_registration(project, install.HARNESS_ROOT)
+    assert second_action == "unchanged"
+
+    after = mcp_json_path.read_bytes()
+    assert before == after
+
+
+def test_mcp_preserves_existing_servers(tmp_path: Path) -> None:
+    project = tmp_path / "myproject"
+    project.mkdir()
+    mcp_json_path = project / ".mcp.json"
+    mcp_json_path.write_text(
+        json.dumps({"mcpServers": {"some-other-server": {"command": "node", "args": ["server.js"]}}}),
+        encoding="utf-8",
+    )
+
+    action = install.install_mcp_registration(project, install.HARNESS_ROOT)
+    assert action == "updated"
+
+    config = json.loads(mcp_json_path.read_text(encoding="utf-8"))
+    assert "some-other-server" in config["mcpServers"]
+    assert "agent-harness" in config["mcpServers"]
+
+
+def test_mcp_refuses_invalid_mcp_json(tmp_path: Path) -> None:
+    project = tmp_path / "myproject"
+    project.mkdir()
+    mcp_json_path = project / ".mcp.json"
+    mcp_json_path.write_text("{not json", encoding="utf-8")
+
+    with pytest.raises(install.InstallError):
+        install.install_mcp_registration(project, install.HARNESS_ROOT)
+
+    # refusal must not have touched the file
+    assert mcp_json_path.read_text(encoding="utf-8") == "{not json"
+
+
+def test_mcp_refuses_non_object_mcpservers_value(tmp_path: Path) -> None:
+    """A syntactically valid .mcp.json whose 'mcpServers' key is present but
+    isn't a JSON object (e.g. null) must be refused cleanly -- previously
+    `dict(existing.get("mcpServers", {}))` raised an uncaught TypeError on
+    `dict(None)` instead of the documented InstallError refusal."""
+    project = tmp_path / "myproject"
+    project.mkdir()
+    mcp_json_path = project / ".mcp.json"
+    mcp_json_path.write_text(json.dumps({"mcpServers": None}), encoding="utf-8")
+    before = mcp_json_path.read_text(encoding="utf-8")
+
+    with pytest.raises(install.InstallError):
+        install.install_mcp_registration(project, install.HARNESS_ROOT)
+
+    assert mcp_json_path.read_text(encoding="utf-8") == before
+
+
+def test_mcp_refuses_different_existing_agent_harness_entry(tmp_path: Path) -> None:
+    project = tmp_path / "myproject"
+    project.mkdir()
+    mcp_json_path = project / ".mcp.json"
+    mcp_json_path.write_text(
+        json.dumps({"mcpServers": {"agent-harness": {"command": "some-other-command", "args": []}}}),
+        encoding="utf-8",
+    )
+    before = mcp_json_path.read_text(encoding="utf-8")
+
+    with pytest.raises(install.InstallError):
+        install.install_mcp_registration(project, install.HARNESS_ROOT)
+
+    assert mcp_json_path.read_text(encoding="utf-8") == before
+
+
+def test_install_without_mcp_flag_writes_no_mcp_json(tmp_path: Path) -> None:
+    project = tmp_path / "myproject"
+    install.run_install(project, ["claude", "codex", "gemini"], install_hooks_flag=False, install_mcp_flag=False)
+    assert not (project / ".mcp.json").exists()
+
+
+def test_install_with_mcp_flag_writes_mcp_json(tmp_path: Path) -> None:
+    project = tmp_path / "myproject"
+    summary = install.run_install(
+        project, ["claude", "codex", "gemini"], install_hooks_flag=False, install_mcp_flag=True
+    )
+    assert (project / ".mcp.json").exists()
+    assert any(".mcp.json" in line for line in summary)
+
+
+def test_mcp_write_rolls_back_on_failure(tmp_path: Path, monkeypatch) -> None:
+    project = tmp_path / "myproject"
+    project.mkdir()
+    (project / "AGENTS.md").write_text("# Pre-existing human content\n", encoding="utf-8")
+
+    before = _snapshot(project)
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("simulated failure during mcp registration")
+
+    monkeypatch.setattr(install, "install_mcp_registration", _boom)
+
+    with pytest.raises(RuntimeError, match="simulated failure during mcp registration"):
+        install.run_install(project, ["claude", "codex", "gemini"], install_hooks_flag=False, install_mcp_flag=True)
+
+    after = _snapshot(project)
+    assert before == after
+    assert not (project / ".mcp.json").exists()
+
+
 def test_install_into_path_with_spaces_and_unicode_with_hooks_flag(tmp_path: Path) -> None:
     project = tmp_path / "my project (dir) - ünïcødé 中文"
     install.run_install(project, ["claude"], install_hooks_flag=True)

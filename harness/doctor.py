@@ -140,6 +140,23 @@ def check_graphify() -> CheckResult:
     )
 
 
+def check_mcp() -> CheckResult:
+    """PASS if the optional `mcp` Python SDK is importable (enables
+    `harness.mcp_server` / `agent-harness-mcp`), else WARN -- the harness
+    (and `--hooks`-based installs) work fine without it; only the MCP tool
+    surface is unavailable."""
+    try:
+        spec = importlib.util.find_spec("mcp")
+    except (ImportError, ValueError):
+        spec = None
+    if spec is not None:
+        return CheckResult("PASS", "mcp sdk", "python module importable -- MCP server available")
+    return CheckResult(
+        "WARN", "mcp sdk",
+        "module not importable -- MCP tool server unavailable (pip install agent-harness[mcp])",
+    )
+
+
 def check_backend_key(config_path: Path = DEFAULT_CONFIG_PATH) -> CheckResult:
     """Verify a graph-refresh LLM backend is resolvable without printing any key."""
     try:
@@ -238,6 +255,35 @@ def check_project(project_dir: Path) -> list[CheckResult]:
                 f".claude/settings.json is invalid ({exc}) -- fix it before --hooks merge",
             ))
 
+    mcp_json_path = project_dir / ".mcp.json"
+    if mcp_json_path.exists():
+        try:
+            mcp_config = config_validation.load_json_object(mcp_json_path)
+            servers = mcp_config.get("mcpServers", {})
+            if not isinstance(servers, dict):
+                results.append(CheckResult(
+                    "FAIL", "mcp registration",
+                    f".mcp.json has a non-object 'mcpServers' value ({type(servers).__name__}) "
+                    "-- fix it before --mcp merge",
+                ))
+            elif "agent-harness" in servers:
+                results.append(CheckResult(
+                    "INFO", "mcp registration", ".mcp.json registers the agent-harness MCP server",
+                ))
+            else:
+                results.append(CheckResult(
+                    "INFO", "mcp registration",
+                    ".mcp.json exists but does not register agent-harness -- run install.py --mcp",
+                ))
+        except config_validation.ConfigValidationError as exc:
+            results.append(CheckResult(
+                "FAIL", "mcp registration", f".mcp.json is invalid ({exc}) -- fix it before --mcp merge",
+            ))
+    else:
+        results.append(CheckResult(
+            "INFO", "mcp registration", "no .mcp.json yet -- run install.py --mcp to register the MCP server",
+        ))
+
     graph_path = project_dir / "graphify-out" / "graph.json"
     if graph_path.exists():
         size_mb = graph_path.stat().st_size / (1024 * 1024)
@@ -268,6 +314,7 @@ def run_checks(project_dir: Path | None = None) -> list[CheckResult]:
         check_harness_files(),
         check_git(),
         check_graphify(),
+        check_mcp(),
         check_backend_key(),
         check_agent_clis(),
     ]
