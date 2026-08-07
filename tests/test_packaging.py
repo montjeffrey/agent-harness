@@ -28,6 +28,7 @@ CONSOLE_SCRIPTS = {
     "agent-harness-refresh": "harness.graph_refresh:main",
     "agent-harness-mcp": "harness.mcp_server:main",
     "agent-harness-install": "harness.install_cli:main",
+    "agent-harness-telemetry": "harness.telemetry:main",
 }
 
 

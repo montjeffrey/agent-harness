@@ -273,3 +273,43 @@ def test_run_checks_includes_semantic_search_check(tmp_path: Path) -> None:
     results = doctor.run_checks(tmp_path)
     names = {r.name for r in results}
     assert "semantic search" in names
+
+
+def test_check_telemetry_absent_dir_is_info(tmp_path: Path) -> None:
+    result = doctor.check_telemetry(telemetry_dir=tmp_path / "does-not-exist")
+    assert result.level == "INFO"
+    assert "no telemetry collected yet" in result.detail
+
+
+def test_check_telemetry_present_dir_reports_count_and_agents(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    from harness import telemetry_store
+
+    telemetry_dir = tmp_path / ".agent-harness" / "telemetry"
+    telemetry_store.append_events([
+        {"agent": "codex", "event": "usage"},
+        {"agent": "gemini", "event": "session_start"},
+    ])
+
+    result = doctor.check_telemetry(telemetry_dir=telemetry_dir)
+    assert result.level == "INFO"
+    assert "2 record" in result.detail
+    assert "codex" in result.detail
+    assert "gemini" in result.detail
+
+
+def test_check_telemetry_present_but_empty_dir_is_info(tmp_path: Path) -> None:
+    telemetry_dir = tmp_path / ".agent-harness" / "telemetry"
+    telemetry_dir.mkdir(parents=True)
+    result = doctor.check_telemetry(telemetry_dir=telemetry_dir)
+    assert result.level == "INFO"
+    assert "no valid records" in result.detail
+
+
+def test_run_checks_includes_telemetry_check(tmp_path: Path) -> None:
+    results = doctor.run_checks()
+    names = [r.name for r in results]
+    assert "telemetry" in names
