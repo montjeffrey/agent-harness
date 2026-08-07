@@ -39,7 +39,7 @@ def test_find_graph_in_repo_bounded_to_start_without_git_boundary(tmp_path: Path
     _write_graph(tmp_path)
     nested = tmp_path / "a" / "b" / "c"
     nested.mkdir(parents=True)
-    assert graph_location.find_graph_in_repo(nested) is None
+    assert graph_location.find_graph_in_repo(nested, stop_at=tmp_path) is None
 
 
 def test_find_graph_in_repo_finds_graph_at_start_without_git_boundary(tmp_path: Path) -> None:
@@ -61,7 +61,7 @@ def test_find_graph_in_repo_does_not_borrow_unrelated_ancestor_graph_several_lev
     _write_graph(tmp_path)
     deeply_nested = tmp_path / "unrelated" / "scratch" / "workdir"
     deeply_nested.mkdir(parents=True)
-    assert graph_location.find_graph_in_repo(deeply_nested) is None
+    assert graph_location.find_graph_in_repo(deeply_nested, stop_at=tmp_path) is None
 
 
 def test_find_graph_in_repo_resolves_symlinks_and_stays_within_boundary(tmp_path: Path) -> None:
@@ -128,7 +128,7 @@ def test_find_repo_root_stops_at_nearest_git_marker(tmp_path: Path) -> None:
 def test_find_repo_root_returns_none_with_no_git_marker(tmp_path: Path) -> None:
     empty_dir = tmp_path / "no_git_here"
     empty_dir.mkdir()
-    assert graph_location.find_repo_root(empty_dir) is None
+    assert graph_location.find_repo_root(empty_dir, stop_at=tmp_path) is None
 
 
 # --- health reporting -------------------------------------------------

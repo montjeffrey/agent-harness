@@ -250,7 +250,7 @@ def update_semantic_index(repo_root: Path) -> None:
     if not graph_index.chromadb_available():
         log.info(
             'chromadb not installed; skipping semantic index update '
-            '(pip install "agent-harness[semantic]" to enable `graph_query.py search`)'
+            '(pip install "agent-harness-kit[semantic]" to enable `graph_query.py search`)'
         )
         return
 
@@ -277,9 +277,15 @@ def refresh(repo_root: Path, backend: str, full: bool) -> None:
     status = detect_graphify()
     if not status.available:
         raise SystemExit(
+            # The distribution is `graphifyy` (two y's); the module it
+            # provides is `graphify` (one). `pip install graphify` is a 404 --
+            # no such package exists -- so the hint must name the
+            # distribution, not the import.
             "graphify is not installed or not runnable "
-            f"({status.error or 'unknown error'}). Install it (e.g. `pip install "
-            "graphify`) before refreshing the code graph."
+            f"({status.error or 'unknown error'}). Install it with "
+            "`pip install graphifyy` before refreshing the code graph. "
+            "If the harness is installed via pipx, inject it into that "
+            "environment instead: `pipx inject agent-harness-kit graphifyy`."
         )
 
     with scoped_api_key(backend):

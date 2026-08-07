@@ -66,16 +66,27 @@ class GraphHealth(str, Enum):
     MISSING = "missing"
 
 
-def find_repo_root(start: Path) -> Path | None:
+def find_repo_root(start: Path, stop_at: Path | None = None) -> Path | None:
     """Walk upward from `start` looking for a `.git` entry.
 
     Returns the first ancestor (inclusive of `start`) containing `.git`, or
-    None if no repo boundary is found before the filesystem root.
+    None if no repo boundary is found.
+
+    `stop_at` caps the walk at that directory (inclusive): nothing above it
+    is examined. Production callers leave it None and walk to the filesystem
+    root. It exists because "no `.git` anywhere in the ancestry" is a real,
+    load-bearing state that is otherwise impossible to construct in a test --
+    any repo above the test directory (a dotfiles repo in the user's home,
+    say) silently satisfies the walk and makes the no-boundary tests assert
+    the opposite of what they read as.
     """
     current = start.resolve()
+    boundary = stop_at.resolve() if stop_at is not None else None
     for candidate in (current, *current.parents):
         if (candidate / ".git").exists():
             return candidate
+        if boundary is not None and candidate == boundary:
+            return None
     return None
 
 
@@ -100,14 +111,17 @@ def _ancestors_within_boundary(start: Path, repo_root: Path | None) -> list[Path
     return bounded
 
 
-def find_graph_in_repo(start: Path | None = None) -> Path | None:
+def find_graph_in_repo(
+    start: Path | None = None, stop_at: Path | None = None
+) -> Path | None:
     """Locate `graphify-out/graph.json`, bounded to `start`'s own repo.
 
     Never raises. Returns None if no graph.json exists within the
-    discoverable boundary.
+    discoverable boundary. `stop_at` caps the repo-boundary search -- see
+    `find_repo_root`; production callers leave it None.
     """
     current = (start or Path.cwd()).resolve()
-    repo_root = find_repo_root(current)
+    repo_root = find_repo_root(current, stop_at=stop_at)
     for candidate in _ancestors_within_boundary(current, repo_root):
         graph_path = candidate / GRAPH_RELATIVE_PATH
         if graph_path.exists():
