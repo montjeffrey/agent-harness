@@ -102,6 +102,21 @@ def test_dispatch_maps_errors_to_text(tmp_path: Path, monkeypatch: pytest.Monkey
     assert "graph.json not found" in result
 
 
+def test_dispatch_reports_malformed_json_graph_gracefully(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A graph.json that exists but is not valid JSON must come back as a
+    normal text result, not an uncaught json.JSONDecodeError -- dispatch's
+    docstring promises it never raises for expected failure modes."""
+    from harness import mcp_server
+
+    bad_graph = tmp_path / "graph.json"
+    bad_graph.write_text("{not valid json", encoding="utf-8")
+    monkeypatch.setattr(mcp_server, "_GRAPH_OVERRIDE", bad_graph)
+    result = mcp_server.dispatch("graph_find", {"term": "anything"})
+    assert isinstance(result, str)
+
+
 def test_dispatch_reports_missing_graph_gracefully(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from harness import mcp_server
 

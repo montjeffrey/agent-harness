@@ -396,9 +396,10 @@ def install_mcp_registration(
     Idempotent, same load-validate-merge-compare-write shape as
     `install_hooks`: returns "unchanged"/"created"/"updated". Refuses
     (raises `InstallError`, no write) if `.mcp.json` exists but is invalid
-    JSON, or if it already has a DIFFERENT `"agent-harness"` entry -- this
-    never silently overwrites someone else's server definition of the same
-    name.
+    JSON, if its top-level `"mcpServers"` key is present but isn't a JSON
+    object (e.g. `null` or a list), or if it already has a DIFFERENT
+    `"agent-harness"` entry -- this never silently overwrites someone else's
+    server definition of the same name.
 
     Does NOT set `enableAllProjectMcpServers` -- approval is left to the
     user via Claude Code's normal project-MCP-server prompt.
@@ -424,7 +425,13 @@ def install_mcp_registration(
     else:
         existing = {}
 
-    servers = dict(existing.get("mcpServers", {}))
+    raw_servers = existing.get("mcpServers", {})
+    if not isinstance(raw_servers, dict):
+        raise InstallError(
+            f"{mcp_json_path} has a non-object 'mcpServers' value "
+            f"({type(raw_servers).__name__}); refusing to modify MCP registration"
+        )
+    servers = dict(raw_servers)
     current = servers.get(MCP_SERVER_NAME)
     if current is not None and current != server_entry:
         raise InstallError(

@@ -151,6 +151,15 @@ def test_build_index_non_list_nodes_raises_clear_diagnostic() -> None:
         graph_query.build_index({"nodes": "not-a-list", "links": []})
 
 
+def test_build_index_node_missing_id_raises_clear_diagnostic() -> None:
+    """A 'nodes' list whose entries aren't {"id": ...}-shaped objects must
+    fail with a clear SystemExit message, not an uncaught KeyError/TypeError
+    traceback -- same malformed-graph error convention as the other
+    build_index checks above."""
+    with pytest.raises(SystemExit, match="id"):
+        graph_query.build_index({"nodes": [{"label": "no id here"}], "links": []})
+
+
 # --- single discovery path (Wave 3 requirement 1) --------------------------
 
 
@@ -316,6 +325,17 @@ def test_query_raises_valueerror_on_unknown_command(graph_file: Path) -> None:
 def test_query_raises_filenotfound_on_explicit_missing_graph(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         graph_query.query("find", "anything", graph=tmp_path / "does-not-exist.json")
+
+
+def test_query_raises_valueerror_on_malformed_json(tmp_path: Path) -> None:
+    """A graph.json that exists but isn't valid JSON must surface as the
+    documented plain ValueError, not an uncaught json.JSONDecodeError --
+    callers like harness.mcp_server.dispatch only catch ValueError/
+    FileNotFoundError from query()."""
+    bad_graph = tmp_path / "graph.json"
+    bad_graph.write_text("{not valid json", encoding="utf-8")
+    with pytest.raises(ValueError):
+        graph_query.query("find", "anything", graph=bad_graph)
 
 
 def test_query_callers_matches_cli(graph_file: Path) -> None:

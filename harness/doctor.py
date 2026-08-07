@@ -260,7 +260,13 @@ def check_project(project_dir: Path) -> list[CheckResult]:
         try:
             mcp_config = config_validation.load_json_object(mcp_json_path)
             servers = mcp_config.get("mcpServers", {})
-            if "agent-harness" in servers:
+            if not isinstance(servers, dict):
+                results.append(CheckResult(
+                    "FAIL", "mcp registration",
+                    f".mcp.json has a non-object 'mcpServers' value ({type(servers).__name__}) "
+                    "-- fix it before --mcp merge",
+                ))
+            elif "agent-harness" in servers:
                 results.append(CheckResult(
                     "INFO", "mcp registration", ".mcp.json registers the agent-harness MCP server",
                 ))

@@ -179,6 +179,18 @@ def test_check_project_invalid_mcp_json_fails(tmp_path: Path) -> None:
     assert levels["mcp registration"] == "FAIL"
 
 
+def test_check_project_mcpservers_non_object_value_fails(tmp_path: Path) -> None:
+    """A syntactically valid .mcp.json whose 'mcpServers' key is present but
+    isn't a JSON object (e.g. a list) must FAIL cleanly -- previously
+    `"agent-harness" in servers` silently treated a list as having no
+    registrations instead of reporting the malformed config."""
+    mcp_json = tmp_path / ".mcp.json"
+    mcp_json.write_text(json.dumps({"mcpServers": []}), encoding="utf-8")
+    results = doctor.check_project(tmp_path)
+    levels = {r.name: r.level for r in results}
+    assert levels["mcp registration"] == "FAIL"
+
+
 def test_run_checks_includes_project_section(tmp_path: Path) -> None:
     without_project = doctor.run_checks()
     with_project = doctor.run_checks(tmp_path)

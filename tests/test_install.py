@@ -311,6 +311,23 @@ def test_mcp_refuses_invalid_mcp_json(tmp_path: Path) -> None:
     assert mcp_json_path.read_text(encoding="utf-8") == "{not json"
 
 
+def test_mcp_refuses_non_object_mcpservers_value(tmp_path: Path) -> None:
+    """A syntactically valid .mcp.json whose 'mcpServers' key is present but
+    isn't a JSON object (e.g. null) must be refused cleanly -- previously
+    `dict(existing.get("mcpServers", {}))` raised an uncaught TypeError on
+    `dict(None)` instead of the documented InstallError refusal."""
+    project = tmp_path / "myproject"
+    project.mkdir()
+    mcp_json_path = project / ".mcp.json"
+    mcp_json_path.write_text(json.dumps({"mcpServers": None}), encoding="utf-8")
+    before = mcp_json_path.read_text(encoding="utf-8")
+
+    with pytest.raises(install.InstallError):
+        install.install_mcp_registration(project, install.HARNESS_ROOT)
+
+    assert mcp_json_path.read_text(encoding="utf-8") == before
+
+
 def test_mcp_refuses_different_existing_agent_harness_entry(tmp_path: Path) -> None:
     project = tmp_path / "myproject"
     project.mkdir()

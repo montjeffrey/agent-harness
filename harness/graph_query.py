@@ -143,7 +143,12 @@ def build_index(g: dict) -> GraphIndex:
         raise SystemExit(
             f"graph.json malformed: expected a top-level 'nodes' list, got {got}"
         )
-    nodes = {n["id"]: n for n in raw_nodes}
+    try:
+        nodes = {n["id"]: n for n in raw_nodes}
+    except (TypeError, KeyError) as exc:
+        raise SystemExit(
+            f"graph.json malformed: every entry in 'nodes' must be an object with an 'id' field ({exc})"
+        ) from exc
     out_edges: dict[str, list[dict]] = defaultdict(list)
     in_edges: dict[str, list[dict]] = defaultdict(list)
     dropped = 0
@@ -338,6 +343,14 @@ def query(command: str, term: str, depth: int = 1, graph: Path | None = None) ->
         if message.startswith("graph.json not found at"):
             raise FileNotFoundError(message) from exc
         raise ValueError(message) from exc
+    except json.JSONDecodeError as exc:
+        # json.load() in load_graph() raises this directly (not via
+        # SystemExit) when graph.json exists but isn't valid JSON. It IS a
+        # ValueError subclass in the stdlib, but that's an implementation
+        # detail this module shouldn't lean on -- convert explicitly so the
+        # documented ValueError/FileNotFoundError contract holds for every
+        # malformed-graph case, not just the SystemExit ones.
+        raise ValueError(f"graph.json malformed: invalid JSON ({exc})") from exc
 
 
 def run(argv: list[str]) -> list[str]:
