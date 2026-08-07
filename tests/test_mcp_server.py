@@ -80,7 +80,7 @@ def test_main_exits_cleanly_without_sdk(monkeypatch: pytest.MonkeyPatch, capsys:
     exit_code = mcp_server.main([])
     assert exit_code == 1
     captured = capsys.readouterr()
-    assert "pip install agent-harness[mcp]" in captured.err
+    assert "pip install agent-harness-kit[mcp]" in captured.err
 
 
 def test_dispatch_find_returns_joined_lines(graph_file: Path, monkeypatch: pytest.MonkeyPatch) -> None:

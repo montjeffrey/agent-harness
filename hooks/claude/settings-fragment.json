@@ -19,6 +19,14 @@
             "command": "<python> <harness>/harness/graph_check.py"
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "<python> <harness>/hooks/claude/memory_context_hook.py"
+          }
+        ]
       }
     ]
   }

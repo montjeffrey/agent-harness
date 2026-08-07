@@ -1,10 +1,11 @@
-"""Stdio MCP server exposing the graph-query CLI as 7 typed MCP tools.
+"""Stdio MCP server exposing code-graph queries and project memory as 10
+typed MCP tools.
 
 Usage:
     python -m harness.mcp_server [--graph PATH]
     agent-harness-mcp [--graph PATH]
 
-Requires the optional `mcp` Python SDK:  pip install agent-harness[mcp]
+Requires the optional `mcp` Python SDK:  pip install agent-harness-kit[mcp]
 
 Module-level code imports only the standard library plus
 `harness.graph_query` -- `import harness.mcp_server` never requires the `mcp`
@@ -21,9 +22,20 @@ Tools (all thin wrappers around `harness.graph_query.query`):
     graph_file      -- nodes defined in files matching a path fragment
     graph_community -- nodes in communities matching a name fragment
 
-Output is capped by `harness.graph_query.MAX_ROWS` (no separate
+    memory_context  -- budgeted context packet: scope, open work, knowledge
+    memory_status   -- entry counts, freshness, what awaits review
+    memory_remember -- record one PROPOSED entry for human review
+
+Graph output is capped by `harness.graph_query.MAX_ROWS` (no separate
 protocol-visible `limit` parameter -- callers get the same row cap the CLI
-already enforces).
+already enforces). Memory output is capped by the context packet's own
+character budget.
+
+There is deliberately no review/accept tool. Review is the human gate that
+makes a proposal authoritative; an agent able to accept its own inferred
+entries would defeat the memory design's central trust rule. `memory_remember`
+therefore hardcodes `proposed`/`inferred` rather than taking them as
+parameters.
 """
 
 from __future__ import annotations
@@ -88,6 +100,196 @@ def dispatch(tool_name: str, arguments: dict) -> str:
     return "\n".join(lines)
 
 
+MEMORY_TOOL_DESCRIPTIONS: dict[str, str] = {
+    "memory_context": (
+        "Read this project's memory as a token-budgeted context packet: scope, "
+        "open work, and the most relevant durable project and machine knowledge. "
+        "Call this before starting work to recover what was already decided."
+    ),
+    "memory_status": (
+        "Summarize this project's memory: entry counts by status, how fresh it "
+        "is, and what is awaiting human review."
+    ),
+    "memory_remember": (
+        "Record one decision, discovery, task, blocker, or lesson as a PROPOSED "
+        "entry for human review. Use a single concise, durable sentence. Never "
+        "record credentials."
+    ),
+    "memory_confirm": (
+        "Record a plan the human just approved IN THIS CONVERSATION, together "
+        "with its steps as tracked action tasks. Pass their actual words as "
+        "`confirmation` -- it is stored as the evidence of approval. Only call "
+        "this after they have actually agreed; never to record your own "
+        "intention."
+    ),
+    "memory_task_done": (
+        "Mark one tracked action task complete. Supply evidence of completion "
+        "via `note`, `commit`, or `file` -- a task cannot be closed without it."
+    ),
+    "memory_tasks": (
+        "List open action tasks in priority order, plus the topics that work "
+        "keeps stalling on (bottlenecks). Call this to decide what to pick up."
+    ),
+}
+
+
+def dispatch_memory(tool_name: str, arguments: dict) -> str:
+    """Run one memory tool call and return plain text.
+
+    Kept separate from `dispatch` (which is `(term, depth)`-shaped for graph
+    queries) and free of the `mcp` SDK, so tests exercise it without either
+    optional dependency installed. Expected failures are returned as text
+    rather than raised, matching `dispatch`: a bad call should read as a tool
+    result, not crash the server for the rest of the session.
+    """
+    from harness import memory_context, memory_index, memory_store
+
+    root = Path(arguments.get("project") or ".").expanduser()
+
+    try:
+        if tool_name == "memory_context":
+            project_id = memory_store.project_id_for(root)
+            # `auto` is right here and wrong in a hook: this server is long
+            # lived, so a one-time chromadb import amortizes over the whole
+            # session instead of being paid at every session start.
+            try:
+                selector, strategy, notes = memory_index.resolve_selector(
+                    project_id, "auto"
+                )
+            except FileNotFoundError as exc:
+                return str(exc)
+            packet = memory_context.build_packet(
+                root,
+                query=arguments.get("query") or None,
+                max_chars=int(arguments.get("max_chars") or 4000),
+                selector=selector,
+                strategy=strategy,
+                notes=notes,
+            )
+            return memory_context.render_markdown(packet)
+
+        if tool_name == "memory_status":
+            entries = list(
+                memory_store.iter_entries(memory_store.project_memory_dir(root))
+            )
+            if not entries:
+                return f"no memory recorded yet in {root}"
+            by_status: dict[str, int] = {}
+            for rec in entries:
+                key = str(rec.get("status", "?"))
+                by_status[key] = by_status.get(key, 0) + 1
+            counts = ", ".join(f"{k}={v}" for k, v in sorted(by_status.items()))
+            return (
+                f"project {memory_store.project_id_for(root)}: {len(entries)} "
+                f"entries ({counts}); newest {entries[-1].get('ts', '?')}"
+            )
+
+        if tool_name == "memory_remember":
+            summary = str(arguments.get("summary") or "").strip()
+            if not summary:
+                return "summary is required -- one concise, durable sentence"
+            entry_type = str(arguments.get("type") or "")
+            if entry_type not in memory_store.ENTRY_TYPES:
+                return (
+                    f"unknown type {entry_type!r} -- choose from "
+                    f"{', '.join(memory_store.ENTRY_TYPES)}"
+                )
+            tags = [t.strip() for t in str(arguments.get("tags") or "").split(",")]
+            entry: dict = {
+                "type": entry_type,
+                "scope": "project",
+                "summary": summary,
+                # Hardcoded, not caller-controlled. An agent recording its own
+                # observation is exactly the "inferred" case, and the design's
+                # central trust rule is that nothing automatic may make itself
+                # authoritative. Promotion is `review`, which is deliberately
+                # not exposed as a tool.
+                "status": "proposed",
+                "confidence": "inferred",
+                "source": {"project": memory_store.project_id_for(root)},
+            }
+            if any(tags):
+                entry["tags"] = [t for t in tags if t]
+            memory_store.append_entries(
+                [entry], directory=memory_store.project_memory_dir(root)
+            )
+            written = list(
+                memory_store.iter_entries(memory_store.project_memory_dir(root))
+            )[-1]
+            return (
+                f"recorded {written['id']} as proposed; it becomes authoritative "
+                f"only after `agent-harness-memory review accept {written['id']}`"
+            )
+        if tool_name == "memory_confirm":
+            from harness import memory_tasks
+
+            steps = [
+                s.strip()
+                for s in str(arguments.get("tasks") or "").split("\n")
+                if s.strip()
+            ]
+            tags = [
+                t.strip()
+                for t in str(arguments.get("tags") or "").split(",")
+                if t.strip()
+            ]
+            outcome = memory_tasks.confirm(
+                memory_store.project_memory_dir(root),
+                summary=str(arguments.get("summary") or ""),
+                confirmation=str(arguments.get("confirmation") or ""),
+                tasks=steps,
+                tags=tags,
+                project_id=memory_store.project_id_for(root),
+            )
+            lines = [
+                f"confirmed {outcome.decision['id']}: {outcome.decision['summary']}"
+            ]
+            lines += [f"  task {t['id']}: {t['summary']}" for t in outcome.tasks]
+            lines.append(
+                "Close each with memory_task_done once it is verifiably finished."
+            )
+            return "\n".join(lines)
+
+        if tool_name == "memory_task_done":
+            from harness import memory_tasks
+
+            entry = memory_tasks.complete(
+                memory_store.project_memory_dir(root),
+                str(arguments.get("entry_id") or ""),
+                note=arguments.get("note") or None,
+                commit=arguments.get("commit") or None,
+                file=arguments.get("file") or None,
+            )
+            return f"{entry['id']} -> resolved: {entry['summary']}"
+
+        if tool_name == "memory_tasks":
+            from harness import memory_tasks
+
+            entries = list(
+                memory_store.iter_entries(memory_store.project_memory_dir(root))
+            )
+            ranked = memory_tasks.prioritized(entries)
+            stuck = memory_tasks.bottlenecks(entries)
+            if not ranked:
+                return "no open action tasks"
+            lines = [f"{len(ranked)} open, in priority order:"]
+            lines += [
+                f"  {e['id']} [{e.get('type')}] {e.get('summary')}" for e in ranked
+            ]
+            if stuck:
+                lines.append("\nbottlenecks:")
+                lines += [f"  {b.describe()}" for b in stuck]
+            return "\n".join(lines)
+
+    except (ValueError, LookupError, OSError) as exc:
+        return f"memory tool failed: {exc}"
+
+    return (
+        f"unknown tool '{tool_name}' -- choose from "
+        f"{', '.join(MEMORY_TOOL_DESCRIPTIONS)}"
+    )
+
+
 def _parse_argv(argv: list[str]) -> Path | None:
     """Pull an optional `--graph PATH` override out of argv. Anything else
     is ignored -- this server takes no other CLI flags."""
@@ -103,16 +305,22 @@ def _parse_argv(argv: list[str]) -> Path | None:
 
 
 def _build_server():
-    """Construct the FastMCP server and register all 7 tools.
+    """Construct the FastMCP server and register all 10 tools.
 
     Imports the `mcp` SDK lazily -- only called from `main()`, never at
     module import time.
+
+    Note what is absent: there is no `memory_review` / `memory_accept` tool.
+    Review is the human gate that turns a proposal into authoritative
+    knowledge, and handing an agent the ability to accept its own inferred
+    entries would collapse the one trust boundary the memory design is built
+    around. Promotion stays on the CLI, in front of a person.
     """
     from mcp.server.fastmcp import FastMCP
 
     mcp_app = FastMCP("agent-harness")
 
-    def _make_tool(tool_name: str):
+    def _make_graph_tool(tool_name: str):
         def _tool(term: str, depth: int = 1) -> str:
             return dispatch(tool_name, {"term": term, "depth": depth})
 
@@ -121,7 +329,78 @@ def _build_server():
         return _tool
 
     for name in TOOL_TO_COMMAND:
-        mcp_app.tool(name=name, description=TOOL_DESCRIPTIONS[name])(_make_tool(name))
+        mcp_app.tool(name=name, description=TOOL_DESCRIPTIONS[name])(
+            _make_graph_tool(name)
+        )
+
+    def memory_context(query: str = "", max_chars: int = 4000, project: str = "") -> str:
+        return dispatch_memory(
+            "memory_context",
+            {"query": query, "max_chars": max_chars, "project": project},
+        )
+
+    def memory_status(project: str = "") -> str:
+        return dispatch_memory("memory_status", {"project": project})
+
+    def memory_remember(
+        type: str, summary: str, tags: str = "", project: str = ""
+    ) -> str:
+        return dispatch_memory(
+            "memory_remember",
+            {"type": type, "summary": summary, "tags": tags, "project": project},
+        )
+
+    def memory_confirm(
+        summary: str,
+        confirmation: str,
+        tasks: str = "",
+        tags: str = "",
+        project: str = "",
+    ) -> str:
+        return dispatch_memory(
+            "memory_confirm",
+            {
+                "summary": summary,
+                "confirmation": confirmation,
+                "tasks": tasks,
+                "tags": tags,
+                "project": project,
+            },
+        )
+
+    def memory_task_done(
+        entry_id: str,
+        note: str = "",
+        commit: str = "",
+        file: str = "",
+        project: str = "",
+    ) -> str:
+        return dispatch_memory(
+            "memory_task_done",
+            {
+                "entry_id": entry_id,
+                "note": note,
+                "commit": commit,
+                "file": file,
+                "project": project,
+            },
+        )
+
+    def memory_tasks(project: str = "") -> str:
+        return dispatch_memory("memory_tasks", {"project": project})
+
+    for func in (
+        memory_context,
+        memory_status,
+        memory_remember,
+        memory_confirm,
+        memory_task_done,
+        memory_tasks,
+    ):
+        func.__doc__ = MEMORY_TOOL_DESCRIPTIONS[func.__name__]
+        mcp_app.tool(
+            name=func.__name__, description=MEMORY_TOOL_DESCRIPTIONS[func.__name__]
+        )(func)
 
     return mcp_app
 
@@ -137,7 +416,7 @@ def main(argv: list[str] | None = None) -> int:
     except ImportError:
         print(
             "harness.mcp_server requires the optional 'mcp' Python SDK.\n"
-            "install with: pip install agent-harness[mcp]",
+            "install with: pip install agent-harness-kit[mcp]",
             file=sys.stderr,
         )
         return 1

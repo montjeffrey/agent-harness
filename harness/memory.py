@@ -1,20 +1,25 @@
-"""Portable hierarchical memory CLI: init, remember, and status.
+"""Portable hierarchical memory CLI: init, remember, status, review, context,
+and index.
 
-Capture is explicit. Nothing in this module runs automatically, summarizes
-with an AI model, or opens a network socket -- it only reads and appends
-local Markdown/JSONL under the project and machine memory roots described in
-`harness.memory_store`.
+Capture is explicit. Nothing in this module runs automatically or summarizes
+with an AI model. `init`, `remember`, `status`, `review`, and `context` are
+stdlib-only and never open a network socket; `index` is the one command that
+may touch the optional `chromadb` extra, and it is deliberately separate from
+`context` so the agent hot path can never trigger a model download.
 
 Exit codes are part of the contract so automation can branch on them:
 
     0  success
-    1  nothing to do (e.g. status on an uninitialized project)
-    2  input rejected (schema, trust rule, or probable secret)
+    1  nothing to do, or a requested capability is unavailable
+    2  input rejected (schema, trust rule, probable secret, bad transition)
 
 Usage:
     python harness/memory.py init [PATH]
     python harness/memory.py remember --type TYPE --summary TEXT [options]
     python harness/memory.py status [--project PATH]
+    python harness/memory.py review list | ACTION ENTRY_ID [options]
+    python harness/memory.py context [--query TEXT] [--json] [--strategy S]
+    python harness/memory.py index [--project PATH]
 """
 
 from __future__ import annotations
@@ -26,10 +31,10 @@ from pathlib import Path
 HARNESS_ROOT = Path(__file__).resolve().parent.parent
 
 try:
-    from harness import memory_store
+    from harness import memory_context, memory_index, memory_review, memory_store
 except ImportError:  # running as `python harness/memory.py`, not `-m harness.memory`
     sys.path.insert(0, str(HARNESS_ROOT))
-    from harness import memory_store
+    from harness import memory_context, memory_index, memory_review, memory_store
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -66,6 +71,48 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
     status_p = sub.add_parser("status", help="report memory freshness, counts, and scope warnings")
     status_p.add_argument("--project", default=".", help="project root (default: current directory)")
+
+    rev_p = sub.add_parser("review", help="list proposals or act on one")
+    rev_p.add_argument(
+        "action", choices=("list", *memory_review.REVIEW_ACTIONS),
+        help="`list` shows what is awaiting review; the rest transition one entry",
+    )
+    rev_p.add_argument("entry_id", nargs="?", help="entry id, required for every action but `list`")
+    rev_p.add_argument("--project", default=".", help="project root (default: current directory)")
+    rev_p.add_argument("--scope", choices=memory_store.SCOPES, default="project")
+    rev_p.add_argument(
+        "--summary", default=None,
+        help="replacement statement (required by supersede; amends wording on accept)",
+    )
+    rev_p.add_argument("--note", default=None, help="reviewer note; counts as resolve evidence")
+    rev_p.add_argument("--commit", default=None, help="evidence commit SHA")
+    rev_p.add_argument("--file", default=None, help="evidence path, repository-relative")
+
+    ctx_p = sub.add_parser("context", help="emit a token-budgeted context packet")
+    ctx_p.add_argument("--project", default=".", help="project root (default: current directory)")
+    ctx_p.add_argument(
+        "--query", default=None,
+        help="what to select for (default: the active objective from scope.md)",
+    )
+    ctx_p.add_argument(
+        "--strategy", choices=memory_index.STRATEGIES, default="auto",
+        help="selection strategy; `auto` prefers semantic and falls back to "
+             "deterministic with a note (default: auto)",
+    )
+    ctx_p.add_argument(
+        "--max-chars", type=int, default=memory_context.DEFAULT_MAX_CHARS,
+        help=f"hard packet ceiling (default: {memory_context.DEFAULT_MAX_CHARS})",
+    )
+    ctx_p.add_argument(
+        "--id", action="append", default=[], dest="ids",
+        help="pin an entry id to the front of its section (repeatable)",
+    )
+    ctx_p.add_argument("--json", action="store_true", help="emit JSON instead of Markdown")
+
+    idx_p = sub.add_parser(
+        "index", help="build or refresh the ChromaDB semantic index (needs the `semantic` extra)"
+    )
+    idx_p.add_argument("--project", default=".", help="project root (default: current directory)")
 
     return parser.parse_args(argv)
 
@@ -181,7 +228,129 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
-_COMMANDS = {"init": cmd_init, "remember": cmd_remember, "status": cmd_status}
+def _scope_dir(scope: str, root: Path) -> Path:
+    return (
+        memory_store.machine_memory_dir()
+        if scope == "machine"
+        else memory_store.project_memory_dir(root)
+    )
+
+
+def cmd_review(args: argparse.Namespace) -> int:
+    root = Path(args.project).expanduser()
+    directory = _scope_dir(args.scope, root)
+
+    if args.action == "list":
+        pending = memory_review.pending_entries(directory)
+        if not pending:
+            print(f"nothing awaiting review in {args.scope} memory")
+            return 1
+        print(f"{len(pending)} awaiting review in {args.scope} memory:\n")
+        for rec in pending:
+            print(f"  {rec['id']}  [{rec.get('type')}] {rec.get('summary')}")
+        print("\nAccept with `agent-harness-memory review accept <id>`.")
+        return 0
+
+    if not args.entry_id:
+        print(f"review {args.action} needs an entry id", file=sys.stderr)
+        return 2
+
+    try:
+        result = memory_review.apply_review(
+            directory,
+            args.entry_id,
+            args.action,
+            summary=args.summary,
+            note=args.note,
+            commit=args.commit,
+            file=args.file,
+        )
+    except LookupError as exc:
+        print(f"{exc}", file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        print(f"review rejected: {exc}", file=sys.stderr)
+        return 2
+
+    print(f"{result.entry['id']} -> {result.entry['status']}")
+    if result.created:
+        print(f"  replacement: {result.created['id']} {result.created['summary']}")
+    return 0
+
+
+def cmd_context(args: argparse.Namespace) -> int:
+    root = Path(args.project).expanduser()
+    project_id = memory_store.project_id_for(root)
+
+    try:
+        selector, strategy, notes = memory_index.resolve_selector(project_id, args.strategy)
+    except FileNotFoundError as exc:
+        print(f"{exc}", file=sys.stderr)
+        return 1
+
+    packet = memory_context.build_packet(
+        root,
+        query=args.query,
+        max_chars=args.max_chars,
+        include_ids=args.ids,
+        selector=selector,
+        strategy=strategy,
+        notes=notes,
+    )
+    sys.stdout.write(
+        memory_context.render_json(packet) if args.json
+        else memory_context.render_markdown(packet)
+    )
+    return 0
+
+
+def cmd_index(args: argparse.Namespace) -> int:
+    root = Path(args.project).expanduser()
+    project_id = memory_store.project_id_for(root)
+
+    if not memory_index.chromadb_available():
+        print(
+            'chromadb is not installed -- run `pip install "agent-harness-kit[semantic]"`',
+            file=sys.stderr,
+        )
+        return 1
+
+    # Two indexes, not one: project entries are this repo's, machine entries
+    # are shared by every project. Building them separately is what keeps a
+    # machine-scope lesson from being re-embedded once per enrolled project.
+    project_entries = list(
+        memory_store.iter_entries(memory_store.project_memory_dir(root))
+    )
+    machine_entries = list(
+        memory_store.iter_entries(memory_store.machine_memory_dir())
+    )
+    if not project_entries and not machine_entries:
+        print(f"no memory entries to index in {root}")
+        return 1
+
+    for label, entries, index_dir in (
+        ("project", project_entries, memory_index.index_dir_for(project_id)),
+        ("machine", machine_entries, memory_index.machine_index_dir()),
+    ):
+        if not entries:
+            continue
+        stats = memory_index.build_index(entries, index_dir)
+        print(f"{label}: indexed {len(entries)} entries into {index_dir}")
+        print(
+            f"  added={stats.added} updated={stats.updated} "
+            f"deleted={stats.deleted} unchanged={stats.unchanged}"
+        )
+    return 0
+
+
+_COMMANDS = {
+    "init": cmd_init,
+    "remember": cmd_remember,
+    "status": cmd_status,
+    "review": cmd_review,
+    "context": cmd_context,
+    "index": cmd_index,
+}
 
 
 def main(argv: list[str] | None = None) -> int:
