@@ -113,4 +113,12 @@ def test_all_surfaces_agree_approval_is_set_via_status_field_only() -> None:
         assert "Approved" in text, f"{name} must reference the Approved value"
         # None of these surfaces should reference ticking/checking a box as
         # part of the approval mechanism.
-        assert "tick" not in text.lower(), f"{name} must not describe a checkbox-ticking approval step"
+        #
+        # "backtick" is stripped first: it is the standard name for the `
+        # character and says nothing about approval, but it contains "tick"
+        # as a substring, so a bare containment check fires on any document
+        # that explains Markdown code quoting. Narrowing the haystack keeps
+        # this guard exactly as strict about approval language while letting
+        # prose use the ordinary word for a backtick.
+        approval_text = re.sub(r"backtick\w*", "", text, flags=re.IGNORECASE)
+        assert "tick" not in approval_text.lower(), f"{name} must not describe a checkbox-ticking approval step"
