@@ -104,7 +104,10 @@ MEMORY_TOOL_DESCRIPTIONS: dict[str, str] = {
     "memory_context": (
         "Read this project's memory as a token-budgeted context packet: scope, "
         "open work, and the most relevant durable project and machine knowledge. "
-        "Call this before starting work to recover what was already decided."
+        "Call this before starting work to recover what was already decided. "
+        "Entries naming a symbol the code graph knows also carry that symbol's "
+        "blast radius -- how many dependents it has and which files they are "
+        "in -- so a past decision arrives with the code it actually touches."
     ),
     "memory_status": (
         "Summarize this project's memory: entry counts by status, how fresh it "
@@ -158,13 +161,20 @@ def dispatch_memory(tool_name: str, arguments: dict) -> str:
                 )
             except FileNotFoundError as exc:
                 return str(exc)
+            # Join memory to the code graph, so a recalled decision arrives
+            # with the symbols it touches instead of leaving the agent to
+            # guess. A silent no-op when this repo has no graph.
+            from harness import memory_graph
+
+            annotator, graph_notes = memory_graph.build_annotator(root)
             packet = memory_context.build_packet(
                 root,
                 query=arguments.get("query") or None,
                 max_chars=int(arguments.get("max_chars") or 4000),
                 selector=selector,
                 strategy=strategy,
-                notes=notes,
+                notes=list(notes) + graph_notes,
+                annotator=annotator,
             )
             return memory_context.render_markdown(packet)
 

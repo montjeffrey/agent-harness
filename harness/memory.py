@@ -107,6 +107,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--id", action="append", default=[], dest="ids",
         help="pin an entry id to the front of its section (repeatable)",
     )
+    ctx_p.add_argument(
+        "--graph", type=Path, default=None,
+        help="explicit path to graph.json (default: discover it in this repo)",
+    )
+    ctx_p.add_argument(
+        "--no-graph", action="store_true",
+        help="skip code-graph blast-radius annotation entirely",
+    )
     ctx_p.add_argument("--json", action="store_true", help="emit JSON instead of Markdown")
 
     idx_p = sub.add_parser(
@@ -288,6 +296,17 @@ def cmd_context(args: argparse.Namespace) -> int:
         print(f"{exc}", file=sys.stderr)
         return 1
 
+    # The code-graph join is on by default and silent when there is no graph:
+    # a repo that never ran `graph_refresh` gets exactly the packet it always
+    # got, with no error and no note. `--no-graph` is for when the graph
+    # exists but you want the packet without it.
+    annotator = None
+    if not args.no_graph:
+        from harness import memory_graph
+
+        annotator, graph_notes = memory_graph.build_annotator(root, graph_path=args.graph)
+        notes = list(notes) + graph_notes
+
     packet = memory_context.build_packet(
         root,
         query=args.query,
@@ -296,6 +315,7 @@ def cmd_context(args: argparse.Namespace) -> int:
         selector=selector,
         strategy=strategy,
         notes=notes,
+        annotator=annotator,
     )
     sys.stdout.write(
         memory_context.render_json(packet) if args.json

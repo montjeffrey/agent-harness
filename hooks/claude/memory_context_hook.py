@@ -35,6 +35,7 @@ from pathlib import Path
 HOOK_MAX_CHARS = 3500
 STRATEGY_ENV = "AGENT_HARNESS_HOOK_STRATEGY"
 MAX_CHARS_ENV = "AGENT_HARNESS_HOOK_MAX_CHARS"
+GRAPH_ENV = "AGENT_HARNESS_HOOK_GRAPH"
 
 # Auto-enrollment: create `.agent-harness/` on first sight of a project.
 # Off unless a workspace root is configured, because this hook runs in every
@@ -118,12 +119,37 @@ def emit(project_root: Path) -> str:
         resolved = "deterministic"
         notes = []
 
+    # The code-graph join, unlike semantic selection, is affordable here:
+    # measured on a 6,300-node graph it is ~210ms to import and ~375ms to
+    # parse and index, with annotation itself under a millisecond because
+    # blast radii are memoized per symbol. No model, no chromadb, no network.
+    # Set AGENT_HARNESS_HOOK_GRAPH=0 to turn it off.
+    #
+    # `check_health` is off deliberately. It costs two `git` calls -- ~880ms
+    # on a large repo on network-backed storage, more than the rest of this
+    # hook put together -- and buys nothing here, because `graph_check.py`
+    # runs as a SessionStart hook alongside this one and already reports a
+    # stale or dirty graph. The standalone CLI and MCP paths keep it on;
+    # they have no such sibling.
+    annotator = None
+    if os.environ.get(GRAPH_ENV, "1").strip().lower() not in {"0", "false", "no"}:
+        try:
+            from harness import memory_graph
+
+            annotator, graph_notes = memory_graph.build_annotator(
+                project_root, check_health=False
+            )
+            notes = list(notes) + graph_notes
+        except Exception:  # noqa: BLE001 -- see rule 1 in the module docstring
+            annotator = None
+
     packet = memory_context.build_packet(
         project_root,
         max_chars=_int_env(MAX_CHARS_ENV, HOOK_MAX_CHARS),
         selector=selector,
         strategy=resolved,
         notes=notes,
+        annotator=annotator,
     )
     # A packet with no sections -- only a "nothing recorded yet" warning --
     # is noise at session start. Stay quiet until there is something to say.
