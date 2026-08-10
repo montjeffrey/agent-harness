@@ -369,3 +369,123 @@ def test_context_cli_works_on_an_uninitialized_project(tmp_path: Path, capsys) -
     bare.mkdir()
     assert memory.main(["context", "--project", str(bare)]) == 0
     assert "no project memory" in capsys.readouterr().out
+
+
+# --- graph annotation seam ------------------------------------------------
+#
+# `memory_context` never imports the graph; it accepts an annotator callable
+# (`harness.memory_graph` supplies the real one). These tests use a stub, so
+# the packet's contract is verified independently of graph availability.
+
+IMPACT = {
+    "symbol": "build_packet",
+    "node_id": "ctx_build_packet",
+    "source_file": "harness/memory_context.py",
+    "dependents": 4,
+    "files": ["harness/memory.py"],
+    "line": "    graph: `build_packet` -- 4 dependents in 1 file (harness/memory.py)",
+}
+
+
+def _stub_annotator(entry):
+    return (IMPACT,)
+
+
+def test_without_an_annotator_the_packet_is_byte_identical(scoped: Path) -> None:
+    _add(scoped, "Rewrote build_packet to take an annotator.")
+    plain = memory_context.render_markdown(memory_context.build_packet(scoped, now=NOW))
+    explicit = memory_context.render_markdown(
+        memory_context.build_packet(scoped, annotator=None, now=NOW)
+    )
+    assert plain == explicit
+    assert "graph:" not in plain
+
+
+def test_an_annotation_rides_inside_the_entrys_own_unit(scoped: Path) -> None:
+    """One unit, not two -- budgeting is unit-atomic, so a separate unit could
+    be dropped while its entry survives, leaving a claim with no evidence."""
+    _add(scoped, "Rewrote build_packet.")
+    packet = memory_context.build_packet(scoped, annotator=_stub_annotator, now=NOW)
+    units = _section(packet, "project_durable").units
+    assert len(units) == 1
+    assert units[0].startswith("- `mem-")
+    assert IMPACT["line"] in units[0]
+
+
+def test_an_annotated_entry_is_included_or_omitted_whole(scoped: Path) -> None:
+    """A budget with room for the entry but not its annotation drops both."""
+    _add(scoped, "Rewrote build_packet.")
+    bare = _section(memory_context.build_packet(scoped, now=NOW), "project_durable")
+    budget = len(bare.units[0]) + 1  # exactly enough for the unannotated entry
+
+    fits = memory_context.build_packet(
+        scoped, budgets={"project_durable": budget}, now=NOW
+    )
+    assert len(_section(fits, "project_durable").units) == 1
+
+    annotated = _section(
+        memory_context.build_packet(
+            scoped,
+            budgets={"project_durable": budget},
+            annotator=_stub_annotator,
+            now=NOW,
+        ),
+        "project_durable",
+    )
+    assert annotated.units == ()
+    assert annotated.omitted == 1
+
+
+def test_records_carry_the_structured_impact_without_mutating_the_entry(
+    scoped: Path,
+) -> None:
+    _add(scoped, "Rewrote build_packet.")
+    packet = memory_context.build_packet(scoped, annotator=_stub_annotator, now=NOW)
+    record = _section(packet, "project_durable").records[0]
+    assert record["graph_impact"] == [IMPACT]
+    # The stored entry is untouched: the packet holds an annotated copy.
+    stored = next(
+        memory_store.iter_entries(memory_store.project_memory_dir(scoped))
+    )
+    assert "graph_impact" not in stored
+
+
+def test_json_output_carries_the_impact_for_machine_consumers(scoped: Path) -> None:
+    _add(scoped, "Rewrote build_packet.")
+    packet = memory_context.build_packet(scoped, annotator=_stub_annotator, now=NOW)
+    payload = json.loads(memory_context.render_json(packet))
+    durable = next(s for s in payload["sections"] if s["key"] == "project_durable")
+    assert durable["records"][0]["graph_impact"][0]["dependents"] == 4
+
+
+def test_open_work_is_annotated_too_not_just_durable_knowledge(scoped: Path) -> None:
+    _add(scoped, "Finish build_packet.", type="task", status="proposed",
+         confidence="inferred", source=None)
+    packet = memory_context.build_packet(scoped, annotator=_stub_annotator, now=NOW)
+    assert IMPACT["line"] in "\n".join(_section(packet, "active").units)
+
+
+def test_an_annotator_returning_nothing_changes_nothing(scoped: Path) -> None:
+    _add(scoped, "A fact with no resolvable symbol.")
+    plain = memory_context.render_markdown(memory_context.build_packet(scoped, now=NOW))
+    empty = memory_context.render_markdown(
+        memory_context.build_packet(scoped, annotator=lambda e: (), now=NOW)
+    )
+    assert plain == empty
+
+
+def test_context_cli_stays_quiet_when_the_project_has_no_graph(
+    scoped: Path, capsys
+) -> None:
+    """Graph annotation is on by default and must degrade to silence."""
+    _add(scoped, "Rewrote build_packet.")
+    assert memory.main(["context", "--project", str(scoped)]) == 0
+    out = capsys.readouterr().out
+    assert "# Project context:" in out
+    assert "graph:" not in out
+
+
+def test_context_cli_accepts_no_graph(scoped: Path, capsys) -> None:
+    _add(scoped, "Rewrote build_packet.")
+    assert memory.main(["context", "--project", str(scoped), "--no-graph"]) == 0
+    assert "# Project context:" in capsys.readouterr().out

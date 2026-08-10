@@ -25,8 +25,15 @@ omitted whole, with the omitted count reported. No record is ever cut in
 half, because a half-record reads as a complete one to a model and that is
 how a context packet starts lying.
 
+A third seam, `annotator`, enriches entries with facts from outside memory:
+`harness.memory_graph` supplies one that resolves the symbols an entry names
+against the code graph and appends each one's blast radius. It is injected
+rather than imported so this module never depends on a graph existing, and
+its output rides *inside* the annotated entry's unit -- never as a unit of
+its own, which budgeting could drop while keeping the claim it supports.
+
 Nothing here opens a network socket or calls an AI model. With no selector
-supplied the module is stdlib-only and fully deterministic.
+and no annotator supplied the module is stdlib-only and fully deterministic.
 """
 
 from __future__ import annotations
@@ -79,6 +86,22 @@ SECTION_ORDER: tuple[str, ...] = (
 # and returns at most `limit` of them. It may return fewer; it must not
 # invent entries. This is the seam Increment 3's ChromaDB backend plugs into.
 Selector = Callable[[Sequence[dict], "str | None", int], list[dict]]
+
+# An annotator enriches one entry with facts drawn from outside memory --
+# today, `harness.memory_graph` resolves the symbols an entry names against
+# the code graph and returns their blast radius. Each returned mapping must
+# carry a pre-rendered `line` (appended inside the entry's own unit) and may
+# carry any structured fields alongside it (preserved in the packet's
+# records, so JSON consumers get more than a string).
+#
+# Two rules, both load-bearing. An annotator must never raise: it runs inside
+# packet assembly, and enrichment failing must never cost an agent its
+# memory. And it must be deterministic, because the packet's stability
+# guarantee is what makes drift visible in a diff.
+#
+# The seam is a callable rather than an import so this module stays
+# stdlib-only and buildable with no graph anywhere in sight.
+Annotator = Callable[[dict], Sequence[dict]]
 
 # How many entries a selector is asked for per section. Generous relative to
 # the budget: budgeting trims the tail, so over-fetching costs nothing but
@@ -258,12 +281,18 @@ def active_objective(project_root: Path) -> str | None:
 # --- entry rendering ------------------------------------------------------
 
 
-def render_entry(entry: dict) -> str:
-    """One entry as a single atomic Markdown line.
+def render_entry(entry: dict, impacts: Sequence[dict] = ()) -> str:
+    """One entry as a single atomic Markdown unit.
 
     Carries id, type, and status because an agent that wants to supersede or
     resolve something needs the id, and one weighing a claim needs to know
     whether it was accepted or is merely proposed.
+
+    `impacts` (from an `Annotator`) append their `line` as continuation lines
+    *within the returned string*, not as separate units. That is deliberate:
+    budgeting is unit-atomic, so a blast radius emitted as its own unit could
+    be dropped while the entry claiming it survived -- an entry whose
+    evidence silently vanished reads exactly like one that never had any.
     """
     parts = [f"- `{entry.get('id', '?')}` [{entry.get('type', '?')}]"]
     status = entry.get("status")
@@ -273,7 +302,31 @@ def render_entry(entry: dict) -> str:
     tags = entry.get("tags")
     if tags:
         parts.append("-- tags: " + ", ".join(tags))
-    return " ".join(p for p in parts if p)
+    line = " ".join(p for p in parts if p)
+
+    extra = [str(i["line"]) for i in impacts if i.get("line")]
+    return "\n".join([line, *extra])
+
+
+def _entry_units(
+    entries: Sequence[dict], annotator: Annotator | None
+) -> tuple[list[str], list[dict]]:
+    """Render `entries` to units, annotated when an annotator is supplied.
+
+    Returns annotated *copies* -- the entries handed in came from the store
+    and are never mutated, so a packet can never write its own enrichment
+    back into project memory.
+    """
+    if annotator is None:
+        return [render_entry(e) for e in entries], list(entries)
+
+    units: list[str] = []
+    records: list[dict] = []
+    for entry in entries:
+        impacts = list(annotator(entry))
+        units.append(render_entry(entry, impacts))
+        records.append({**entry, "graph_impact": impacts} if impacts else entry)
+    return units, records
 
 
 # --- budgeting ------------------------------------------------------------
@@ -350,6 +403,7 @@ def build_packet(
     selector: Selector | None = None,
     strategy: str = "deterministic",
     notes: Sequence[str] = (),
+    annotator: Annotator | None = None,
     now: datetime | None = None,
 ) -> ContextPacket:
     """Assemble a budget-bounded context packet for `project_root`.
@@ -363,6 +417,11 @@ def build_packet(
     `selector` defaults to `deterministic_selector`; `strategy` is recorded
     on the packet purely so a reader (or a benchmark) can tell which
     selection produced it.
+
+    `annotator` is the optional join to the code graph (see `Annotator` and
+    `harness.memory_graph`). With none supplied the packet is exactly what it
+    was before that join existed -- memory has never needed a graph to work,
+    and adding one must not change that.
     """
     now = now or datetime.now(timezone.utc)
     root = Path(project_root)
@@ -403,8 +462,9 @@ def build_packet(
     # Unresolved work leads the rest of the active section: it is the design's
     # second priority tier and outranks anything a selector would surface.
     open_work = _open_work(project_entries)
-    active_units = active_units + [render_entry(e) for e in open_work]
-    active_records = active_records + list(open_work)
+    open_units, open_records = _entry_units(open_work, annotator)
+    active_units = active_units + open_units
+    active_records = active_records + open_records
 
     open_ids = {e.get("id") for e in open_work}
     project_durable = [
@@ -449,8 +509,9 @@ def build_packet(
     ]
     if stuck:
         ranked = memory_tasks.prioritized(project_entries, now=now)
-        priority_units += [render_entry(e) for e in ranked]
-        priority_records += ranked
+        ranked_units, ranked_records = _entry_units(ranked, annotator)
+        priority_units += ranked_units
+        priority_records += ranked_records
 
     raw: dict[str, tuple[list[str], list[dict]]] = {
         "scope": (scope_units, scope_records),
@@ -458,7 +519,7 @@ def build_packet(
         "priorities": (priority_units, priority_records),
     }
     for key, records in selected.items():
-        raw[key] = ([render_entry(e) for e in records], records)
+        raw[key] = _entry_units(records, annotator)
 
     sections: list[Section] = []
     spent = 0
