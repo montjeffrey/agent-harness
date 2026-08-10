@@ -513,6 +513,59 @@ project memory is committed and a binary index should not be. Embedding is
 local (all-MiniLM-L6-v2, ONNX) -- no API key, and summaries never leave the
 machine. Without the extra, everything above still works deterministically.
 
+### Blast radius: memory joined to the code graph
+
+Memory answers *what we decided*. The code graph answers *what calls this*.
+On their own those are two unrelated replies to the same question. `context`
+joins them: an entry that names a symbol the graph knows gets that symbol's
+blast radius attached to it.
+
+```text
+- `mem-2026-08-10-002` [decision] Context packets are assembled by build_packet;
+  a new section has to be added to SECTION_ORDER as well.
+    graph: `build_packet` -- 4 dependents in 3 files
+    (harness/mcp_server.py, harness/memory.py, hooks/claude/memory_context_hook.py)
+```
+
+The count is the same transitive closure `graph_query.py impact` reports, from
+the same traversal, so the packet and the query CLI can never disagree. Files
+are listed nearest-first -- fewest hops to a dependent -- so the direct call
+sites are the ones that make the line and the transitive tail collapses into
+`+N more`.
+
+Resolution is deliberately conservative, because a wrong blast radius is worse
+than none:
+
+- A name is looked up only if it is **symbol-shaped**: backticked,
+  `snake_case`, `camelCase`, `call()`, or a filename. Ordinary prose is never
+  matched, so an entry mentioning "the auth flow" does not light up every node
+  labelled `auth`.
+- It must resolve to **exactly one** node. An ambiguous label -- `page.tsx` is
+  shared by dozens of nodes in any sizeable Next.js app -- is dropped, never
+  guessed at.
+- Backticks override the shape rule: writing `` `auth` `` is an explicit
+  statement that you meant the symbol.
+
+Annotation is on by default and degrades to silence: a project with no graph
+gets exactly the packet it got before this existed, with no error and no note.
+An unreadable graph, or one git reports as stale or dirty, says so as a packet
+note rather than being quietly trusted. `--no-graph` turns the join off;
+`--graph PATH` points at a specific `graph.json` instead of discovering one.
+In the SessionStart hook the same join runs unless
+`AGENT_HARNESS_HOOK_GRAPH=0`. **It is not free:** on a 6,300-node graph it
+adds roughly a second to session start (~2.1s with it, ~1.0s without), almost
+all of it importing the module and parsing `graph.json`. Annotation itself is
+under a millisecond, because blast radii are memoized per symbol. Cost scales
+with graph size, so a smaller project pays far less; there is no model, no
+`chromadb`, and no network in that path. If you want the packet without the
+wait, set the variable -- the CLI and MCP tools still do the join on demand.
+
+The hook deliberately skips the git freshness check that the CLI and MCP
+paths run. Those are two `git` calls, ~880ms on a large repo on network-backed
+storage -- more than everything else in the hook combined -- and they buy
+nothing here, because `graph_check.py` runs as a SessionStart hook alongside
+this one and already reports a stale or dirty graph.
+
 Exit codes: `0` success, `1` nothing to do (e.g. `status` before `init`),
 `2` input rejected.
 

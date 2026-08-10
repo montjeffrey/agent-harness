@@ -84,6 +84,24 @@ Design: `docs/superpowers/specs/2026-07-22-portable-hierarchical-memory-design.m
   installs from the local checkout and registers the SessionStart hook at
   *user* scope, which is what lets `agent-harness-enroll` be memory + graph
   + index only and write no instruction files.
+- Shipped: the memory/graph join (`harness/memory_graph.py`). Until now the
+  two halves of this toolkit answered adjacent questions independently --
+  memory said "here is what we decided", the graph said "here is what calls
+  this", and nothing said "the decision you recorded last week touches these
+  symbols". `context` now resolves symbol-shaped names out of an entry's
+  summary and tags, matches them against graph node labels, and renders each
+  match's transitive dependents inside that entry's own unit (so budgeting
+  stays unit-atomic and a blast radius can never outlive the entry claiming
+  it). The traversal is `graph_query`'s, so the packet and `impact` cannot
+  disagree; files are ordered nearest-first so the direct call sites are the
+  ones that fit on the line. Resolution requires symbol *shape* and an
+  exactly-unique label match -- ambiguous labels are dropped, never guessed,
+  because a wrong blast radius is worse than none. On by default across CLI,
+  MCP, and the SessionStart hook; silent where no graph exists; `--no-graph`
+  and `AGENT_HARNESS_HOOK_GRAPH=0` opt out.
+- Remaining on that join: the other direction -- ranking graph query results
+  by memory relevance, so `find` surfaces the symbols a recent decision
+  touched ahead of equally-named ones nobody has discussed.
 - Note: the design doc lists a vector database as a non-goal "for the first
   implementation". That still holds for the *core* package -- `chromadb`
   stays an optional extra and every command works without it -- but semantic
