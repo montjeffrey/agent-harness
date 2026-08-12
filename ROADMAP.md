@@ -196,10 +196,15 @@ Open:
   local checkout precisely *because* the PyPI name is unclaimed. Publishing is
   the step that makes `pip install "agent-harness-kit[semantic]"` true, and
   `tests/test_semantic_install_guidance.py` is the test to invert when it is.
-- **No CI.** Every result in this repo is from one Windows machine. The two
-  skipped tests are POSIX file-mode checks that have therefore *never run*.
-  Cross-platform CI is the gap between "works here" and "works".
-- **License and contribution surface** unverified for a public release.
+- CI already exists and is broad -- `.github/workflows/ci.yml` runs the full
+  suite on ubuntu/windows/macos across Python 3.11-3.14, then builds the wheel
+  and sdist and smoke-tests the installed console scripts from outside the
+  checkout. So the two POSIX file-mode tests skipped on Windows *do* run, on
+  the Linux and macOS legs. (An earlier revision of this file claimed there was
+  no CI and that those tests had never run. Both were wrong.)
+- **`CONTRIBUTING.md` is missing.** `LICENSE` is present, and
+  `.github/workflows/release.yml` exists. Nothing else blocks a public release
+  except actually publishing.
 
 ## Objective 4 -- Shared memory across agents
 
@@ -234,6 +239,34 @@ Open:
   project's decision referencing another's -- is the missing half, and it
   belongs here rather than under memory, because a cross-project link is only
   useful to an agent that works across more than one of them.
+
+## Salvage assessment: the abandoned telemetry branches
+
+`feat/phase-2-telemetry`, `feat/phase-2-step7-8`, and
+`wip/doctor-telemetry-checks-stale` carry an earlier telemetry design
+(`telemetry_collectors` / `telemetry_schema`) that the shipped one superseded.
+Merging any of them would delete roughly 13,000 lines -- the entire memory
+system, which they predate. They are not a rebase candidate under any ordering.
+
+Assessed for regressions against `main`; none found. Main is ahead on
+`.gitignore` (the branches never learned to ignore agent worktrees) and on CI.
+The one deliberate divergence is doctor's severity model: the branch WARNs when
+telemetry is absent, main is INFO-only, because absence is the normal state on
+a fresh install and a warning that fires for everyone teaches operators to
+ignore the output.
+
+One idea from that line is worth keeping and is **not** a port:
+
+- **Doctor should distinguish "nothing collected" from "nothing collectable."**
+  Main's `check_telemetry` reports what is in the store. It cannot say whether
+  any agent's session logs exist on this machine at all, so an operator seeing
+  "no telemetry collected yet" cannot tell whether they forgot to run `collect`
+  or whether there is nothing here to collect. The abandoned
+  `check_telemetry_sources` answered that by probing each collector's default
+  log root. Implementing it needs a small public source-discovery API on the
+  three collectors, which today expose only private `_iter_session_files` /
+  `_history_path` -- a new increment, not a cherry-pick, and it should keep
+  main's INFO-only severity rather than the branch's WARN.
 
 ## Phase 3 -- Question router
 
