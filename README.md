@@ -614,7 +614,13 @@ entries were removed -- the semantic index still serves them.
 run `agent-harness-memory index` to drop them from retrieval.
 ```
 
-Not yet included, each tracked separately in `ROADMAP.md`: scope-drift
+`compact` is **project scope only.** The machine inbox that
+`remember --scope machine` feeds has no compaction pass yet, so that half of
+the store still grows without bound. It needs its own rules rather than these
+pointed at another directory -- machine memory has no repository to be
+reviewed in and no per-project week to archive against.
+
+Also not yet included, each tracked separately in `ROADMAP.md`: scope-drift
 detection, cross-project relationship proposals, contradiction detection, and
 the optional AI summarization pass. Task and blocker state needs no
 reconciliation here -- `review` and the task tools already enforce those

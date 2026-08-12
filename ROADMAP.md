@@ -122,6 +122,15 @@ already enforce those transitions at write time.
 
 Open:
 
+- **Machine-scope compaction.** `compact` is project-scope only. The machine
+  inbox that `remember --scope machine` feeds is read by every project's
+  context packet and served by the shared machine index, and it still grows
+  without bound -- so half the store has no freshness story. It needs its own
+  rules rather than the project ones aimed at a different directory: machine
+  memory has no repository to be reviewed in, no per-project week to archive
+  against, and "promotion" there is the cross-machine question rather than the
+  project-durable one.
+
 - **Scope drift** -- detect entries recorded in project scope that are really
   machine-local (and the reverse). Wrong scope means either a machine detail
   committed to a shared repo or a project decision stranded on one machine.
@@ -130,9 +139,14 @@ Open:
   Diagnosed as a probable `$HOME` resolution difference between Windows
   PowerShell 5.1 and pwsh; left untouched pending a decision, since it reads a
   credential file.
-- **Registry hygiene** -- a throwaway project id from an end-to-end test is
-  still registered in the real `~/.agent-harness/memory/registry.json`. Needs
-  either a prune command or documented manual removal.
+- **Test runs pollute the real registry.** Not one stale id, as previously
+  recorded: 22 of the 28 projects in `~/.agent-harness/memory/registry.json`
+  are pytest temp paths, so some test writes the operator's real registry on
+  essentially every suite run. Two things are needed and the first is the
+  urgent one -- find the test that escapes isolation (the memory-compaction
+  tests monkeypatch both `machine_memory_dir` and `_registry_path`, which is
+  the pattern that holds), then add a prune command for the entries already
+  there. Until the leak is closed, pruning only buys one clean run.
 - **Cloud-synced paths** -- recursive search across the whole workspace tree
   times out under the sync layer. The harness already avoids this internally;
   it should be a documented constraint rather than folklore.

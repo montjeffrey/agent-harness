@@ -30,11 +30,19 @@ the inbox is spliced *last*: archive, then durable, then active, then inbox. A
 crash at any earlier point loses only derived work that the next run redoes.
 Had the inbox been rewritten first, the same crash would lose entries.
 
-Deliberately **not** implemented here, because each is its own roadmap item and
-folding them in would repeat the plan-drift this increment was meant to end:
-scope-drift detection (design step 6), cross-project relationship proposals
-(step 9), contradiction detection (step 5, which exists nowhere yet), and the
-optional AI summarization pass. Design step 4 (reconcile task and blocker
+**Project scope only.** `compact()` operates on `project_memory_dir`. The
+machine inbox that `remember --scope machine` feeds has no compaction pass yet,
+so the half of the store shared across every project still grows without
+bound. It needs different rules rather than the same ones pointed at another
+directory -- machine memory has no repository to be reviewed in, no per-project
+week to archive against, and promotion there is the cross-machine question
+rather than the project-durable one.
+
+Otherwise deliberately **not** implemented here, because each is its own
+roadmap item and folding them in would repeat the plan-drift this increment was
+meant to end: scope-drift detection (design step 6), cross-project relationship
+proposals (step 9), contradiction detection (step 5, which exists nowhere yet),
+and the optional AI summarization pass. Design step 4 (reconcile task and blocker
 states) needs no work here -- `memory_review` and `memory_tasks` already
 enforce those transitions at write time, so there is nothing left to reconcile.
 """
@@ -308,16 +316,31 @@ def compact_lock(directory: Path, now: datetime | None = None) -> Iterator[Path]
 # --- file writes ----------------------------------------------------------
 
 
+def _atomic_write(path: Path, text: str) -> None:
+    """Replace `path` via a temp sibling, the shape `write_lines` already uses.
+
+    A plain `write_text` truncates before it writes. For the archive that is a
+    real data-loss window rather than a tidiness point: the file accumulates
+    *earlier weeks'* sections whose source entries left the inbox in previous
+    runs, so they exist nowhere else. A process killed mid-write would take
+    them with it, which would contradict both "appended, never replaced" and
+    the promise that a crash costs only work the next run redoes.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+
+
 def _write_archive(path: Path, week: str, entries: Sequence[Mapping], now: datetime) -> None:
     """Append this run's removals to the week's archive.
 
     Appends rather than replaces: `archive/YYYY-Www.md` is immutable history,
     and a second run in the same ISO week must not erase the first run's record.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
     existing = path.read_text(encoding="utf-8") if path.is_file() else f"# Archive {week}\n"
     body = render_archive(week, entries, now)
-    path.write_text(existing.rstrip("\n") + "\n\n" + body, encoding="utf-8")
+    _atomic_write(path, existing.rstrip("\n") + "\n\n" + body)
 
 
 def _write_durable(path: Path, entries: Sequence[Mapping], now: datetime) -> None:
@@ -326,11 +349,11 @@ def _write_durable(path: Path, entries: Sequence[Mapping], now: datetime) -> Non
     lines = [f"## Promoted {memory_store.format_ts(now)}", ""]
     lines.extend(_entry_line(e) for e in sorted(entries, key=lambda e: str(e.get("id") or "")))
     lines.append("")
-    path.write_text(existing.rstrip("\n") + "\n\n" + "\n".join(lines), encoding="utf-8")
+    _atomic_write(path, existing.rstrip("\n") + "\n\n" + "\n".join(lines))
 
 
 def _write_active(directory: Path, text: str) -> None:
-    (Path(directory) / "active.md").write_text(text, encoding="utf-8")
+    _atomic_write(Path(directory) / "active.md", text)
 
 
 def _splice_inbox(directory: Path, raw_lines: Sequence[str], removed_ids: set[str]) -> None:
