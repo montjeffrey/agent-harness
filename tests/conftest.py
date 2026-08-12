@@ -26,10 +26,18 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     Both the environment variables and the ``Path.home`` attribute are
     patched: the attribute covers in-process lookups, and ``HOME`` /
     ``USERPROFILE`` propagate to console scripts run in subprocesses.
+
+    ``PIP_CACHE_DIR`` and ``XDG_CACHE_HOME`` are pinned as well. Moving home
+    out from under the ``pip install`` subprocess in the packaging tests
+    otherwise makes pip fall back to a cache directory relative to the
+    working directory, littering ``pip/cache`` into the repository root.
     """
     home = tmp_path / "isolated-home"
     home.mkdir()
+    cache = home / "cache"
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(cache))
+    monkeypatch.setenv("PIP_CACHE_DIR", str(cache / "pip"))
     monkeypatch.setattr(Path, "home", lambda: home)
     return home
