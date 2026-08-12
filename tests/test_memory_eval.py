@@ -389,6 +389,28 @@ def test_cli_exits_one_when_no_strategy_could_be_scored(project: Path, capsys) -
     assert "no strategy could be resolved" in capsys.readouterr().out
 
 
+def test_cli_exits_zero_when_the_pool_is_empty_but_a_strategy_ran(
+    project: Path, capsys
+) -> None:
+    """An empty store is a measured zero, not an unavailable capability.
+
+    The counterpart to the test above, and the line between them: there,
+    nothing ran; here, deterministic ran and honestly scored zero against a
+    store with nothing in it. Collapsing the two would make `exit 1` mean
+    "unavailable or just empty", which no caller could branch on.
+    """
+    cases = work_store.ensure_work_path(project, "eval", "default.jsonl")
+    memory_eval.write_cases(
+        cases, [memory_eval.EvalCase("n", "q", ("project:mem-2026-08-07-001",))]
+    )
+
+    code = memory.main(
+        ["eval", "--project", str(project), "--strategy", "deterministic"]
+    )
+    assert code == 0
+    assert "zero by construction" in capsys.readouterr().out
+
+
 def test_cli_save_lands_inside_the_ignored_store(project: Path) -> None:
     _add(project, "rewrote the login flow")
     keys = _keys(project)
