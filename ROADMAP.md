@@ -126,15 +126,19 @@ are judged. "Semantic is the default" is currently a design preference. It
 should be a measured result.
 
 Shipped: `--strategy semantic|deterministic` pinning (the control); Phase 2
-telemetry (cost/token/limit per agent); `memory_index.top_k_agreement()`
-comparing semantic against deterministic selection over the same query set.
+telemetry (cost/token/limit per agent); `memory_index.top_k_agreement()`, an
+opt-in diagnostic that runs both selectors over the same candidates for **one**
+query and returns each ranking plus their overlap count. It observes ranking
+only -- semantic hits never become a source of graph symbols or evidence.
 
 Open:
 
-- **A runnable benchmark, not just a comparator.** `top_k_agreement` measures
-  *whether two strategies agree*, which is not the same as *which one is
-  right*. Needs a fixture query set with known-good expected entries, so
-  agreement becomes precision/recall against ground truth.
+- **A runnable benchmark, not just a comparator.** `top_k_agreement` reports
+  raw overlap for a single query. Two gaps sit between that and a benchmark:
+  it does not iterate a query set, and overlap measures *whether two
+  strategies agree*, not *which one is right*. Needs a fixture query set with
+  known-good expected entries so agreement becomes precision/recall against
+  ground truth.
 - **Per-model comparison.** The stated goal is choosing among the models being
   run against. That needs a run format that pins model, strategy, corpus, and
   query set, and emits a comparable record.
@@ -189,6 +193,15 @@ Open:
 - **Contract stability.** The moment more than one tool depends on the packet
   format, it stops being freely changeable. It should be versioned before that
   happens, not after.
+- **Cross-project relationship proposals -- half shipped.** `relationship` is
+  a schema-1 entry type, and the context packet already gives accepted
+  relationship entries their own section (pulled out of the live sections, so
+  they cannot be double-counted). What does not exist is anything that
+  *proposes* them: a relationship between two projects has to be written by
+  hand today. Detecting candidates -- shared symbols, shared tags, one
+  project's decision referencing another's -- is the missing half, and it
+  belongs here rather than under memory, because a cross-project link is only
+  useful to an agent that works across more than one of them.
 
 ## Phase 3 -- Question router
 
