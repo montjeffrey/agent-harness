@@ -19,7 +19,8 @@ own CLI: `python -m graphify explain "X"` and `python -m graphify path "A" "B"`.
 Refresh the graph with graph_refresh.py.
 
 `search` is a ChromaDB-backed semantic query over node text and requires the
-optional `[semantic]` extra (`pip install "agent-harness-kit[semantic]"`) plus an
+optional `[semantic]` extra (`python -m pip install -e ".[semantic]"` from this
+checkout) plus an
 explicit index build/refresh via graph_refresh.py -- it never builds an
 index implicitly on first use.
 """
@@ -48,6 +49,8 @@ class GraphIndex(NamedTuple):
     out_edges: dict[str, list[dict]]
     in_edges: dict[str, list[dict]]
 
+
+_NO_SYMBOL_INDEX = object()
 
 def _no_graph_message(current: Path) -> str:
     """Shared "graph.json not found" text for both `find_graph_path` (CLI,
@@ -231,7 +234,7 @@ def format_rows(rows: list[str]) -> list[str]:
     return [*rows[:MAX_ROWS], f"... {len(rows) - MAX_ROWS} more (narrow your query)"]
 
 
-def cmd_find(g: dict, term: str) -> list[str]:
+def cmd_find(g: dict, term: str, evidence=None) -> list[str]:
     low = term.lower()
     hits = [
         n
@@ -240,7 +243,19 @@ def cmd_find(g: dict, term: str) -> list[str]:
         or low in n["id"].lower()
         or low in n.get("source_file", "").lower()
     ]
-    return [f"{len(hits)} node(s) match '{term}':", *format_rows([node_line(n) for n in hits])]
+    if evidence:
+        hits.sort(
+            key=lambda n: (
+                -(evidence[n["id"]].score if n["id"] in evidence else 0),
+                n["id"],
+            )
+        )
+    rows: list[str] = []
+    for node in hits:
+        rows.append(node_line(node))
+        if evidence and node["id"] in evidence:
+            rows.extend(evidence[node["id"]].lines())
+    return [f"{len(hits)} node(s) match '{term}':", *format_rows(rows)]
 
 
 def cmd_file(g: dict, term: str) -> list[str]:
@@ -261,7 +276,7 @@ def cmd_community(g: dict, term: str) -> list[str]:
     ]
 
 
-def cmd_node(index: GraphIndex, nid: str) -> list[str]:
+def cmd_node(index: GraphIndex, nid: str, evidence=None) -> list[str]:
     n = index.nodes[nid]
     lines = [
         node_line(n),
@@ -272,10 +287,12 @@ def cmd_node(index: GraphIndex, nid: str) -> list[str]:
         arrow = "<-" if e["target"] == nid else "->"
         other = e["source"] if e["target"] == nid else e["target"]
         lines.append(f"  {arrow} {e['relation']:<12} {other}")
+    if evidence and nid in evidence:
+        lines.extend(evidence[nid].lines())
     return lines
 
 
-def cmd_traverse(index: GraphIndex, nid: str, mode: str, depth: int) -> list[str]:
+def cmd_traverse(index: GraphIndex, nid: str, mode: str, depth: int, evidence=None) -> list[str]:
     edges, key = (
         (index.in_edges, "source") if mode in ("callers", "impact") else (index.out_edges, "target")
     )
@@ -286,9 +303,17 @@ def cmd_traverse(index: GraphIndex, nid: str, mode: str, depth: int) -> list[str
         "callees": "dependency(ies)",
         "impact": "transitive dependent(s)",
     }[mode]
+    ordered = sorted(
+        found.items(),
+        key=lambda kv: (
+            kv[1],
+            -(evidence[kv[0]].score if evidence and mode in ("callers", "impact") and kv[0] in evidence else 0),
+            kv[0],
+        ),
+    )
     rows = [
         f"d{d}  {node_line(index.nodes[i])}"
-        for i, d in sorted(found.items(), key=lambda kv: kv[1])
+        for i, d in ordered
         if i in index.nodes
     ]
     return [f"{len(found)} {label} of {nid}:", *format_rows(rows)]
@@ -326,7 +351,8 @@ def cmd_search(g: dict, graph_path: Path, term: str) -> list[str]:
     if not graph_index.chromadb_available():
         raise SystemExit(
             "chromadb is not installed -- the `search` subcommand needs the "
-            'optional [semantic] extra: pip install "agent-harness-kit[semantic]"'
+            'optional [semantic] extra: from this checkout run '
+            '`python -m pip install -e ".[semantic]"`'
         )
     index_dir = graph_index.index_path_for(graph_path)
     if not index_dir.exists():
@@ -352,13 +378,24 @@ def cmd_search(g: dict, graph_path: Path, term: str) -> list[str]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--graph", type=Path, default=None, help="explicit path to graph.json")
+    parser.add_argument(
+        "--memory", choices=("auto", "on", "off"), default="auto",
+        help="attach deterministic project-memory evidence (default: auto)",
+    )
     parser.add_argument("command", choices=list(VALID_COMMANDS))
     parser.add_argument("term", help="node id, label fragment, file fragment, community fragment, or search text")
     parser.add_argument("depth", nargs="?", type=int, default=1, help="traversal depth for callers/callees")
     return parser
 
 
-def query(command: str, term: str, depth: int = 1, graph: Path | None = None) -> list[str]:
+def query(
+    command: str, term: str, depth: int = 1, graph: Path | None = None,
+    memory: str = "auto",
+    *,
+    loaded_graph: dict | None = None,
+    prebuilt_index: GraphIndex | None = None,
+    symbol_index: object = _NO_SYMBOL_INDEX,
+) -> list[str]:
     """Library-safe query entry point.
 
     Same behavior as the CLI (`run`/`main`), but raises plain `ValueError`
@@ -373,6 +410,11 @@ def query(command: str, term: str, depth: int = 1, graph: Path | None = None) ->
     `find_graph_path`-adjacent discovery (`find_graph_in_repo`) and the same
     `load_graph`/`build_index`/`resolve_id`/`cmd_*` functions the CLI always
     used, wrapping their `SystemExit`s rather than reimplementing them.
+
+    Long-lived callers may provide a previously loaded `loaded_graph` and
+    corresponding `prebuilt_index`.  This is an opt-in injection seam for
+    process-local caching; the CLI and ordinary library calls retain their
+    existing load-and-index behavior.
     """
     if command not in VALID_COMMANDS:
         raise ValueError(f"unknown command '{command}' -- choose from {', '.join(VALID_COMMANDS)}")
@@ -386,21 +428,55 @@ def query(command: str, term: str, depth: int = 1, graph: Path | None = None) ->
             raise FileNotFoundError(_no_graph_message(current))
         graph_path = found
 
+    if memory not in ("auto", "on", "off"):
+        raise ValueError("memory must be one of auto, on, off")
+    if prebuilt_index is not None and loaded_graph is None:
+        raise ValueError("prebuilt_index requires loaded_graph")
+
     try:
-        g = load_graph(graph_path)
-        index = build_index(g)
+        g = loaded_graph if loaded_graph is not None else load_graph(graph_path)
+        index = prebuilt_index if prebuilt_index is not None else build_index(g)
+        evidence = None
+        memory_note = None
+        if memory != "off":
+            from harness import graph_location, graph_evidence, memory_store
+
+            root = graph_path.parent.parent
+            project_entries = list(memory_store.iter_entries(memory_store.project_memory_dir(root)))
+            has_memory = bool(project_entries)
+            if memory == "auto" and not has_memory:
+                pass
+            else:
+                health = graph_location.report_health(graph_path)
+                if health != graph_location.GraphHealth.FRESH:
+                    memory_note = f"memory evidence disabled: code graph is {health.value}, not fresh"
+                else:
+                    if symbol_index is _NO_SYMBOL_INDEX:
+                        evidence = graph_evidence.project_evidence(root, g)
+                    elif symbol_index is None:
+                        evidence = {}
+                    else:
+                        evidence = graph_evidence.collect_evidence(project_entries, symbol_index)
+                    if memory == "on" and not evidence:
+                        memory_note = "memory evidence unavailable: no matching project-memory evidence"
+
         if command == "find":
-            return cmd_find(g, term)
-        if command == "file":
-            return cmd_file(g, term)
-        if command == "community":
-            return cmd_community(g, term)
-        if command == "search":
-            return cmd_search(g, graph_path, term)
-        nid = resolve_id(term, index.nodes)
-        if command == "node":
-            return cmd_node(index, nid)
-        return cmd_traverse(index, nid, command, depth)
+            lines = cmd_find(g, term, evidence)
+        elif command == "file":
+            lines = cmd_file(g, term)
+        elif command == "community":
+            lines = cmd_community(g, term)
+        elif command == "search":
+            lines = cmd_search(g, graph_path, term)
+        else:
+            nid = resolve_id(term, index.nodes)
+            if command == "node":
+                lines = cmd_node(index, nid, evidence)
+            else:
+                lines = cmd_traverse(index, nid, command, depth, evidence)
+        if memory_note is not None:
+            lines.append(f"[memory] {memory_note}")
+        return lines
     except SystemExit as exc:
         message = exc.code if isinstance(exc.code, str) else str(exc.code)
         if message.startswith("graph.json not found at"):
@@ -427,7 +503,7 @@ def run(argv: list[str]) -> list[str]:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        return query(args.command, args.term, args.depth, args.graph)
+        return query(args.command, args.term, args.depth, args.graph, args.memory)
     except (FileNotFoundError, ValueError) as exc:
         raise SystemExit(str(exc)) from exc
 

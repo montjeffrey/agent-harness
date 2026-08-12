@@ -305,6 +305,28 @@ def test_query_returns_lines(graph_file: Path) -> None:
     assert "n1" in joined and "n3" in joined
 
 
+def test_query_uses_preloaded_graph_and_index_without_reloading(
+    graph_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Long-lived callers may supply a validated graph/index pair to avoid reparse."""
+    graph = graph_query.load_graph(graph_file)
+    index = graph_query.build_index(graph)
+
+    def unexpected_reload(_path: Path) -> dict:
+        raise AssertionError("query reloaded a supplied graph")
+
+    monkeypatch.setattr(graph_query, "load_graph", unexpected_reload)
+    lines = graph_query.query(
+        "find",
+        "createUser",
+        graph=graph_file,
+        memory="off",
+        loaded_graph=graph,
+        prebuilt_index=index,
+    )
+    assert "2 node(s) match 'createUser':" in lines[0]
+
+
 def test_query_raises_valueerror_on_ambiguous(graph_file: Path) -> None:
     with pytest.raises(ValueError):
         graph_query.query("node", "create", graph=graph_file)
@@ -343,6 +365,74 @@ def test_query_callers_matches_cli(graph_file: Path) -> None:
     assert "1 dependent(s) of n1:" in lines[0]
 
 
+def test_memory_evidence_breaks_equal_find_matches(graph_file: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Evidence ranks otherwise equal text hits; it does not change matching."""
+    from harness import graph_evidence, graph_location
+
+    monkeypatch.setattr(graph_location, "report_health", lambda path: graph_location.GraphHealth.FRESH)
+    monkeypatch.setattr(
+        graph_evidence,
+        "project_evidence",
+        lambda root, graph: {"n3": graph_evidence.NodeEvidence(tasks=({"id": "mem-2", "summary": "Finish it."},))},
+    )
+    lines = graph_query.query("find", "createUser", graph=graph_file, memory="on")
+    assert "n3" in lines[1]
+    assert any("memory open task" in line for line in lines)
+
+
+def test_non_fresh_graph_disables_memory_promotion_with_caveat(
+    graph_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from harness import graph_location
+
+    monkeypatch.setattr(graph_location, "report_health", lambda path: graph_location.GraphHealth.DIRTY)
+    lines = graph_query.query("find", "createUser", graph=graph_file, memory="on")
+    assert "n1" in lines[1]  # regular graph output remains available
+    assert any("memory evidence disabled" in line for line in lines)
+
+
+def test_memory_auto_keeps_graph_only_output_when_no_entries(graph_file: Path) -> None:
+    assert graph_query.query("find", "createUser", graph=graph_file) == graph_query.query(
+        "find", "createUser", graph=graph_file, memory="auto"
+    )
+
+
+def test_equal_memory_evidence_uses_node_id_as_a_stable_tiebreaker() -> None:
+    from harness import graph_evidence
+
+    evidence = {
+        "n1": graph_evidence.NodeEvidence(tasks=({"id": "a", "summary": "a"},)),
+        "n2": graph_evidence.NodeEvidence(tasks=({"id": "b", "summary": "b"},)),
+    }
+    graph = {"nodes": [
+        {"id": "n2", "label": "match", "source_file": "two.py"},
+        {"id": "n1", "label": "match", "source_file": "one.py"},
+    ]}
+
+    lines = graph_query.cmd_find(graph, "match", evidence)
+    assert lines[1].startswith("n1")
+
+
+def test_equal_memory_evidence_keeps_callers_depth_order_then_node_id() -> None:
+    from harness import graph_evidence
+
+    index = graph_query.build_index({"nodes": [
+        {"id": "target", "label": "target"},
+        {"id": "n2", "label": "two"},
+        {"id": "n1", "label": "one"},
+    ], "links": [
+        {"source": "n2", "target": "target"},
+        {"source": "n1", "target": "target"},
+    ]})
+    evidence = {
+        "n1": graph_evidence.NodeEvidence(tasks=({"id": "a", "summary": "a"},)),
+        "n2": graph_evidence.NodeEvidence(tasks=({"id": "b", "summary": "b"},)),
+    }
+
+    lines = graph_query.cmd_traverse(index, "target", "callers", 1, evidence)
+    assert lines[1].startswith("d1  n1")
+
+
 # --- search subcommand: graceful degradation without the [semantic] extra --
 
 
@@ -350,7 +440,7 @@ def test_search_without_chromadb_exits_nonzero_with_actionable_message(
     graph_file: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """When chromadb isn't installed, `search` must fail fast with a clear
-    `pip install "agent-harness-kit[semantic]"` message and exit 1 -- never a
+    local checkout install message and exit 1 -- never a
     traceback, and it must never attempt to build/query an index."""
     from harness import graph_index
 
@@ -358,7 +448,7 @@ def test_search_without_chromadb_exits_nonzero_with_actionable_message(
     exit_code = graph_query.main(["--graph", str(graph_file), "search", "welcome email"])
     assert exit_code == 1
     captured = capsys.readouterr()
-    assert 'pip install "agent-harness-kit[semantic]"' in captured.err
+    assert 'python -m pip install -e ".[semantic]"' in captured.err
 
 
 def test_search_with_chromadb_but_no_index_points_at_graph_refresh(
