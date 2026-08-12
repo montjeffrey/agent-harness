@@ -5,7 +5,8 @@ Usage:
     python -m harness.mcp_server [--graph PATH]
     agent-harness-mcp [--graph PATH]
 
-Requires the optional `mcp` Python SDK:  pip install agent-harness-kit[mcp]
+Requires the optional `mcp` Python SDK. From this checkout install it with:
+    python -m pip install -e ".[mcp]"
 
 Module-level code imports only the standard library plus
 `harness.graph_query` -- `import harness.mcp_server` never requires the `mcp`
@@ -40,8 +41,11 @@ parameters.
 
 from __future__ import annotations
 
+import json
 import sys
+from collections import OrderedDict
 from pathlib import Path
+from typing import NamedTuple
 
 from harness import graph_query
 
@@ -71,6 +75,100 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
 # --graph PATH override, set by main() before the server starts serving.
 _GRAPH_OVERRIDE: Path | None = None
 
+# The MCP server is deliberately long-lived, unlike a SessionStart hook. Keep
+# only a few parsed graph/index pairs in-process and key each one by the
+# resolved graph path plus its stat signature. Explicit --graph overrides are
+# intentionally left uncached: they are also the test/integration override
+# seam, and preserving their one-call-at-a-time behavior avoids surprising a
+# caller that swaps an override target while a server process is alive.
+_GRAPH_CACHE_LIMIT = 4
+
+
+class _CachedGraph(NamedTuple):
+    signature: tuple[int, int]
+    graph: dict
+    index: graph_query.GraphIndex
+    symbol_index: object | None = None
+    symbol_index_ready: bool = False
+
+
+_GRAPH_CACHE: OrderedDict[Path, _CachedGraph] = OrderedDict()
+
+
+def _discover_graph_path() -> Path:
+    """Find the default graph with the same discovery/error wording as CLI."""
+    return graph_query.find_graph_path()
+
+
+def _stat_signature(graph_path: Path) -> tuple[Path, tuple[int, int]]:
+    """Resolve a graph path and return the content-change cache signature."""
+    resolved = graph_path.resolve()
+    try:
+        stat = resolved.stat()
+    except OSError as exc:
+        _GRAPH_CACHE.pop(resolved, None)
+        raise FileNotFoundError(f"graph.json not found at {resolved}") from exc
+    return resolved, (stat.st_mtime_ns, stat.st_size)
+
+
+def _cached_graph(
+    include_symbol_index: bool = False,
+) -> tuple[Path, dict, graph_query.GraphIndex, object | None]:
+    """Load the discovered graph once per unchanged stat signature.
+
+    Any failed stat/read/index attempt evicts its old entry. A later repaired
+    graph therefore reloads instead of serving stale cached data.
+    """
+    try:
+        discovered = _discover_graph_path()
+    except SystemExit as exc:
+        message = exc.code if isinstance(exc.code, str) else str(exc.code)
+        raise FileNotFoundError(message) from exc
+
+    resolved, signature = _stat_signature(discovered)
+    cached = _GRAPH_CACHE.get(resolved)
+    if cached is not None and cached.signature == signature:
+        if include_symbol_index and not cached.symbol_index_ready:
+            from harness import memory_graph
+
+            cached = cached._replace(
+                symbol_index=memory_graph.build_symbol_index(cached.graph),
+                symbol_index_ready=True,
+            )
+            _GRAPH_CACHE[resolved] = cached
+        _GRAPH_CACHE.move_to_end(resolved)
+        return resolved, cached.graph, cached.index, cached.symbol_index
+
+    try:
+        graph = graph_query.load_graph(resolved)
+        index = graph_query.build_index(graph)
+    except SystemExit as exc:
+        _GRAPH_CACHE.pop(resolved, None)
+        message = exc.code if isinstance(exc.code, str) else str(exc.code)
+        raise ValueError(message) from exc
+    except json.JSONDecodeError as exc:
+        _GRAPH_CACHE.pop(resolved, None)
+        raise ValueError(f"graph.json malformed: invalid JSON ({exc})") from exc
+    except UnicodeDecodeError as exc:
+        _GRAPH_CACHE.pop(resolved, None)
+        raise ValueError(f"graph.json unreadable at {resolved}: invalid UTF-8 ({exc})") from exc
+    except OSError as exc:
+        _GRAPH_CACHE.pop(resolved, None)
+        raise ValueError(f"graph.json unreadable at {resolved}: {exc}") from exc
+
+    symbol_index = None
+    if include_symbol_index:
+        from harness import memory_graph
+
+        symbol_index = memory_graph.build_symbol_index(graph)
+    _GRAPH_CACHE[resolved] = _CachedGraph(
+        signature, graph, index, symbol_index, include_symbol_index
+    )
+    _GRAPH_CACHE.move_to_end(resolved)
+    while len(_GRAPH_CACHE) > _GRAPH_CACHE_LIMIT:
+        _GRAPH_CACHE.popitem(last=False)
+    return resolved, graph, index, symbol_index
+
 
 def dispatch(tool_name: str, arguments: dict) -> str:
     """Run one tool call and return its output as a single joined string.
@@ -94,7 +192,23 @@ def dispatch(tool_name: str, arguments: dict) -> str:
         return f"invalid depth {depth!r} -- must be an integer"
 
     try:
-        lines = graph_query.query(command, term, depth, _GRAPH_OVERRIDE)
+        memory = str(arguments.get("memory", "auto"))
+        if _GRAPH_OVERRIDE is None:
+            graph_path, loaded_graph, prebuilt_index, symbol_index = _cached_graph(
+                memory in {"auto", "on"}
+            )
+            lines = graph_query.query(
+                command,
+                term,
+                depth,
+                graph_path,
+                memory,
+                loaded_graph=loaded_graph,
+                prebuilt_index=prebuilt_index,
+                symbol_index=symbol_index,
+            )
+        else:
+            lines = graph_query.query(command, term, depth, _GRAPH_OVERRIDE, memory)
     except (ValueError, FileNotFoundError) as exc:
         return str(exc)
     return "\n".join(lines)
@@ -161,6 +275,61 @@ def dispatch_memory(tool_name: str, arguments: dict) -> str:
                 )
             except FileNotFoundError as exc:
                 return str(exc)
+            if arguments.get("cross_check") and strategy == "semantic":
+                project_entries = list(
+                    memory_store.iter_entries(memory_store.project_memory_dir(root))
+                )
+                machine_entries = list(
+                    memory_store.iter_entries(memory_store.machine_memory_dir())
+                )
+                open_ids = {
+                    entry.get("id") for entry in memory_context._open_work(project_entries)
+                }
+                candidate_groups = (
+                    [
+                        entry
+                        for entry in project_entries
+                        if memory_context._is_live(entry)
+                        and entry.get("type") != "relationship"
+                        and entry.get("id") not in open_ids
+                    ],
+                    [
+                        entry
+                        for entry in machine_entries
+                        if memory_context._is_live(entry)
+                        and entry.get("type") != "relationship"
+                    ],
+                    [
+                        entry
+                        for entry in project_entries + machine_entries
+                        if entry.get("type") == "relationship"
+                        and entry.get("status") == "accepted"
+                    ],
+                )
+                try:
+                    check_limit = int(
+                        arguments.get("cross_check_limit")
+                        or memory_context.CANDIDATE_LIMIT
+                    )
+                except (TypeError, ValueError):
+                    return "cross_check_limit must be an integer"
+                agreements = [
+                    memory_index.top_k_agreement(
+                        candidates,
+                        arguments.get("query") or memory_context.active_objective(root),
+                        selector,
+                        check_limit,
+                    )
+                    for candidates in candidate_groups
+                ]
+                overlap = sum(int(agreement["overlap"]) for agreement in agreements)
+                limit = sum(int(agreement["limit"]) for agreement in agreements)
+                notes = [
+                    *notes,
+                    "selection agreement: "
+                    f"{overlap}/{limit} shared top-K "
+                    "between deterministic and semantic ranking",
+                ]
             # Join memory to the code graph, so a recalled decision arrives
             # with the symbols it touches instead of leaving the agent to
             # guess. A silent no-op when this repo has no graph.
@@ -331,8 +500,8 @@ def _build_server():
     mcp_app = FastMCP("agent-harness")
 
     def _make_graph_tool(tool_name: str):
-        def _tool(term: str, depth: int = 1) -> str:
-            return dispatch(tool_name, {"term": term, "depth": depth})
+        def _tool(term: str, depth: int = 1, memory: str = "auto") -> str:
+            return dispatch(tool_name, {"term": term, "depth": depth, "memory": memory})
 
         _tool.__name__ = tool_name
         _tool.__doc__ = TOOL_DESCRIPTIONS[tool_name]
@@ -343,10 +512,22 @@ def _build_server():
             _make_graph_tool(name)
         )
 
-    def memory_context(query: str = "", max_chars: int = 4000, project: str = "") -> str:
+    def memory_context(
+        query: str = "",
+        max_chars: int = 4000,
+        project: str = "",
+        cross_check: bool = False,
+        cross_check_limit: int = 0,
+    ) -> str:
         return dispatch_memory(
             "memory_context",
-            {"query": query, "max_chars": max_chars, "project": project},
+            {
+                "query": query,
+                "max_chars": max_chars,
+                "project": project,
+                "cross_check": cross_check,
+                "cross_check_limit": cross_check_limit,
+            },
         )
 
     def memory_status(project: str = "") -> str:
@@ -426,7 +607,7 @@ def main(argv: list[str] | None = None) -> int:
     except ImportError:
         print(
             "harness.mcp_server requires the optional 'mcp' Python SDK.\n"
-            "install with: pip install agent-harness-kit[mcp]",
+            'from this checkout install with: python -m pip install -e ".[mcp]"',
             file=sys.stderr,
         )
         return 1
