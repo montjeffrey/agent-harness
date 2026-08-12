@@ -367,6 +367,28 @@ def test_cli_exits_two_on_a_non_positive_limit(project: Path, capsys) -> None:
     assert "limit must be positive" in capsys.readouterr().err
 
 
+def test_cli_exits_one_when_no_strategy_could_be_scored(project: Path, capsys) -> None:
+    """Nothing measured is not success.
+
+    `semantic` alone with no index resolves nothing, so the run scores no
+    case at all. Exiting 0 would let automation record a measured-nothing
+    run as a baseline -- the same failure `aggregate` avoids by omitting a
+    strategy that never ran rather than averaging in an unmeasured zero.
+    The report still prints: the note is the diagnosis.
+    """
+    _add(project, "rewrote the login flow")
+    keys = _keys(project)
+    cases = work_store.ensure_work_path(project, "eval", "default.jsonl")
+    memory_eval.write_cases(
+        cases,
+        [memory_eval.EvalCase("auth", "login", (keys["rewrote the login flow"],))],
+    )
+
+    code = memory.main(["eval", "--project", str(project), "--strategy", "semantic"])
+    assert code == 1
+    assert "no strategy could be resolved" in capsys.readouterr().out
+
+
 def test_cli_save_lands_inside_the_ignored_store(project: Path) -> None:
     _add(project, "rewrote the login flow")
     keys = _keys(project)

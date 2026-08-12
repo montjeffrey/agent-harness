@@ -502,6 +502,15 @@ def cmd_eval(args: argparse.Namespace) -> int:
         destination.write_text(memory_eval.render_json(report), encoding="utf-8")
         print(f"\nsaved {destination}", file=sys.stderr)
 
+    # `aggregate` is empty only when no strategy scored a single case -- the
+    # requested backend was unavailable, so nothing was measured. That is the
+    # exit-code contract's "capability unavailable", not success: a 0 here
+    # would let automation bank a measured-nothing run as a baseline, the same
+    # way averaging an unmeasured zero would make an absent backend look bad.
+    # The report still prints; the note in it is the diagnosis.
+    if not report.aggregate():
+        return 1
+
     return 0
 
 

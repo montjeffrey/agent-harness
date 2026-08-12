@@ -177,7 +177,7 @@ question it never asked.
 | Case file absent | Message plus a copy-pasteable example line; exit **1** |
 | Case file with no cases | `EvalCaseError`; exit **2** |
 | ChromaDB missing, or no index built | Strategy skipped, recorded as `semantic: unavailable (<reason>)` in `notes`; deterministic still scores; exit **0** |
-| No strategy resolvable | Explicit note; nothing scored |
+| No strategy resolvable | Explicit note; nothing scored; exit **1** — nothing was measured, so the run is not a baseline |
 | Empty candidate pool | Explicit note that every score is zero by construction |
 | `limit <= 0` | `ValueError`; exit **2**. Selectors slice with `[:limit]`, so `-1` would silently drop the last ranked entry and score a cut nobody asked for |
 
