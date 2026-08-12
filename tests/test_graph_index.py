@@ -30,6 +30,41 @@ def test_module_imports_without_chromadb_installed() -> None:
     assert graph_index is not None
 
 
+def test_chromadb_available_requires_a_successful_import(monkeypatch: pytest.MonkeyPatch) -> None:
+    import builtins
+    import importlib.util
+
+    real_import = builtins.__import__
+
+    def broken_import(name, *args, **kwargs):
+        if name == "chromadb":
+            raise ImportError("incompatible sqlite runtime")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: object())
+    monkeypatch.setattr(builtins, "__import__", broken_import)
+
+    assert graph_index.chromadb_available() is False
+    assert graph_index.chromadb_unavailable_reason() == "ImportError: incompatible sqlite runtime"
+
+
+def test_probe_index_rejects_an_incomplete_directory_without_opening_a_client(
+    tmp_path: Path,
+) -> None:
+    index_dir = tmp_path / "semantic-index"
+    index_dir.mkdir()
+    calls: list[Path] = []
+
+    def client_factory(path: Path):
+        calls.append(path)
+        raise AssertionError("the probe must not instantiate an incomplete index")
+
+    problem = graph_index.probe_index(index_dir, client_factory=client_factory)
+
+    assert "chroma.sqlite3" in str(problem)
+    assert calls == []
+
+
 def test_index_path_for_is_sibling_of_graph_json(tmp_path: Path) -> None:
     graph_path = tmp_path / "graphify-out" / "graph.json"
     index_dir = graph_index.index_path_for(graph_path)

@@ -250,7 +250,8 @@ def update_semantic_index(repo_root: Path) -> None:
     if not graph_index.chromadb_available():
         log.info(
             'chromadb not installed; skipping semantic index update '
-            '(pip install "agent-harness-kit[semantic]" to enable `graph_query.py search`)'
+            '(from this checkout run `python -m pip install -e ".[semantic]"` '
+            'to enable `graph_query.py search`)'
         )
         return
 

@@ -143,7 +143,7 @@ def test_check_mcp_warns_when_sdk_missing(monkeypatch) -> None:
     monkeypatch.setattr(doctor.importlib.util, "find_spec", lambda name: None)
     result = doctor.check_mcp()
     assert result.level == "WARN"
-    assert "agent-harness-kit[mcp]" in result.detail
+    assert 'python -m pip install -e ".[mcp]"' in result.detail
 
 
 def test_check_mcp_registered_in_run_checks() -> None:
@@ -203,27 +203,49 @@ def test_run_checks_includes_project_section(tmp_path: Path) -> None:
 def test_check_semantic_warns_when_chromadb_unavailable(monkeypatch) -> None:
     from harness import graph_index
 
-    monkeypatch.setattr(graph_index, "chromadb_available", lambda: False)
+    monkeypatch.setattr(
+        graph_index, "chromadb_status", lambda: (False, "ImportError: unavailable")
+    )
     result = doctor.check_semantic()
     assert result.level == "WARN"
-    assert "agent-harness-kit[semantic]" in result.detail
+    assert result.name == "semantic dependencies"
+    assert 'python -m pip install -e ".[semantic]"' in result.detail
+    assert "agent-harness-kit[semantic]" not in result.detail
 
 
-def test_check_semantic_passes_when_available_no_project_dir(monkeypatch) -> None:
+def test_check_semantic_passes_when_available(monkeypatch) -> None:
     from harness import graph_index
 
-    monkeypatch.setattr(graph_index, "chromadb_available", lambda: True)
+    monkeypatch.setattr(graph_index, "chromadb_status", lambda: (True, None))
     result = doctor.check_semantic()
     assert result.level == "PASS"
+
+
+def test_check_semantic_reports_a_chromadb_import_failure_reason(monkeypatch) -> None:
+    from harness import graph_index
+
+    monkeypatch.setattr(
+        graph_index,
+        "chromadb_status",
+        lambda: (False, "ImportError: incompatible sqlite runtime"),
+        raising=False,
+    )
+    result = doctor.check_semantic()
+
+    assert result.level == "WARN"
+    assert "incompatible sqlite runtime" in result.detail
 
 
 def test_check_semantic_info_when_no_index_yet(monkeypatch, tmp_path: Path) -> None:
     from harness import graph_index
 
     monkeypatch.setattr(graph_index, "chromadb_available", lambda: True)
-    result = doctor.check_semantic(tmp_path)
+    graph_path = tmp_path / "graphify-out" / "graph.json"
+    graph_path.parent.mkdir(parents=True)
+    graph_path.write_text("{}", encoding="utf-8")
+    result = doctor.check_graph_semantic(tmp_path)
     assert result.level == "INFO"
-    assert "no semantic index yet" in result.detail
+    assert "no graph semantic index yet" in result.detail
 
 
 def test_check_semantic_warns_when_index_stale(monkeypatch, tmp_path: Path) -> None:
@@ -238,7 +260,7 @@ def test_check_semantic_warns_when_index_stale(monkeypatch, tmp_path: Path) -> N
     (index_dir / "chroma.sqlite3").write_text("x", encoding="utf-8")
 
     monkeypatch.setattr(graph_index, "index_is_stale", lambda _idx, _g: True)
-    result = doctor.check_semantic(tmp_path)
+    result = doctor.check_graph_semantic(tmp_path)
     assert result.level == "WARN"
     assert "older than graph.json" in result.detail
 
@@ -255,8 +277,34 @@ def test_check_semantic_passes_when_index_fresh(monkeypatch, tmp_path: Path) -> 
     (index_dir / "chroma.sqlite3").write_text("x", encoding="utf-8")
 
     monkeypatch.setattr(graph_index, "index_is_stale", lambda _idx, _g: False)
-    result = doctor.check_semantic(tmp_path)
+    monkeypatch.setattr(graph_index, "probe_index", lambda _idx: None, raising=False)
+    result = doctor.check_graph_semantic(tmp_path)
     assert result.level == "PASS"
+
+
+def test_graph_semantic_readiness_warns_when_an_existing_index_cannot_open(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from harness import graph_index
+
+    monkeypatch.setattr(graph_index, "chromadb_available", lambda: True)
+    graph_path = tmp_path / "graphify-out" / "graph.json"
+    graph_path.parent.mkdir(parents=True)
+    graph_path.write_text("{}", encoding="utf-8")
+    graph_index.index_path_for(graph_path).mkdir()
+    monkeypatch.setattr(graph_index, "index_is_stale", lambda _idx, _g: False)
+    monkeypatch.setattr(
+        graph_index,
+        "probe_index",
+        lambda _idx: "no collection named 'agent_harness_graph' in this semantic index",
+        raising=False,
+    )
+
+    result = doctor.check_graph_semantic(tmp_path)
+
+    assert result.level == "WARN"
+    assert "not query-ready" in result.detail
+    assert "no collection named" in result.detail
 
 
 def test_check_semantic_never_fails(monkeypatch, tmp_path: Path) -> None:
@@ -265,14 +313,107 @@ def test_check_semantic_never_fails(monkeypatch, tmp_path: Path) -> None:
     for available in (True, False):
         monkeypatch.setattr(graph_index, "chromadb_available", lambda a=available: a)
         for project_dir in (None, tmp_path):
-            result = doctor.check_semantic(project_dir)
+            result = doctor.check_graph_semantic(project_dir)
             assert result.level != "FAIL"
 
 
 def test_run_checks_includes_semantic_search_check(tmp_path: Path) -> None:
     results = doctor.run_checks(tmp_path)
     names = {r.name for r in results}
-    assert "semantic search" in names
+    assert {"semantic dependencies", "graph semantic index", "memory semantic index"} <= names
+
+
+def test_graph_semantic_readiness_reports_missing_index_separately(monkeypatch, tmp_path: Path) -> None:
+    from harness import graph_index
+
+    monkeypatch.setattr(graph_index, "chromadb_available", lambda: True)
+    graph_path = tmp_path / "graphify-out" / "graph.json"
+    graph_path.parent.mkdir(parents=True)
+    graph_path.write_text("{}", encoding="utf-8")
+    result = doctor.check_graph_semantic(tmp_path)
+
+    assert result == doctor.CheckResult(
+        "INFO", "graph semantic index",
+        "no graph semantic index yet -- run harness/graph_refresh.py to build one",
+    )
+
+
+def test_graph_semantic_readiness_never_passes_without_graph_json(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from harness import graph_index
+
+    index_dir = tmp_path / "graphify-out" / "semantic-index"
+    index_dir.mkdir(parents=True)
+    (index_dir / "chroma.sqlite3").write_text("placeholder", encoding="utf-8")
+    monkeypatch.setattr(graph_index, "chromadb_available", lambda: True)
+    monkeypatch.setattr(graph_index, "probe_index", lambda _idx: None)
+
+    result = doctor.check_graph_semantic(tmp_path)
+
+    assert result.level == "INFO"
+    assert "graph.json is missing" in result.detail
+
+
+def test_memory_semantic_readiness_reports_missing_index_separately(monkeypatch, tmp_path: Path) -> None:
+    from harness import memory_index
+
+    monkeypatch.setattr(memory_index, "chromadb_available", lambda: True)
+    monkeypatch.setattr(memory_index, "index_dir_for", lambda _project_id: tmp_path / "project-index")
+    monkeypatch.setattr(memory_index, "machine_index_dir", lambda: tmp_path / "machine-index")
+
+    result = doctor.check_memory_semantic(tmp_path)
+
+    assert result == doctor.CheckResult(
+        "INFO", "memory semantic index",
+        "no memory semantic index yet -- run agent-harness-memory index to build one",
+    )
+
+
+def test_memory_semantic_readiness_warns_when_an_existing_index_cannot_open(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from harness import memory_index
+
+    project_index = tmp_path / "project-index"
+    machine_index = tmp_path / "machine-index"
+    project_index.mkdir()
+    machine_index.mkdir()
+    monkeypatch.setattr(memory_index, "chromadb_available", lambda: True)
+    monkeypatch.setattr(memory_index, "index_dir_for", lambda _project_id: project_index)
+    monkeypatch.setattr(memory_index, "machine_index_dir", lambda: machine_index)
+    monkeypatch.setattr(
+        memory_index,
+        "probe_index",
+        lambda index_dir: "no collection" if index_dir == project_index else None,
+        raising=False,
+    )
+
+    result = doctor.check_memory_semantic(tmp_path)
+
+    assert result.level == "WARN"
+    assert "project index is not query-ready" in result.detail
+    assert "no collection" in result.detail
+
+
+def test_memory_semantic_readiness_probes_a_partial_index_before_reporting_missing_scope(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from harness import memory_index
+
+    project_index = tmp_path / "project-index"
+    project_index.mkdir()
+    machine_index = tmp_path / "machine-index"
+    monkeypatch.setattr(memory_index, "chromadb_available", lambda: True)
+    monkeypatch.setattr(memory_index, "index_dir_for", lambda _project_id: project_index)
+    monkeypatch.setattr(memory_index, "machine_index_dir", lambda: machine_index)
+    monkeypatch.setattr(memory_index, "probe_index", lambda _idx: "missing chroma.sqlite3")
+
+    result = doctor.check_memory_semantic(tmp_path)
+
+    assert result.level == "WARN"
+    assert "project index is not query-ready" in result.detail
+    assert "machine-scope" in result.detail
 
 
 def test_check_telemetry_absent_dir_is_info(tmp_path: Path) -> None:

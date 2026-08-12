@@ -330,7 +330,8 @@ def cmd_index(args: argparse.Namespace) -> int:
 
     if not memory_index.chromadb_available():
         print(
-            'chromadb is not installed -- run `pip install "agent-harness-kit[semantic]"`',
+            'chromadb is not installed -- from this checkout run '
+            '`python -m pip install -e ".[semantic]"`',
             file=sys.stderr,
         )
         return 1

@@ -9,7 +9,7 @@ functions that actually need it (`_default_client`, via `client_factory`).
 Install the optional extra to use this module for anything beyond
 `chromadb_available()`/`index_path_for()`:
 
-    pip install "agent-harness-kit[semantic]"
+    python -m pip install -e ".[semantic]"  # run from this checkout
 
 The index lives at `graphify-out/semantic-index/` (see
 `harness.graph_location.INDEX_RELATIVE_PATH`), a sibling of graph.json
@@ -30,7 +30,6 @@ implicitly on first query.
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -46,17 +45,28 @@ COLLECTION_NAME = "graph_nodes"
 ClientFactory = Callable[[Path], Any]
 
 
-def chromadb_available() -> bool:
-    """True if the `chromadb` package is importable. Never raises.
+def chromadb_status() -> tuple[bool, str | None]:
+    """Return whether Chroma can actually import, with a safe failure reason.
 
-    Mirrors the `importlib.util.find_spec` probe pattern already used by
-    `harness.doctor.check_graphify` for the same "is this optional package
-    importable" question.
+    ``find_spec`` only proves a package directory exists.  A broken optional
+    install can still fail while importing its extension modules, so semantic
+    callers must use this guarded real import before advertising the feature.
     """
     try:
-        return importlib.util.find_spec("chromadb") is not None
-    except (ImportError, ValueError):
-        return False
+        import chromadb  # noqa: F401 - deliberately local optional import
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+    return True, None
+
+
+def chromadb_available() -> bool:
+    """True only when the optional ``chromadb`` package imports cleanly."""
+    return chromadb_status()[0]
+
+
+def chromadb_unavailable_reason() -> str | None:
+    """Explain a failed guarded Chroma import without raising."""
+    return chromadb_status()[1]
 
 
 def index_path_for(graph_path: Path) -> Path:
@@ -294,6 +304,25 @@ def _get_existing_collection(client: Any, embedding_function: Any = None) -> Any
         raise FileNotFoundError(
             f"no collection named '{COLLECTION_NAME}' in this semantic index"
         ) from exc
+
+
+def probe_index(
+    index_dir: Path, client_factory: ClientFactory | None = None
+) -> str | None:
+    """Return a visible readiness error, if a persisted index cannot be read.
+
+    This opens the client and existing collection only.  It never creates a
+    collection, queries it, embeds text, or rebuilds an index.
+    """
+    database_path = Path(index_dir) / "chroma.sqlite3"
+    if not database_path.is_file():
+        return f"FileNotFoundError: missing persistent database {database_path.name}"
+    factory = client_factory or _default_client
+    try:
+        _get_existing_collection(factory(Path(index_dir)))
+    except Exception as exc:
+        return f"{type(exc).__name__}: {exc}"
+    return None
 
 
 def query_index(

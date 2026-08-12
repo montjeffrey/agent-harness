@@ -33,7 +33,6 @@ machine.
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -62,12 +61,50 @@ class IndexStats:
     unchanged: int = 0
 
 
-def chromadb_available() -> bool:
-    """True if the `chromadb` package is importable. Never raises."""
+def top_k_agreement(
+    candidates: Sequence[dict],
+    query: str | None,
+    semantic: Callable[[Sequence[dict], str | None, int], list[dict]],
+    limit: int,
+) -> dict[str, object]:
+    """Compare deterministic and semantic selection without changing either.
+
+    This is an opt-in diagnostic for long-lived callers.  It deliberately
+    observes ranking only: semantic hits are still memory entries, never a
+    source of graph symbols or graph evidence.
+    """
+    from harness import memory_context
+
+    size = max(0, min(limit, len(candidates)))
+    deterministic = memory_context.deterministic_selector(candidates, query, size)
+    semantic_ranked = semantic(candidates, query, size)[:size]
+    deterministic_ids = [index_key(entry) for entry in deterministic]
+    semantic_ids = [index_key(entry) for entry in semantic_ranked]
+    return {
+        "limit": size,
+        "deterministic": deterministic_ids,
+        "semantic": semantic_ids,
+        "overlap": len(set(deterministic_ids) & set(semantic_ids)),
+    }
+
+
+def chromadb_status() -> tuple[bool, str | None]:
+    """Return whether Chroma can actually import, with a safe failure reason."""
     try:
-        return importlib.util.find_spec("chromadb") is not None
-    except (ImportError, ValueError):
-        return False
+        import chromadb  # noqa: F401 - deliberately local optional import
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+    return True, None
+
+
+def chromadb_available() -> bool:
+    """True only when the optional ``chromadb`` package imports cleanly."""
+    return chromadb_status()[0]
+
+
+def chromadb_unavailable_reason() -> str | None:
+    """Explain a failed guarded Chroma import without raising."""
+    return chromadb_status()[1]
 
 
 def index_dir_for(project_id: str) -> Path:
@@ -252,6 +289,25 @@ def _existing_collection(client: Any, embedding_function: Any = None) -> Any:
         ) from exc
 
 
+def probe_index(
+    index_dir: Path, client_factory: ClientFactory | None = None
+) -> str | None:
+    """Return a visible readiness error, if a persisted index cannot be read.
+
+    The probe opens an existing collection but does not query, embed, create,
+    or rebuild anything, so a doctor run remains cheap and side-effect free.
+    """
+    database_path = Path(index_dir) / "chroma.sqlite3"
+    if not database_path.is_file():
+        return f"FileNotFoundError: missing persistent database {database_path.name}"
+    factory = client_factory or _default_client
+    try:
+        _existing_collection(factory(Path(index_dir)))
+    except Exception as exc:
+        return f"{type(exc).__name__}: {exc}"
+    return None
+
+
 def query_index(
     index_dir: Path,
     text: str,
@@ -372,8 +428,11 @@ def resolve_selector(
 
     problem: str | None = None
     if not chromadb_available():
+        reason = chromadb_unavailable_reason()
         problem = (
-            "chromadb is not installed -- install the `semantic` extra, then "
+            "chromadb is not importable"
+            + (f" ({reason})" if reason else "")
+            + '; from this checkout run `python -m pip install -e ".[semantic]"`, then '
             "run `agent-harness-memory index`"
         )
     elif not built:
@@ -381,6 +440,19 @@ def resolve_selector(
             f"no semantic index at {dirs['project']} -- run "
             f"`agent-harness-memory index` to build one"
         )
+    else:
+        unreadable = [
+            (scope, probe_index(path, client_factory=client_factory))
+            for scope, path in built.items()
+        ]
+        unreadable = [
+            (scope, reason) for scope, reason in unreadable if reason is not None
+        ]
+        if unreadable:
+            problem = "; ".join(
+                f"{scope}-scope semantic index is not query-ready ({reason})"
+                for scope, reason in unreadable
+            )
 
     if problem is None:
         # A partially built set is usable: the unbuilt scope's entries fall

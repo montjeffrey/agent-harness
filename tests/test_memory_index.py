@@ -152,6 +152,41 @@ def test_chromadb_available_never_raises() -> None:
     assert memory_index.chromadb_available() in (True, False)
 
 
+def test_chromadb_available_requires_a_successful_import(monkeypatch: pytest.MonkeyPatch) -> None:
+    import builtins
+    import importlib.util
+
+    real_import = builtins.__import__
+
+    def broken_import(name, *args, **kwargs):
+        if name == "chromadb":
+            raise ImportError("incompatible sqlite runtime")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: object())
+    monkeypatch.setattr(builtins, "__import__", broken_import)
+
+    assert memory_index.chromadb_available() is False
+    assert memory_index.chromadb_unavailable_reason() == "ImportError: incompatible sqlite runtime"
+
+
+def test_probe_index_rejects_an_incomplete_directory_without_opening_a_client(
+    tmp_path: Path,
+) -> None:
+    index_dir = tmp_path / "memory-index"
+    index_dir.mkdir()
+    calls: list[Path] = []
+
+    def client_factory(path: Path):
+        calls.append(path)
+        raise AssertionError("the probe must not instantiate an incomplete index")
+
+    problem = memory_index.probe_index(index_dir, client_factory=client_factory)
+
+    assert "chroma.sqlite3" in str(problem)
+    assert calls == []
+
+
 def test_the_index_lives_outside_the_repository(project: Path) -> None:
     """A binary index under .agent-harness/ would be committed with the repo."""
     project_id = memory_store.project_id_for(project)
@@ -336,6 +371,9 @@ def test_auto_uses_semantic_once_an_index_exists(
     project: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(memory_index, "chromadb_available", lambda: True)
+    monkeypatch.setattr(
+        memory_index, "probe_index", lambda _idx, client_factory=None: None, raising=False
+    )
     project_id = memory_store.project_id_for(project)
     memory_index.index_dir_for(project_id).mkdir(parents=True)
 
@@ -352,6 +390,49 @@ def test_explicit_semantic_raises_instead_of_falling_back(project: Path) -> None
     """A benchmark that silently ran the other strategy would be worthless."""
     project_id = memory_store.project_id_for(project)
     with pytest.raises(FileNotFoundError):
+        memory_index.resolve_selector(project_id, "semantic")
+
+
+def test_auto_falls_back_when_a_present_index_is_incomplete(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(memory_index, "chromadb_available", lambda: True)
+    project_id = memory_store.project_id_for(project)
+    memory_index.index_dir_for(project_id).mkdir(parents=True)
+
+    selector, strategy, notes = memory_index.resolve_selector(project_id, "auto")
+
+    assert strategy == "deterministic"
+    assert selector is memory_context.deterministic_selector
+    assert any("chroma.sqlite3" in note for note in notes)
+
+
+def test_auto_import_failure_includes_the_source_checkout_install_command(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(memory_index, "chromadb_available", lambda: False)
+    monkeypatch.setattr(
+        memory_index,
+        "chromadb_unavailable_reason",
+        lambda: "ImportError: incompatible sqlite runtime",
+    )
+
+    _selector, strategy, notes = memory_index.resolve_selector(
+        memory_store.project_id_for(project), "auto"
+    )
+
+    assert strategy == "deterministic"
+    assert 'python -m pip install -e ".[semantic]"' in notes[0]
+
+
+def test_explicit_semantic_reports_an_incomplete_present_index(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(memory_index, "chromadb_available", lambda: True)
+    project_id = memory_store.project_id_for(project)
+    memory_index.index_dir_for(project_id).mkdir(parents=True)
+
+    with pytest.raises(FileNotFoundError, match="chroma.sqlite3"):
         memory_index.resolve_selector(project_id, "semantic")
 
 
@@ -437,6 +518,7 @@ def test_context_uses_semantic_end_to_end_once_indexed(
 
     assert memory.main(["index", "--project", str(project)]) == 0
     capsys.readouterr()
+    (memory_index.index_dir_for(memory_store.project_id_for(project)) / "chroma.sqlite3").touch()
 
     assert memory.main(
         ["context", "--project", str(project), "--json",
@@ -537,6 +619,9 @@ def test_a_partially_built_index_set_reports_which_scope_is_missing(
     project: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(memory_index, "chromadb_available", lambda: True)
+    monkeypatch.setattr(
+        memory_index, "probe_index", lambda _idx, client_factory=None: None, raising=False
+    )
     project_id = memory_store.project_id_for(project)
     memory_index.index_dir_for(project_id).mkdir(parents=True)
 
@@ -551,6 +636,9 @@ def test_both_indexes_built_means_no_notes_at_all(
     project: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(memory_index, "chromadb_available", lambda: True)
+    monkeypatch.setattr(
+        memory_index, "probe_index", lambda _idx, client_factory=None: None, raising=False
+    )
     project_id = memory_store.project_id_for(project)
     memory_index.index_dir_for(project_id).mkdir(parents=True)
     memory_index.machine_index_dir().mkdir(parents=True)

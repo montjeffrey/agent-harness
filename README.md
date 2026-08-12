@@ -196,7 +196,7 @@ matching the other subcommands do. It's an opt-in extra so the core harness
 stays stdlib-only:
 
 ```bash
-pip install "agent-harness-kit[semantic]"
+python -m pip install -e ".[semantic]"   # run from this checkout
 python harness/graph_refresh.py <repo-root>       # builds/updates the semantic index too
 python harness/graph_query.py search "sends a welcome email"
 ```
@@ -210,7 +210,7 @@ Notes:
   semantic index in sync as a best-effort last step (it never fails the
   refresh if the index update itself fails).
 - Without the extra installed, `search` fails fast with an actionable
-  `pip install "agent-harness-kit[semantic]"` message instead of a traceback.
+  `python -m pip install -e ".[semantic]"` message instead of a traceback.
 - Embedding uses Chroma's default local model (ONNX all-MiniLM-L6-v2) --
   fully local, no API key required. The first time it runs, Chroma downloads
   that model (~80MB) to a local cache; after that, embedding is offline.
@@ -336,7 +336,7 @@ short pointer so the harness content lives in one place.
   `pip install -e ".[dev]"`)
 - [graphify](https://pypi.org/project/graphify/) installed separately and
   available as `python -m graphify ...` if you want to build/refresh graphs
-- `chromadb>=0.5` (`pip install "agent-harness-kit[semantic]"`) only if you want
+- `chromadb>=0.5` (`python -m pip install -e ".[semantic]"` from this checkout) only if you want
   the `search` subcommand -- everything else works without it
 
 ## Tests
@@ -499,7 +499,7 @@ rather than a fallback, and `--strategy deterministic` to force the baseline
 -- that pairing is what makes the two comparable on your own models.
 
 ```bash
-pip install "agent-harness-kit[semantic]"
+python -m pip install -e ".[semantic]"   # run from this checkout
 agent-harness-memory index
 ```
 

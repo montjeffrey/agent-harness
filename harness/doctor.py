@@ -156,7 +156,8 @@ def check_mcp() -> CheckResult:
         return CheckResult("PASS", "mcp sdk", "python module importable -- MCP server available")
     return CheckResult(
         "WARN", "mcp sdk",
-        "module not importable -- MCP tool server unavailable (pip install agent-harness-kit[mcp])",
+        "module not importable -- MCP tool server unavailable; from this checkout run "
+        '`python -m pip install -e ".[mcp]"`',
     )
 
 
@@ -210,8 +211,13 @@ def check_backend_key(config_path: Path = DEFAULT_CONFIG_PATH) -> CheckResult:
     return CheckResult("PASS", "graph backend", f"'{backend}' key sourced via key_command (value not shown)")
 
 
-def check_semantic(project_dir: Path | None = None) -> CheckResult:
-    """Optional `[semantic]` extra: the ChromaDB-backed `search` subcommand.
+def _local_semantic_install_command() -> str:
+    """The only install instruction valid for this unpublished checkout."""
+    return 'python -m pip install -e ".[semantic]"'
+
+
+def check_semantic() -> CheckResult:
+    """Report whether the optional ChromaDB dependency is importable.
 
     NEVER returns FAIL -- this extra is opt-in, and installs (and the rest
     of the harness) must keep working perfectly well without it.
@@ -222,28 +228,102 @@ def check_semantic(project_dir: Path | None = None) -> CheckResult:
         sys.path.insert(0, str(HARNESS_ROOT))
         from harness import graph_index
 
+    available, reason = graph_index.chromadb_status()
+    if not available:
+        return CheckResult(
+            "WARN", "semantic dependencies",
+            "chromadb not importable -- graph search and memory selection remain "
+            f"deterministic ({reason}); from this checkout run "
+            f"`{_local_semantic_install_command()}`",
+        )
+    return CheckResult("PASS", "semantic dependencies", "chromadb importable")
+
+
+def check_graph_semantic(project_dir: Path | None = None) -> CheckResult:
+    """Report whether the project's graph semantic index is query-ready."""
+    from harness import graph_index
+
     if not graph_index.chromadb_available():
         return CheckResult(
-            "WARN", "semantic search",
-            "chromadb not importable -- the `search` subcommand is unavailable; "
-            'pip install "agent-harness-kit[semantic]" to enable it',
+            "INFO", "graph semantic index",
+            "unavailable until chromadb is installed; graph find queries still work",
         )
     if project_dir is None:
-        return CheckResult("PASS", "semantic search", "chromadb importable")
+        return CheckResult("INFO", "graph semantic index", "no project supplied; cannot inspect graph semantic index")
 
     graph_path = project_dir.resolve() / "graphify-out" / "graph.json"
+    if not graph_path.is_file():
+        return CheckResult(
+            "INFO", "graph semantic index",
+            "graph.json is missing; graph semantic index is unavailable until graph refresh builds it",
+        )
     index_dir = graph_index.index_path_for(graph_path)
     if not index_dir.exists():
         return CheckResult(
-            "INFO", "semantic search",
-            "chromadb importable; no semantic index yet -- run harness/graph_refresh.py to build one",
+            "INFO", "graph semantic index",
+            "no graph semantic index yet -- run harness/graph_refresh.py to build one",
         )
     if graph_index.index_is_stale(index_dir, graph_path):
         return CheckResult(
-            "WARN", "semantic search",
-            "semantic index is older than graph.json -- run harness/graph_refresh.py to rebuild it",
+            "WARN", "graph semantic index",
+            "graph semantic index is older than graph.json -- run harness/graph_refresh.py to rebuild it",
         )
-    return CheckResult("PASS", "semantic search", "chromadb importable; semantic index present and up to date")
+    problem = graph_index.probe_index(index_dir)
+    if problem is not None:
+        return CheckResult(
+            "WARN", "graph semantic index",
+            "graph semantic index is not query-ready "
+            f"({problem}) -- run harness/graph_refresh.py to rebuild it",
+        )
+    return CheckResult("PASS", "graph semantic index", "graph semantic index present and up to date")
+
+
+def check_memory_semantic(project_dir: Path | None = None) -> CheckResult:
+    """Report whether the supplied project's memory semantic index is ready."""
+    from harness import memory_index, memory_store
+
+    if not memory_index.chromadb_available():
+        return CheckResult(
+            "INFO", "memory semantic index",
+            "unavailable until chromadb is installed; memory selection remains deterministic",
+        )
+    if project_dir is None:
+        return CheckResult("INFO", "memory semantic index", "no project supplied; cannot inspect memory semantic index")
+
+    project_index = memory_index.index_dir_for(memory_store.project_id_for(project_dir))
+    machine_index = memory_index.machine_index_dir()
+    present = [name for name, path in (("project", project_index), ("machine", machine_index)) if path.exists()]
+    if not present:
+        return CheckResult(
+            "INFO", "memory semantic index",
+            "no memory semantic index yet -- run agent-harness-memory index to build one",
+        )
+    problems = [
+        (name, memory_index.probe_index(path))
+        for name, path in (("project", project_index), ("machine", machine_index))
+        if name in present
+    ]
+    unreadable = [(name, problem) for name, problem in problems if problem is not None]
+    if unreadable:
+        details = [
+            f"{name} index is not query-ready ({problem})"
+            for name, problem in unreadable
+        ]
+        missing = [name for name in ("project", "machine") if name not in present]
+        details.extend(
+            f"no {name}-scope semantic index yet; that scope uses deterministic selection"
+            for name in missing
+        )
+        return CheckResult(
+            "WARN", "memory semantic index",
+            f"{'; '.join(details)} -- run agent-harness-memory index to rebuild it",
+        )
+    if len(present) == 1:
+        return CheckResult(
+            "INFO", "memory semantic index",
+            f"only the {present[0]}-scope memory semantic index exists; missing scope uses deterministic selection",
+        )
+    return CheckResult("PASS", "memory semantic index", "project and machine memory semantic indexes present")
 
 
 def check_agent_clis() -> CheckResult:
@@ -384,7 +464,9 @@ def run_checks(project_dir: Path | None = None) -> list[CheckResult]:
         check_graphify(),
         check_mcp(),
         check_backend_key(),
-        check_semantic(project_dir),
+        check_semantic(),
+        check_graph_semantic(project_dir),
+        check_memory_semantic(project_dir),
         check_agent_clis(),
         check_telemetry(),
     ]
