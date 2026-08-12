@@ -31,10 +31,22 @@ from pathlib import Path
 HARNESS_ROOT = Path(__file__).resolve().parent.parent
 
 try:
-    from harness import memory_context, memory_index, memory_review, memory_store
+    from harness import (
+        memory_compact,
+        memory_context,
+        memory_index,
+        memory_review,
+        memory_store,
+    )
 except ImportError:  # running as `python harness/memory.py`, not `-m harness.memory`
     sys.path.insert(0, str(HARNESS_ROOT))
-    from harness import memory_context, memory_index, memory_review, memory_store
+    from harness import (
+        memory_compact,
+        memory_context,
+        memory_index,
+        memory_review,
+        memory_store,
+    )
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -121,6 +133,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "index", help="build or refresh the ChromaDB semantic index (needs the `semantic` extra)"
     )
     idx_p.add_argument("--project", default=".", help="project root (default: current directory)")
+
+    cmp_p = sub.add_parser(
+        "compact",
+        help="archive closed work, promote durable knowledge, and bound active memory",
+    )
+    cmp_p.add_argument("--project", default=".", help="project root (default: current directory)")
 
     return parser.parse_args(argv)
 
@@ -364,6 +382,35 @@ def cmd_index(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_compact(args: argparse.Namespace) -> int:
+    root = Path(args.project).expanduser()
+    try:
+        result = memory_compact.compact(root)
+    except memory_compact.CompactLockError as exc:
+        print(f"compaction refused: {exc}", file=sys.stderr)
+        return 2
+
+    print(f"compacted {root} ({result.week})")
+    print(f"  archived: {result.archived} (of which duplicates: {result.duplicates})")
+    print(f"  promoted: {result.promoted}")
+    print(f"  active:   {result.carried} carried, {result.omitted} omitted")
+    if result.archived:
+        print(f"  archive:  {result.archive_path}")
+
+    if not result.changed:
+        print("\nnothing to compact -- no closed work and no new durable knowledge")
+        return 1
+
+    # Removals are the whole point, and they are exactly what leaves the
+    # semantic index behind: `update_index` drops departed ids, but only when
+    # it is re-run. Saying so here is the difference between a compaction that
+    # freshens retrieval and one that only freshens the files.
+    if result.index_stale:
+        print("\nentries were removed -- the semantic index still serves them.")
+        print("run `agent-harness-memory index` to drop them from retrieval.")
+    return 0
+
+
 _COMMANDS = {
     "init": cmd_init,
     "remember": cmd_remember,
@@ -371,6 +418,7 @@ _COMMANDS = {
     "review": cmd_review,
     "context": cmd_context,
     "index": cmd_index,
+    "compact": cmd_compact,
 }
 
 

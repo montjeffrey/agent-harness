@@ -187,3 +187,67 @@ def test_status_warns_while_scope_is_still_the_untouched_template(project: Path,
     memory.main(["init", str(project)])
     assert memory.main(["status", "--project", str(project)]) == 0
     assert "scope" in capsys.readouterr().out.lower()
+
+
+# --- compact --------------------------------------------------------------
+
+
+def _remember(project: Path, summary: str, *, type: str = "decision") -> None:
+    assert memory.main([
+        "remember", "--project", str(project),
+        "--type", type, "--summary", summary,
+    ]) == 0
+
+
+def test_compact_reports_nothing_to_do_on_a_fresh_project(project: Path, capsys) -> None:
+    assert memory.main(["init", str(project)]) == 0
+    assert memory.main(["compact", "--project", str(project)]) == 1
+    assert "nothing to compact" in capsys.readouterr().out
+
+
+def test_compact_promotes_accepted_knowledge_and_exits_zero(project: Path, capsys) -> None:
+    assert memory.main(["init", str(project)]) == 0
+    _remember(project, "We chose JSONL for the inbox.")
+    entry_id = _entries(project)[0]["id"]
+    assert memory.main([
+        "review", "accept", entry_id, "--project", str(project), "--commit", "abc1234",
+    ]) == 0
+
+    assert memory.main(["compact", "--project", str(project)]) == 0
+    out = capsys.readouterr().out
+    assert "promoted: 1" in out
+    durable = (project / ".agent-harness" / "memory" / "durable.md").read_text(encoding="utf-8")
+    assert "We chose JSONL for the inbox." in durable
+
+
+def test_compact_tells_the_operator_to_rebuild_the_index_after_removing_entries(
+    project: Path, capsys
+) -> None:
+    """The whole point of compaction is fresher retrieval, and removals do not
+    reach the semantic index until `index` is re-run."""
+    assert memory.main(["init", str(project)]) == 0
+    _remember(project, "This one gets rejected.")
+    entry_id = _entries(project)[0]["id"]
+    assert memory.main(["review", "reject", entry_id, "--project", str(project)]) == 0
+
+    assert memory.main(["compact", "--project", str(project)]) == 0
+    out = capsys.readouterr().out
+    assert "agent-harness-memory index" in out
+
+
+def test_compact_refuses_with_exit_two_while_another_run_holds_the_lock(
+    project: Path, capsys
+) -> None:
+    from harness import memory_compact
+
+    assert memory.main(["init", str(project)]) == 0
+    directory = memory_store.project_memory_dir(project)
+    with memory_compact.compact_lock(directory):
+        assert memory.main(["compact", "--project", str(project)]) == 2
+    assert "compaction refused" in capsys.readouterr().err
+
+
+def test_compact_defaults_to_the_current_directory(project: Path, monkeypatch) -> None:
+    assert memory.main(["init", str(project)]) == 0
+    monkeypatch.chdir(project)
+    assert memory.main(["compact"]) in (0, 1)

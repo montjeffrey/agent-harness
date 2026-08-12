@@ -400,6 +400,7 @@ agent-harness-memory review supersede mem-2026-08-07-001 --summary "Chose Z."
 agent-harness-memory context                      # budgeted packet, Markdown
 agent-harness-memory context --json --query "rate limiting"
 agent-harness-memory index                        # build the semantic index
+agent-harness-memory compact                      # archive closed work
 
 # Source-checkout/module fallback
 python -m harness.memory init
@@ -565,6 +566,59 @@ paths run. Those are two `git` calls, ~880ms on a large repo on network-backed
 storage -- more than everything else in the hook combined -- and they buy
 nothing here, because `graph_check.py` runs as a SessionStart hook alongside
 this one and already reports a stale or dirty graph.
+
+### Compaction: keeping retrieval fresh
+
+Every other memory command adds. `remember` appends, `review` transitions a
+status, `index` mirrors whatever is there -- so an inbox in long-term use grows
+without bound, and a growing inbox degrades the very thing memory is for: the
+selector ranks over more candidates, the context packet spends its budget on
+settled work, and the semantic index carries entries nobody needs again.
+
+```bash
+agent-harness-memory compact
+```
+
+Compaction is the only operation that removes entries, so its rules are narrow:
+
+- **Only closed work leaves.** Entries in a `rejected`, `superseded`, or
+  `resolved` status, plus duplicate *proposals* (same type, scope, and summary
+  after normalizing case, spacing, and punctuation). An unreviewed proposal is
+  never discarded -- that decision belongs to a human. Accepted entries are
+  never deduplicated either, because two similar ones may cite different
+  commits, and collapsing them would destroy the audit trail.
+- **Everything removed is archived first**, into
+  `.agent-harness/memory/archive/YYYY-Www.md`. The file is appended to, never
+  replaced, so a second run in the same ISO week cannot erase the first.
+- **Promotion is a copy, not a move.** Accepted decisions, discoveries, and
+  lessons are written into `durable.md` for human and Git review but *stay* in
+  the inbox, because retrieval reads durable knowledge out of the inbox.
+  Moving them would delete them from the context packet and the index.
+  Promotion is idempotent by entry id.
+- **`active.md` is rewritten** with open work and recent decisions, bounded by
+  entry and character budgets. Omission is unit-atomic and counted, matching
+  the context packet's own rule.
+- **The inbox is spliced last** -- archive, then durable, then active, then
+  inbox. The inbox is the store of record and everything else derives from it,
+  so a crash partway through loses only derived work the next run redoes.
+  Lines this schema version cannot parse are carried across untouched.
+
+A project-scoped lockfile stops two compactions running at once; a stale or
+corrupt lock is broken rather than wedging the command forever.
+
+Because removals only reach ChromaDB when the index is rebuilt, compaction
+tells you when to do it:
+
+```text
+entries were removed -- the semantic index still serves them.
+run `agent-harness-memory index` to drop them from retrieval.
+```
+
+Not yet included, each tracked separately in `ROADMAP.md`: scope-drift
+detection, cross-project relationship proposals, contradiction detection, and
+the optional AI summarization pass. Task and blocker state needs no
+reconciliation here -- `review` and the task tools already enforce those
+transitions at write time.
 
 Exit codes: `0` success, `1` nothing to do (e.g. `status` before `init`),
 `2` input rejected.

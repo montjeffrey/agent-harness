@@ -98,12 +98,30 @@ one per project); SessionStart hook injecting the packet; auto-enrollment
 gated on both `AGENT_HARNESS_AUTO_ENROLL` and the project living under
 `AGENT_HARNESS_WORKSPACE`; `agent-harness-doctor`.
 
+Also shipped: **`compact`** (`harness/memory_compact.py`) -- the deterministic
+weekly pass. Only closed work and duplicate *proposals* leave the inbox, always
+into `archive/YYYY-Www.md` first, so every removal is recoverable and no
+unreviewed proposal is ever discarded. Accepted knowledge is promoted into
+`durable.md` as a **copy**, not a move: retrieval reads durable knowledge out
+of the inbox, so moving it would delete it from the packet and the index.
+`active.md` is rewritten within entry and character budgets with unit-atomic,
+counted omission. Writes are ordered archive -> durable -> active -> inbox, so
+a crash loses only derived work; the inbox splice is line-level, preserving
+lines this schema version cannot parse. A project lockfile excludes concurrent
+compactions and self-heals when stale or corrupt. Because `update_index` only
+drops departed ids when re-run, compaction reports when the semantic index
+needs rebuilding -- without that, compaction would freshen the files while
+retrieval kept serving archived entries.
+
+Deferred out of that increment, deliberately, since each is its own item
+below or in Objective 4: scope-drift detection (design step 6), cross-project
+relationship proposals (step 9), contradiction detection (step 5, which exists
+nowhere yet), and the optional AI summarization pass. Design step 4 (reconcile
+task and blocker states) needed no work -- `memory_review` and `memory_tasks`
+already enforce those transitions at write time.
+
 Open:
 
-- **`compact`** -- weekly deterministic archive + durable promotion. This is
-  the largest remaining gap and it is a *correctness* gap, not a tidiness one:
-  without it the inbox grows without bound, and both retrieval quality and
-  packet budgeting degrade as it does.
 - **Scope drift** -- detect entries recorded in project scope that are really
   machine-local (and the reverse). Wrong scope means either a machine detail
   committed to a shared repo or a project decision stranded on one machine.
