@@ -1,11 +1,13 @@
 """Portable hierarchical memory CLI: init, remember, status, review, context,
-and index.
+index, compact, and eval.
 
 Capture is explicit. Nothing in this module runs automatically or summarizes
 with an AI model. `init`, `remember`, `status`, `review`, and `context` are
 stdlib-only and never open a network socket; `index` is the one command that
 may touch the optional `chromadb` extra, and it is deliberately separate from
-`context` so the agent hot path can never trigger a model download.
+`context` so the agent hot path can never trigger a model download. `eval`
+reads the semantic index when one exists but never builds it, so it inherits
+the same guarantee.
 
 Exit codes are part of the contract so automation can branch on them:
 
@@ -20,6 +22,8 @@ Usage:
     python harness/memory.py review list | ACTION ENTRY_ID [options]
     python harness/memory.py context [--query TEXT] [--json] [--strategy S]
     python harness/memory.py index [--project PATH]
+    python harness/memory.py compact [--project PATH]
+    python harness/memory.py eval [--cases PATH] [--limit N] [--strategy S] [--save]
 """
 
 from __future__ import annotations
@@ -34,18 +38,22 @@ try:
     from harness import (
         memory_compact,
         memory_context,
+        memory_eval,
         memory_index,
         memory_review,
         memory_store,
+        work_store,
     )
 except ImportError:  # running as `python harness/memory.py`, not `-m harness.memory`
     sys.path.insert(0, str(HARNESS_ROOT))
     from harness import (
         memory_compact,
         memory_context,
+        memory_eval,
         memory_index,
         memory_review,
         memory_store,
+        work_store,
     )
 
 
@@ -139,6 +147,36 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="archive closed work, promote durable knowledge, and bound active memory",
     )
     cmp_p.add_argument("--project", default=".", help="project root (default: current directory)")
+
+    eval_p = sub.add_parser(
+        "eval",
+        help="score retrieval against a labelled case set in the working store",
+    )
+    eval_p.add_argument("--project", default=".", help="project root (default: current directory)")
+    eval_p.add_argument(
+        "--cases",
+        default=None,
+        help="JSONL case file (default: .agent-harness/work/eval/default.jsonl)",
+    )
+    eval_p.add_argument(
+        "--limit",
+        type=int,
+        default=memory_eval.DEFAULT_LIMIT,
+        help=f"entries requested per selection (default: {memory_eval.DEFAULT_LIMIT})",
+    )
+    eval_p.add_argument(
+        "--strategy",
+        action="append",
+        choices=memory_eval.STRATEGIES,
+        default=None,
+        help="strategy to score; repeatable (default: every strategy)",
+    )
+    eval_p.add_argument(
+        "--save",
+        action="store_true",
+        help="also write the report under work/eval/results/",
+    )
+    eval_p.add_argument("--json", action="store_true", help="emit JSON instead of Markdown")
 
     return parser.parse_args(argv)
 
@@ -411,6 +449,62 @@ def cmd_compact(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_eval(args: argparse.Namespace) -> int:
+    root = Path(args.project).expanduser()
+    cases_path = (
+        Path(args.cases).expanduser()
+        if args.cases
+        else memory_eval.default_cases_path(root)
+    )
+
+    try:
+        cases = memory_eval.load_cases(cases_path)
+    except FileNotFoundError:
+        print(f"no eval case file at {cases_path}", file=sys.stderr)
+        print(
+            "write one line of JSON per case, e.g. "
+            '{"name": "auth", "query": "how did we redo login", '
+            '"relevant": ["project:mem-2026-08-12-001"]}',
+            file=sys.stderr,
+        )
+        return 1
+    except memory_eval.EvalCaseError as exc:
+        # Rejected, not skipped: scoring a case set with a hole in it reports a
+        # number for a question that was never asked.
+        print(f"{exc}", file=sys.stderr)
+        return 2
+
+    try:
+        report = memory_eval.evaluate(
+            root,
+            cases,
+            limit=args.limit,
+            strategies=args.strategy or memory_eval.STRATEGIES,
+        )
+    except ValueError as exc:
+        print(f"{exc}", file=sys.stderr)
+        return 2
+
+    sys.stdout.write(
+        memory_eval.render_json(report) if args.json
+        else memory_eval.render_markdown(report)
+    )
+
+    if args.save:
+        # `ensure_work_dir` runs first so the tier's self-ignoring `.gitignore`
+        # exists before anything lands beside it -- a saved report is untracked
+        # from the moment it exists, not from the next time someone remembers.
+        # The path itself comes only from `report_path`, which stamps it from
+        # the report's own clock.
+        work_store.ensure_work_dir(root)
+        destination = memory_eval.report_path(root, report)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(memory_eval.render_json(report), encoding="utf-8")
+        print(f"\nsaved {destination}", file=sys.stderr)
+
+    return 0
+
+
 _COMMANDS = {
     "init": cmd_init,
     "remember": cmd_remember,
@@ -419,6 +513,7 @@ _COMMANDS = {
     "context": cmd_context,
     "index": cmd_index,
     "compact": cmd_compact,
+    "eval": cmd_eval,
 }
 
 

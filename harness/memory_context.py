@@ -368,6 +368,43 @@ def _is_live(entry: dict) -> bool:
     return entry.get("status") not in memory_store.CLOSED_STATUSES
 
 
+def durable_pools(
+    project_entries: Sequence[dict], machine_entries: Sequence[dict]
+) -> dict[str, list[dict]]:
+    """The candidate pools a `Selector` actually ranks, split by section.
+
+    Open work is excluded from `project_durable` because it is rendered
+    unranked in the `active` section; relationships are split out because they
+    are their own section and are accepted-only.
+
+    Public and factored out of `build_packet` so that anything *measuring*
+    selection quality ranks the same pool production ranks. Scoring a
+    plausible-looking substitute -- "every live entry", say -- yields numbers
+    that read as retrieval quality while describing a pool no packet is ever
+    built from.
+    """
+    open_ids = {e.get("id") for e in _open_work(project_entries)}
+    return {
+        "project_durable": [
+            e
+            for e in project_entries
+            if _is_live(e)
+            and e.get("type") != "relationship"
+            and e.get("id") not in open_ids
+        ],
+        "machine_durable": [
+            e
+            for e in machine_entries
+            if _is_live(e) and e.get("type") != "relationship"
+        ],
+        "relationships": [
+            e
+            for e in list(project_entries) + list(machine_entries)
+            if e.get("type") == "relationship" and e.get("status") == "accepted"
+        ],
+    }
+
+
 def _freshness_warnings(entries: Sequence[dict], now: datetime) -> list[str]:
     warnings: list[str] = []
     stamps = [str(e.get("ts")) for e in entries if e.get("ts")]
@@ -466,28 +503,8 @@ def build_packet(
     active_units = active_units + open_units
     active_records = active_records + open_records
 
-    open_ids = {e.get("id") for e in open_work}
-    project_durable = [
-        e
-        for e in project_entries
-        if _is_live(e)
-        and e.get("type") != "relationship"
-        and e.get("id") not in open_ids
-    ]
-    machine_durable = [
-        e for e in machine_entries if _is_live(e) and e.get("type") != "relationship"
-    ]
-    relationships = [
-        e
-        for e in project_entries + machine_entries
-        if e.get("type") == "relationship" and e.get("status") == "accepted"
-    ]
-
-    selected = {
-        "project_durable": select(project_durable),
-        "machine_durable": select(machine_durable),
-        "relationships": select(relationships),
-    }
+    pools = durable_pools(project_entries, machine_entries)
+    selected = {key: select(pool) for key, pool in pools.items()}
 
     # Priorities: which topics keep stalling, then what to pick up because of
     # them. Placed after `active` and before knowledge because an agent needs

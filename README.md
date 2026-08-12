@@ -412,6 +412,8 @@ agent-harness-memory context                      # budgeted packet, Markdown
 agent-harness-memory context --json --query "rate limiting"
 agent-harness-memory index                        # build the semantic index
 agent-harness-memory compact                      # archive closed work
+agent-harness-memory eval                         # score retrieval on a case set
+agent-harness-memory eval --strategy deterministic --strategy semantic --save
 
 # Source-checkout/module fallback
 python -m harness.memory init
