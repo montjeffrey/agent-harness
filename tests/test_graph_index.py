@@ -180,6 +180,7 @@ def test_default_client_disables_anonymized_telemetry(tmp_path: Path) -> None:
 class FakeCollection:
     def __init__(self) -> None:
         self._store: dict[str, tuple[str, dict]] = {}
+        self.queried_by: str | None = None
 
     def get(self, include=None):  # noqa: ANN001 -- test double, mirrors chromadb's kwarg
         ids = list(self._store.keys())
@@ -200,7 +201,14 @@ class FakeCollection:
         for i in ids:
             self._store.pop(i, None)
 
-    def query(self, query_texts, n_results):  # noqa: ANN001
+    def query(self, n_results, query_texts=None, query_embeddings=None):  # noqa: ANN001
+        """Accepts either form real Chroma accepts, and records which arrived.
+
+        Ordering ignores the probe entirely, so tests that assert on rows keep
+        their meaning down both paths; `queried_by` is what makes the choice
+        of path observable.
+        """
+        self.queried_by = "embeddings" if query_embeddings is not None else "texts"
         ids = list(self._store.keys())[:n_results]
         distances = [float(i) for i in range(len(ids))]
         return {"ids": [ids], "distances": [distances]}
@@ -403,3 +411,61 @@ def test_query_index_raises_file_not_found_when_collection_missing(tmp_path: Pat
     client = FakeClient()  # no update_index call -- collection never created
     with pytest.raises(FileNotFoundError):
         graph_index.query_index(tmp_path, "anything", 5, client_factory=lambda _d: client)
+
+
+# --- embedding the query ourselves rather than letting Chroma do it ----------
+#
+# Chroma's DefaultEmbeddingFunction builds a fresh ONNXMiniLM_L6_V2 per call,
+# discarding the instance whose cached_property holds the inference session.
+# Measured against a 500-node index: one cold `search` costs ~705ms through
+# query_texts against ~469ms through a precomputed vector. See
+# harness.embedding.
+
+
+def test_a_precomputed_embedding_is_sent_instead_of_the_query_text(
+    tmp_path: Path,
+) -> None:
+    """Passing a vector must reach Chroma as `query_embeddings`.
+
+    Sending `query_texts` alongside would hand the work straight back to the
+    collection's own embedding function, which is the cost being avoided.
+    """
+    client = FakeClient()
+    graph_index.update_index(
+        _graph([{"id": "n1", "label": "send_welcome_email"}]),
+        tmp_path,
+        client_factory=lambda _d: client,
+    )
+
+    graph_index.query_index(
+        tmp_path,
+        "unused text",
+        5,
+        client_factory=lambda _d: client,
+        embedding=[0.1, 0.2, 0.3],
+    )
+
+    assert client.collections[graph_index.COLLECTION_NAME].queried_by == "embeddings"
+
+
+def test_the_text_path_still_works_when_no_embedding_is_supplied(
+    tmp_path: Path,
+) -> None:
+    """No embedder available must stay a working query, only a slower one.
+
+    Every caller that has not been taught to pre-embed -- and every install
+    without the `semantic` extra -- depends on this default.
+    """
+    client = FakeClient()
+    graph_index.update_index(
+        _graph([{"id": "n1", "label": "send_welcome_email"}]),
+        tmp_path,
+        client_factory=lambda _d: client,
+    )
+
+    results = graph_index.query_index(
+        tmp_path, "welcome email", 5, client_factory=lambda _d: client
+    )
+
+    assert client.collections[graph_index.COLLECTION_NAME].queried_by == "texts"
+    assert [nid for nid, _distance in results] == ["n1"]

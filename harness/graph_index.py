@@ -331,12 +331,27 @@ def query_index(
     limit: int,
     client_factory: ClientFactory | None = None,
     embedding_function: Any = None,
+    embedding: Any = None,
 ) -> list[tuple[str, float]]:
     """Query the semantic index for the `limit` nodes closest to `text`.
 
     Returns `(node_id, distance)` pairs, closest first. Distance is
     whatever Chroma's configured similarity space returns (squared L2 for
     the default local embedding function) -- lower means more similar.
+
+    Supplying `embedding` -- a vector the caller already computed, via
+    `harness.embedding.embed_query` -- keeps the collection's own embedding
+    function out of the hot path. That function is Chroma's
+    `DefaultEmbeddingFunction`, which rebuilds a whole ONNX inference session
+    per call. Measured against a 500-node index: one cold `search` costs
+    ~705ms through `query_texts` against ~469ms through a precomputed vector,
+    and the margin widens to ~3.6x per query in any process that searches more
+    than once. Ranking is unaffected, because the vector comes from the very
+    model Chroma would have used.
+
+    Passing a collection-level `embedding_function` is not an alternative:
+    Chroma rejects one whose name differs from the persisted one. See
+    `harness.embedding`.
 
     Raises `FileNotFoundError` if `index_dir` exists but the index's
     collection doesn't (e.g. a prior `update_index` build failed partway
@@ -345,7 +360,10 @@ def query_index(
     factory = client_factory or _default_client
     client = factory(index_dir)
     collection = _get_existing_collection(client, embedding_function)
-    result = collection.query(query_texts=[text], n_results=limit)
+    if embedding is None:
+        result = collection.query(query_texts=[text], n_results=limit)
+    else:
+        result = collection.query(query_embeddings=[embedding], n_results=limit)
     ids = (result.get("ids") or [[]])[0]
     distances = (result.get("distances") or [[]])[0]
     return list(zip(ids, distances))

@@ -7,7 +7,21 @@ from pathlib import Path
 
 import pytest
 
+from harness import embedding as embedding_module
 from harness import graph_query
+
+
+@pytest.fixture(autouse=True)
+def no_real_embedder(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the real ~80MB ONNX model out of every test in this module.
+
+    `cmd_search` embeds the query itself now, so without this the default
+    embedder would resolve for real wherever chromadb happens to be
+    installed -- making the suite download and run a model. Returning None
+    is the same thing a stdlib-only install sees, and leaves `search` on the
+    `query_texts` path these tests already assert against.
+    """
+    monkeypatch.setattr(embedding_module, "default_embedding_function", lambda: None)
 
 
 @pytest.fixture()
@@ -480,7 +494,10 @@ def test_search_with_partially_built_index_points_at_graph_refresh(
     index_dir = graph_index.index_path_for(graph_file)
     index_dir.mkdir(parents=True)
 
-    def fake_query_index(_index_dir, _text, _limit, client_factory=None, embedding_function=None):
+    def fake_query_index(
+        _index_dir, _text, _limit, client_factory=None, embedding_function=None,
+        embedding=None,
+    ):
         raise FileNotFoundError("no collection named 'graph_nodes' in this semantic index")
 
     monkeypatch.setattr(graph_index, "query_index", fake_query_index)
@@ -503,7 +520,10 @@ def test_search_returns_scored_rows_via_fake_index(
     index_dir = graph_index.index_path_for(graph_file)
     index_dir.mkdir(parents=True)
 
-    def fake_query_index(_index_dir, _text, _limit, client_factory=None, embedding_function=None):
+    def fake_query_index(
+        _index_dir, _text, _limit, client_factory=None, embedding_function=None,
+        embedding=None,
+    ):
         return [("n2", 0.0), ("n1", 1.0)]
 
     monkeypatch.setattr(graph_index, "query_index", fake_query_index)
@@ -514,6 +534,50 @@ def test_search_returns_scored_rows_via_fake_index(
     assert "0.50" in joined  # score for distance 1.0
     assert "n2" in joined
     assert "n1" in joined
+
+
+def test_search_embeds_the_term_once_and_passes_the_vector_down(
+    graph_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`search` must pre-embed rather than leave it to the collection.
+
+    Chroma's default embedding function rebuilds a whole ONNX inference
+    session per call, which is most of what a one-shot search spends (~705ms
+    against ~469ms on a 500-node index). If the vector stopped reaching
+    `query_index`, output would stay correct and only the cost would return
+    -- so the hand-off is the thing worth asserting.
+    """
+    from harness import graph_index
+
+    monkeypatch.setattr(graph_index, "chromadb_available", lambda: True)
+    index_dir = graph_index.index_path_for(graph_file)
+    index_dir.mkdir(parents=True)
+
+    embedded: list[list[str]] = []
+
+    class Embedder:
+        def __call__(self, input: list[str]) -> list[list[float]]:
+            embedded.append(list(input))
+            return [[0.1, 0.2, 0.3]]
+
+    monkeypatch.setattr(
+        embedding_module, "default_embedding_function", lambda: Embedder()
+    )
+
+    seen: list[object] = []
+
+    def fake_query_index(
+        _index_dir, _text, _limit, client_factory=None, embedding_function=None,
+        embedding=None,
+    ):
+        seen.append(embedding)
+        return [("n1", 0.0)]
+
+    monkeypatch.setattr(graph_index, "query_index", fake_query_index)
+    graph_query.run(["--graph", str(graph_file), "search", "welcome email"])
+
+    assert embedded == [["welcome email"]]
+    assert seen == [[0.1, 0.2, 0.3]]
 
 
 def test_search_all_other_subcommands_unaffected(graph_file: Path) -> None:

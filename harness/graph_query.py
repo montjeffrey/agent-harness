@@ -346,6 +346,7 @@ def cmd_search(g: dict, graph_path: Path, term: str) -> list[str]:
     MAX_ROWS via format_rows), each row prefixed with a 2-decimal relevance
     score (1 / (1 + distance) -- higher is more relevant).
     """
+    from harness import embedding as embedding_module  # lazy: search-only
     from harness import graph_index  # lazy: only this command needs it
 
     if not graph_index.chromadb_available():
@@ -359,8 +360,15 @@ def cmd_search(g: dict, graph_path: Path, term: str) -> list[str]:
         raise SystemExit(_no_semantic_index_message(index_dir))
 
     nodes = {n["id"]: n for n in g["nodes"]}
+    # Embed here rather than letting the collection do it: Chroma's default
+    # embedding function rebuilds its ONNX session on every call, which is
+    # most of what a one-shot `search` spends. None means no embedder is
+    # available, and `query_index` falls back to embedding from text.
+    embedding = embedding_module.embed_query(term)
     try:
-        results = graph_index.query_index(index_dir, term, MAX_ROWS + 1)
+        results = graph_index.query_index(
+            index_dir, term, MAX_ROWS + 1, embedding=embedding
+        )
     except FileNotFoundError:
         # index_dir exists but its collection doesn't -- a prior build
         # failed partway through. Same guidance as the missing-dir case.
