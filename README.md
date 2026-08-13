@@ -657,9 +657,10 @@ default **local** embedding model (ONNX all-MiniLM-L6-v2), so node text
 indexed entirely on your machine -- no API key, no per-query network call,
 nothing sent anywhere. The only network activity is a one-time ~80MB
 download of the local model itself the first time Chroma needs it, cached
-locally afterward. `harness/graph_index.py` never imports `chromadb` at
-module scope, so the core package -- and every other subcommand -- keeps
-working with zero dependencies even if the extra is never installed.
+locally afterward. `harness/graph_index.py`, `harness/memory_index.py`, and
+`harness/embedding.py` never import `chromadb` at module scope, so the core
+package -- and every other subcommand -- keeps working with zero dependencies
+even if the extra is never installed.
 
 ## License
 

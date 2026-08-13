@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from harness import memory, memory_context, memory_index, memory_store
+from harness import embedding, memory, memory_context, memory_index, memory_store
 
 NOW = datetime(2026, 8, 7, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -34,6 +34,7 @@ class FakeCollection:
     def __init__(self) -> None:
         self.docs: dict[str, str] = {}
         self.metas: dict[str, dict] = {}
+        self.queried_by: str | None = None
 
     def get(self, include: Any = None) -> dict:
         ids = list(self.docs)
@@ -51,7 +52,7 @@ class FakeCollection:
             self.docs.pop(i, None)
             self.metas.pop(i, None)
 
-    def query(self, query_texts, n_results) -> dict:
+    def query(self, n_results, query_texts=None, query_embeddings=None) -> dict:
         """Rank by shared-word overlap, returned as a distance in [0, 1].
 
         The distance must reflect *match quality*, not position in this
@@ -60,8 +61,14 @@ class FakeCollection:
         that to merge project- and machine-scope hits into one ranking.
         A positional 0,1,2... would make every index's best hit tie at 0.0
         and quietly reduce the merge to "whichever index was queried first".
+
+        Accepts either form real Chroma accepts. `FakeEmbeddingFunction`
+        returns the text unchanged as its "vector", so ranking is identical
+        down both paths and the existing assertions keep their meaning.
         """
-        wanted = set(query_texts[0].lower().split())
+        self.queried_by = "embeddings" if query_embeddings is not None else "texts"
+        probe = query_embeddings if query_embeddings is not None else query_texts
+        wanted = set(probe[0].lower().split())
 
         def distance(doc: str) -> float:
             if not wanted:
@@ -99,6 +106,23 @@ class FakeClient:
         return 2
 
 
+class FakeEmbeddingFunction:
+    """Stand-in for a real embedder that counts how often it is called.
+
+    Returns each document unchanged as its own "vector". `FakeCollection`
+    ranks a vector exactly as it ranks text, so substituting this for the
+    ONNX embedder changes no ranking -- it only makes the number of embed
+    calls observable, which is the thing worth asserting.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    def __call__(self, input: list[str]) -> list[str]:
+        self.calls.append(list(input))
+        return list(input)
+
+
 @pytest.fixture(autouse=True)
 def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home = tmp_path / "home"
@@ -108,6 +132,24 @@ def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(Path, "home", lambda: home)
     FakeClient.stores.clear()
     return home
+
+
+@pytest.fixture(autouse=True)
+def fake_embedder(monkeypatch: pytest.MonkeyPatch) -> FakeEmbeddingFunction:
+    """Keep the real ~80MB ONNX model out of every test in this module.
+
+    Without this the default embedder resolves for real whenever chromadb
+    happens to be installed, which would make the suite download and run a
+    model -- breaking the file's stated promise that it exercises the real
+    code paths with or without the `semantic` extra.
+
+    Patched on `harness.embedding`, which is where the held instance lives
+    and where `embed_query` looks it up. Patching the name on `memory_index`
+    would bind nothing.
+    """
+    embedder = FakeEmbeddingFunction()
+    monkeypatch.setattr(embedding, "default_embedding_function", lambda: embedder)
+    return embedder
 
 
 @pytest.fixture
@@ -647,3 +689,87 @@ def test_both_indexes_built_means_no_notes_at_all(
         project_id, "auto", client_factory=FakeClient
     )
     assert (strategy, notes) == ("semantic", [])
+
+
+# --- embedding the query once, ourselves ---------------------------------
+#
+# Chroma's DefaultEmbeddingFunction constructs a fresh ONNXMiniLM_L6_V2 on
+# every call, discarding the instance whose cached_property holds the ONNX
+# session -- so letting Chroma embed from `query_texts` rebuilt a full
+# inference session per scope, per query. Measured on this project's own eval
+# set: ~754ms per embed that way versus ~72ms through one held instance.
+# Resolution of the held instance itself is covered by tests/test_embedding.py;
+# what matters here is that selection uses it, once, and still works without it.
+
+
+def test_a_precomputed_embedding_is_sent_instead_of_the_query_text(
+    project: Path,
+) -> None:
+    """Passing a vector must reach Chroma as `query_embeddings`.
+
+    Sending `query_texts` alongside would hand the work straight back to the
+    collection's own embedding function, which is what we are avoiding.
+    """
+    _add(project, "Chose Postgres over MySQL for row level security.")
+    memory_index.build_index(_entries(project), Path("idx"), client_factory=FakeClient)
+
+    memory_index.query_index(
+        Path("idx"), "unused text", 5, client_factory=FakeClient, embedding="postgres row"
+    )
+    collection = FakeClient.stores["idx::memory_entries"]
+    assert collection.queried_by == "embeddings"
+
+
+def test_the_query_is_embedded_once_no_matter_how_many_scopes_are_searched(
+    project: Path, fake_embedder: FakeEmbeddingFunction
+) -> None:
+    """Two scope indexes must not mean two identical embeddings.
+
+    `semantic_selector` groups candidates by scope and queries one index per
+    group. Embedding inside that loop meant paying the full per-query cost
+    once per scope for the very same string -- and it would multiply again
+    once partitions add more indexes.
+    """
+    memory_store.append_entries(
+        [{"type": "lesson", "scope": "machine", "status": "accepted",
+          "confidence": "confirmed", "source": {"manual": True},
+          "summary": "Kill processes by exact PID, never by image name."}],
+        directory=memory_store.machine_memory_dir(), now=NOW,
+    )
+    _add(project, "Chose Postgres over MySQL for row level security.")
+    machine = list(memory_store.iter_entries(memory_store.machine_memory_dir()))
+    memory_index.build_index(_entries(project), Path("p"), client_factory=FakeClient)
+    memory_index.build_index(machine, Path("m"), client_factory=FakeClient)
+
+    select = memory_index.semantic_selector(
+        {"project": Path("p"), "machine": Path("m")}, client_factory=FakeClient
+    )
+    fake_embedder.calls.clear()
+    ranked = select(_entries(project) + machine, "kill processes by pid", 10)
+
+    assert fake_embedder.calls == [["kill processes by pid"]]
+    assert len(ranked) == 2
+    assert FakeClient.stores["p::memory_entries"].queried_by == "embeddings"
+    assert FakeClient.stores["m::memory_entries"].queried_by == "embeddings"
+
+
+def test_selection_still_ranks_by_text_when_no_embedder_is_available(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without an embedder, fall back to letting Chroma embed from text.
+
+    Ranking quality is unchanged; only the cost differs. Refusing to select
+    here would turn a performance optimisation into a hard dependency.
+    """
+    monkeypatch.setattr(embedding, "default_embedding_function", lambda: None)
+    _add(project, "Chose Postgres over MySQL for row level security.")
+    _add(project, "Rewrote the login flow to use magic links.")
+    memory_index.build_index(_entries(project), Path("idx"), client_factory=FakeClient)
+
+    select = memory_index.semantic_selector(
+        {"project": Path("idx")}, client_factory=FakeClient
+    )
+    ranked = select(_entries(project), "login magic links", 10)
+
+    assert FakeClient.stores["idx::memory_entries"].queried_by == "texts"
+    assert "magic links" in ranked[0]["summary"]

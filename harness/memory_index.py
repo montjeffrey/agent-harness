@@ -38,6 +38,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+# Safe at module scope: `harness.embedding` imports chromadb no more eagerly
+# than this module does, so rule 1 above still holds. Aliased because
+# `embedding` is also the natural name for the vector itself at the call site.
+from harness import embedding as embedding_module
+
 from harness import memory_store
 
 COLLECTION_NAME = "memory_entries"
@@ -314,12 +319,26 @@ def query_index(
     limit: int,
     client_factory: ClientFactory | None = None,
     embedding_function: Any = None,
+    embedding: Any = None,
 ) -> list[tuple[str, float]]:
-    """Return `(entry_id, distance)` pairs for `text`, closest first."""
+    """Return `(entry_id, distance)` pairs for `text`, closest first.
+
+    Supplying `embedding` -- a vector the caller already computed -- is what
+    keeps the collection's own embedding function out of the hot path. It is
+    also the only way to substitute an embedder at all: Chroma refuses a
+    collection-level embedding function that differs from the persisted one
+    ("Embedding function conflict: new: onnx_mini_lm_l6_v2 vs persisted:
+    default") and directs callers to embed separately instead. Ranking is
+    unaffected -- verified identical on this project's live index -- because
+    the vector comes from the very model Chroma would have used.
+    """
     factory = client_factory or _default_client
     client = factory(Path(index_dir))
     collection = _existing_collection(client, embedding_function)
-    result = collection.query(query_texts=[text], n_results=limit)
+    if embedding is None:
+        result = collection.query(query_texts=[text], n_results=limit)
+    else:
+        result = collection.query(query_embeddings=[embedding], n_results=limit)
     ids = (result.get("ids") or [[]])[0]
     distances = (result.get("distances") or [[]])[0]
     return list(zip(ids, distances))
@@ -365,6 +384,12 @@ def semantic_selector(
                 candidate
             )
 
+        # Embed once, then reuse that vector for every scope. The scopes hold
+        # different entries but the *query* is the same string, so embedding
+        # inside the loop paid the full per-query cost once per index -- and
+        # would multiply again once partitions add more of them.
+        embedding = embedding_module.embed_query(query, embedding_function)
+
         # Ask each index for more than we need: it spans a whole store, but
         # `candidates` is one already-filtered section, so many hits will not
         # belong to it.
@@ -378,7 +403,7 @@ def semantic_selector(
                 query,
                 max(len(group) * 2, limit * 4, 20),
                 client_factory=client_factory,
-                embedding_function=embedding_function,
+                embedding=embedding,
             ):
                 hits.append((float(distance), str(hit_key)))
         hits.sort(key=lambda pair: pair[0])
