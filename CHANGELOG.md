@@ -36,7 +36,43 @@ pushed tag `vX.Y.Z` doesn't match) before anything is published.
 - `harness/doctor.py`: the installed-resources check now also verifies
   `harness.install_cli` is importable, FAILing with a "broken wheel build?"
   hint if not.
+- `harness/bootstrap_register.py` + tests: user-scope registration of the
+  SessionStart/PreToolUse hooks (`~/.claude/settings.json`) and the
+  `agent-harness` MCP server (`~/.claude.json`), extracted from
+  `bootstrap.ps1`. Idempotent, validates before writing, writes atomically,
+  and rewrites a stale harness entry in place instead of skipping it so a
+  reinstall cannot leave a hook pointing at a deleted venv. Also usable
+  directly on macOS/Linux, where the manual install path previously had no
+  registration step at all.
+- `graph` optional-dependency group (`graphifyy`), so graph refresh is
+  installable in the same step as everything else. Previously the only route
+  was a follow-up `pipx inject`, which does not survive the
+  `pipx install --force` that re-running bootstrap performs -- a machine set
+  up that way silently lost graph refresh on its next bootstrap.
 - This changelog.
+
+### Fixed
+
+- `bootstrap.ps1` aborted on stock Windows. The step-5 settings merge used
+  `ConvertFrom-Json -AsHashtable`, which is PowerShell 6+ only, so under
+  Windows PowerShell 5.1 it threw and -- with `$ErrorActionPreference =
+  'Stop'` -- killed the run *after* the pipx install had succeeded. The
+  machine was left with working `agent-harness-*` commands and no hooks
+  registered, with nothing reporting a failure. The merge now runs through
+  `harness.bootstrap_register`, so one implementation covers 5.1, 7, and
+  POSIX.
+- `bootstrap.ps1` never registered the MCP server despite its step heading
+  and closing banner both saying it did; `mcpServers` appeared nowhere in
+  the script.
+- `bootstrap.ps1` installed only the `semantic` extra, so the MCP server it
+  advertised could not start -- `agent-harness-mcp` exited immediately on a
+  missing `mcp` SDK. The install spec now always includes `mcp` and `graph`,
+  leaving `-NoSemantic` as the one opt-out that matters (it is the extra that
+  costs hundreds of megabytes).
+- `tests/test_semantic_install_guidance.py` pinned one exact extras list in
+  the README's pipx line, so adding an extra failed a test whose actual
+  subject is "install from the local path, never the unpublished PyPI name".
+  It now matches the local path with `semantic` present among the extras.
 
 ### Changed
 

@@ -37,6 +37,15 @@ mcp = [
 semantic = [
   "chromadb>=0.5",
 ]
+# Note the doubled `y`: the distribution on PyPI is `graphifyy`, the import
+# name is `graphify`. Declared as an extra so this is installable in one step
+# instead of a follow-up `pipx inject` -- an injected package does not survive
+# `pipx install --force`, which is exactly what re-running bootstrap does, so
+# a machine set up that way would silently lose graph refresh on the next
+# bootstrap.
+graph = [
+  "graphifyy>=0.9",
+]
 
 [tool.setuptools.packages.find]
 include = ["harness*", "templates*", "hooks*"]

@@ -79,7 +79,18 @@ if ($installed -match '(?m)^agent-harness\s') {
     Write-Ok "old install removed"
 }
 
-$spec = if ($NoSemantic) { $RepoRoot } else { "$RepoRoot[semantic]" }
+# `mcp` and `graph` are not optional here even though pyproject marks them as
+# extras. Step 5 registers the MCP server for every project on this machine,
+# and a registered server whose SDK is missing fails at connect time with an
+# import error rather than degrading; `graph` (graphifyy) is what makes
+# `agent-harness-refresh` able to build a graph at all. Both are small. The
+# extras exist so a library consumer can skip them; a bootstrapped machine
+# always wants them. Only `semantic` is worth opting out of -- it is the one
+# that costs hundreds of megabytes.
+$extras = @('mcp', 'graph')
+if (-not $NoSemantic) { $extras += 'semantic' }
+$spec = '{0}[{1}]' -f $RepoRoot, ($extras -join ',')
+
 Write-Step "Installing the harness from $RepoRoot"
 if ($NoSemantic) {
     Write-Warn "skipping the semantic extra; context selection will be deterministic"
@@ -123,67 +134,32 @@ if (-not $memoryCmd) {
 # context hook and the MCP server apply to every project automatically, and
 # there is one copy of the configuration instead of N drifting copies.
 Write-Step "Registering the SessionStart hook and MCP server (user scope)"
-$claudeDir = Join-Path $env:USERPROFILE ".claude"
-$settingsPath = Join-Path $claudeDir "settings.json"
-New-Item -ItemType Directory -Force -Path $claudeDir | Out-Null
-
 $venvPython = Join-Path $venvBin "python.exe"
-$hookPath = Join-Path $RepoRoot "hooks\claude\memory_context_hook.py"
 
 if (-not (Test-Path $venvPython)) {
-    Write-Warn "could not find the pipx venv python; skipping hook registration"
+    Write-Warn "could not find the pipx venv python; skipping hook and MCP registration"
 } else {
-    # Both hooks the harness provides, registered once for every project:
+    # The merge itself lives in `harness.bootstrap_register`, not here.
+    #
+    # It used to be inline PowerShell built on `ConvertFrom-Json -AsHashtable`,
+    # which is PowerShell 6+ only. On stock Windows -- 5.1, no pwsh -- that
+    # threw, and with $ErrorActionPreference = 'Stop' it killed the bootstrap
+    # right after the pipx install had succeeded: every command worked, no
+    # hook was ever registered, and nothing said so. One Python implementation
+    # behaves the same under 5.1, 7, and POSIX, and reuses the JSON validation
+    # and atomic writes the project-scope installer already uses.
+    #
+    # Registered at USER scope, so it covers every project:
     #   SessionStart -> memory context packet (and optional auto-enrollment)
     #   PreToolUse   -> block direct reads of a large graph.json
-    # The guard used to be installed per project by `agent-harness-install`.
-    # Registering it here means it protects every project, and it is why
-    # enroll no longer needs to write to a project's settings at all.
-    $hookSpecs = @(
-        @{ Event = 'SessionStart'; Script = 'hooks\claude\memory_context_hook.py'; Matcher = $null },
-        @{ Event = 'PreToolUse';   Script = 'hooks\claude\graph_read_guard.py';    Matcher = 'Read' }
-    )
-
-    $settings = if (Test-Path $settingsPath) {
-        Get-Content $settingsPath -Raw | ConvertFrom-Json -AsHashtable
-    } else { @{} }
-    if (-not $settings.ContainsKey('hooks')) { $settings['hooks'] = @{} }
-
-    $dirty = $false
-    foreach ($spec in $hookSpecs) {
-        $event = $spec.Event
-        $scriptPath = Join-Path $RepoRoot $spec.Script
-        $leaf = Split-Path $spec.Script -Leaf
-
-        if (-not (Test-Path $scriptPath)) {
-            Write-Warn "$leaf not found; skipping"
-            continue
-        }
-        if (-not $settings['hooks'].ContainsKey($event)) {
-            $settings['hooks'][$event] = @()
-        }
-
-        # Match on the script name, not the whole command: re-running after a
-        # reinstall changes the interpreter path, and comparing full strings
-        # would append a duplicate entry every time.
-        $existing = @($settings['hooks'][$event]) |
-            Where-Object { ($_ | ConvertTo-Json -Depth 10) -match [regex]::Escape($leaf) }
-        if ($existing) {
-            Write-Ok "$event/$leaf already registered"
-            continue
-        }
-
-        $entry = @{ hooks = @(@{ type = 'command'; command = ('"{0}" "{1}"' -f $venvPython, $scriptPath) }) }
-        if ($spec.Matcher) { $entry['matcher'] = $spec.Matcher }
-        $settings['hooks'][$event] += $entry
-        Write-Ok "$event/$leaf registered"
-        $dirty = $true
+    #   MCP server   -> agent-harness tools in ~/.claude.json
+    # This is why `agent-harness-enroll` never writes to a project's settings.
+    & $venvPython -m harness.bootstrap_register --harness-root $RepoRoot --python $venvPython
+    if ($LASTEXITCODE -ne 0) {
+        throw "hook/MCP registration failed -- see the error above. The harness itself is installed; re-run after resolving it."
     }
-
-    if ($dirty) {
-        $settings | ConvertTo-Json -Depth 10 | Set-Content $settingsPath -Encoding utf8
-        Write-Ok "wrote $settingsPath"
-    }
+    Write-Ok "hooks and MCP server registered"
+    Write-Warn "restart Claude Code for the new hooks and MCP server to load"
 
     Write-Host "    To auto-enroll projects under your workspace, set these once:"
     Write-Host '      setx AGENT_HARNESS_AUTO_ENROLL 1'

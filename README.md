@@ -46,17 +46,28 @@ commands work from any directory:
 ```
 
 Pass `-NoSemantic` to skip chromadb + onnxruntime (a few hundred MB);
-everything still works, with deterministic context selection. On macOS or
-Linux, do the same by hand:
+everything still works, with deterministic context selection. Windows
+PowerShell 5.1 is enough — `pwsh` is not required.
+
+Bootstrap registers the SessionStart context hook, the PreToolUse graph-read
+guard, and the MCP server at **user** scope, so they apply to every project
+you open. That is deliberate: one copy of the configuration instead of one
+per project, drifting apart. Restart your agent afterwards so it picks them
+up.
+
+On macOS or Linux, do the same two steps by hand:
 
 ```bash
 python -m pip install --user pipx && python -m pipx ensurepath
-python -m pipx install --force "/path/to/agent-harness-kit[semantic]"
+python -m pipx install --force "/path/to/agent-harness-kit[mcp,graph,semantic]"
+
+# same user-scope registration bootstrap.ps1 performs, and equally idempotent
+"$(python -m pipx environment --value PIPX_LOCAL_VENVS)/agent-harness-kit/bin/python" \
+    -m harness.bootstrap_register --harness-root /path/to/agent-harness-kit
 ```
 
-Bootstrap registers the SessionStart context hook and the MCP server at
-**user** scope, so they apply to every project you open. That is deliberate:
-one copy of the configuration instead of one per project, drifting apart.
+Add `--dry-run` to see what it would change first, or `--skip-mcp` to
+register the hooks only.
 
 **Once per project** — one idempotent command, re-runnable any time:
 
