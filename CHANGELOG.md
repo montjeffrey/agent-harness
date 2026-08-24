@@ -19,6 +19,10 @@ pushed tag `vX.Y.Z` doesn't match) before anything is published.
 
 ### Added
 
+- Evidence-bounded automatic memory curation: SessionStart and
+  `memory_context` now verify and accept unchanged ingested document pointers,
+  reject exact duplicate proposals, and expose only the remaining exception
+  queue through `agent-harness-memory curate` / `memory_curate`.
 - `agent-harness-work` and four MCP work tools (`work_start`, `work_status`,
   `work_diff`, `work_finish`): local-only task records with session-level path
   claims, private plans, immutable diff bases, branches, and conditional

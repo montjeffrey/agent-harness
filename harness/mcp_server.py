@@ -1,5 +1,5 @@
 """Stdio MCP server exposing code-graph queries, project memory, and task
-workspaces as 19 typed MCP tools.
+workspaces as 20 typed MCP tools.
 
 Usage:
     python -m harness.mcp_server [--graph PATH]
@@ -31,6 +31,7 @@ Tools (all thin wrappers around `harness.graph_query.query`):
     memory_tasks    -- open tasks in priority order, plus bottlenecks and claims
     memory_claim    -- claim an open task/blocker for an agent program
     memory_release  -- release a held claim
+    memory_curate   -- verify document pointers and reduce duplicate proposals
 
     work_start       -- claim exact paths and prepare a task branch/worktree
     work_status      -- show active/finished task records for this repository
@@ -42,11 +43,12 @@ protocol-visible `limit` parameter -- callers get the same row cap the CLI
 already enforces). Memory output is capped by the context packet's own
 character budget.
 
-There is deliberately no review/accept tool. Review is the human gate that
-makes a proposal authoritative; an agent able to accept its own inferred
-entries would defeat the memory design's central trust rule. `memory_remember`
-therefore hardcodes `proposed`/`inferred` rather than taking them as
-parameters.
+There is deliberately no general review/accept tool. An agent able to accept
+its own inferred entries would defeat the memory design's central trust rule.
+`memory_curate` is the narrow deterministic exception: it can verify a source
+digest for an ingested document pointer, never an agent's conclusion.
+`memory_remember` therefore hardcodes `proposed`/`inferred` rather than taking
+them as parameters.
 """
 
 from __future__ import annotations
@@ -269,6 +271,12 @@ MEMORY_TOOL_DESCRIPTIONS: dict[str, str] = {
         "(prefer memory_task_done for that) or you're abandoning it so someone "
         "else can pick it up."
     ),
+    "memory_curate": (
+        "Run deterministic memory curation: auto-accept only ingested document "
+        "pointers whose source file still matches its recorded digest, reject "
+        "exact duplicate proposals, and show the bounded exception queue. "
+        "This does not auto-accept agent conclusions."
+    ),
 }
 
 WORK_TOOL_DESCRIPTIONS: dict[str, str] = {
@@ -322,11 +330,12 @@ def dispatch_memory(tool_name: str, arguments: dict) -> str:
     rather than raised, matching `dispatch`: a bad call should read as a tool
     result, not crash the server for the rest of the session.
     """
-    from harness import memory_context, memory_index, memory_store
+    from harness import memory_context, memory_curation, memory_index, memory_store
 
     root = Path(arguments.get("project") or ".").expanduser()
 
     try:
+        curation = memory_curation.curate(root) if tool_name == "memory_context" else None
         if tool_name == "memory_context":
             project_id = memory_store.project_id_for(root)
             # Resolve the query first: `adaptive` decides on the same string
@@ -413,13 +422,14 @@ def dispatch_memory(tool_name: str, arguments: dict) -> str:
             from harness import memory_graph
 
             annotator, graph_notes = memory_graph.build_annotator(root)
+            curation_note = curation.note() if curation else None
             packet = memory_context.build_packet(
                 root,
                 query=query,
                 max_chars=int(arguments.get("max_chars") or 4000),
                 selector=selector,
                 strategy=strategy,
-                notes=list(notes) + graph_notes,
+                notes=list(notes) + graph_notes + ([curation_note] if curation_note else []),
                 annotator=annotator,
             )
             return memory_context.render_markdown(packet)
@@ -570,6 +580,9 @@ def dispatch_memory(tool_name: str, arguments: dict) -> str:
             )
             return f"{entry['id']} -> released"
 
+        if tool_name == "memory_curate":
+            return memory_curation.render(memory_curation.curate(root))
+
     except (ValueError, LookupError, OSError) as exc:
         return f"memory tool failed: {exc}"
 
@@ -642,7 +655,7 @@ def _parse_argv(argv: list[str]) -> Path | None:
 
 
 def _build_server():
-    """Construct the FastMCP server and register all 19 tools.
+    """Construct the FastMCP server and register all 20 tools.
 
     Imports the `mcp` SDK lazily -- only called from `main()`, never at
     module import time.
@@ -748,6 +761,9 @@ def _build_server():
             "memory_release", {"entry_id": entry_id, "owner": owner, "project": project}
         )
 
+    def memory_curate(project: str = "") -> str:
+        return dispatch_memory("memory_curate", {"project": project})
+
     for func in (
         memory_context,
         memory_status,
@@ -757,6 +773,7 @@ def _build_server():
         memory_tasks,
         memory_claim,
         memory_release,
+        memory_curate,
     ):
         func.__doc__ = MEMORY_TOOL_DESCRIPTIONS[func.__name__]
         mcp_app.tool(

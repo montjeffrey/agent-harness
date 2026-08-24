@@ -87,6 +87,19 @@ def test_the_hook_emits_the_packet_for_an_enrolled_project(project: Path) -> Non
     assert "local-only JSONL" in text
 
 
+def test_the_hook_auto_curates_a_verifiable_document_pointer(project: Path) -> None:
+    from harness import memory_ingest
+
+    (project / "README.md").write_text("# Project\n\nA documented test project.\n", encoding="utf-8")
+    memory_ingest.ingest(project, now=NOW)
+
+    text = hook.emit(project)
+    [entry] = list(memory_store.iter_entries(memory_store.project_memory_dir(project)))
+
+    assert entry["status"] == "accepted"
+    assert "auto-accepted 1 verified document pointer" in text
+
+
 def test_the_hook_is_silent_in_an_unenrolled_project(tmp_path: Path) -> None:
     """Otherwise it would announce itself in every repo on the machine."""
     bare = tmp_path / "bare"
@@ -369,6 +382,19 @@ def test_memory_context_tool_returns_a_packet(project: Path) -> None:
     assert "local-only JSONL" in out
 
 
+def test_memory_context_auto_curates_a_verifiable_document_pointer(project: Path) -> None:
+    from harness import memory_ingest
+
+    (project / "README.md").write_text("# Project\n\nA documented test project.\n", encoding="utf-8")
+    memory_ingest.ingest(project, now=NOW)
+
+    out = mcp_server.dispatch_memory("memory_context", {"project": str(project)})
+    [entry] = list(memory_store.iter_entries(memory_store.project_memory_dir(project)))
+
+    assert entry["status"] == "accepted"
+    assert "auto-accepted 1 verified document pointer" in out
+
+
 def test_memory_context_tool_honours_max_chars(project: Path) -> None:
     for n in range(100):
         _add(project, f"Fact {n}: " + "detail " * 30)
@@ -419,14 +445,14 @@ def test_memory_remember_cannot_be_talked_into_accepting_itself(
     assert rec["confidence"] == "inferred"
 
 
-def test_no_review_or_accept_tool_is_exposed() -> None:
-    """Promotion stays on the CLI, in front of a person."""
+def test_no_general_review_or_accept_tool_is_exposed() -> None:
+    """Only deterministic curation is exposed; agent conclusions stay gated."""
     names = set(mcp_server.MEMORY_TOOL_DESCRIPTIONS)
     assert not any("review" in n or "accept" in n for n in names)
     assert names == {
         "memory_context", "memory_status", "memory_remember",
         "memory_confirm", "memory_task_done", "memory_tasks",
-        "memory_claim", "memory_release",
+        "memory_claim", "memory_release", "memory_curate",
     }
 
 

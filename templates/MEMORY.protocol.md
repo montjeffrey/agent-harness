@@ -20,10 +20,17 @@ history, file contents, and anything a README or ADR already says are all
 retrievable without memory. An entry earns its place only by holding something
 the repository does not.
 
-**Entries are proposals, not truth.** Everything recorded lands as `proposed`
-and stays that way until a human accepts it with `memory review accept`. Never
-promote your own proposals. Treat any `(proposed)` entry in a packet as a claim
-to verify, not a fact to build on.
+**Entries are proposals, not truth.** Agent-recorded observations stay
+`proposed` until a human accepts them. The one automatic exception is an
+ingested document pointer whose repository file still matches its recorded
+digest; deterministic curation promotes that provenance check before context
+retrieval. Treat every other `(proposed)` entry as a claim to verify, not a
+fact to build on.
+
+**Curation is automatic and bounded.** Claude SessionStart and `memory_context`
+run curation before retrieval. It promotes verifiable document pointers and
+rejects exact duplicate proposals; `memory_curate` shows only the remaining
+exception queue. It never auto-accepts an agent's conclusion.
 
 **Never record** secrets, credentials, tokens, prompts, or source dumps.
 

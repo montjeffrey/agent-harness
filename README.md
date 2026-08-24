@@ -481,8 +481,10 @@ A portable, local-first project memory: short-term working context plus
 durable knowledge, in ordinary Markdown and JSONL. Nothing here calls an AI
 model or opens a network socket, and capture stays a decision rather than a
 side effect -- every entry is something you, or an agent acting on the
-protocol installed into your user-scope rules, chose to record. No hook ever
-writes an entry; the hooks only read.
+protocol installed into your user-scope rules, chose to record. Curation is
+the narrow automatic exception: a hook or context request can promote an
+ingested document pointer only after its source file still matches the digest
+recorded at ingestion; it cannot promote an agent conclusion.
 
 Two things do run on their own once configured. `agent-harness-setup
 --workspace <dir>` creates a memory store for any project under `<dir>` on
@@ -499,6 +501,7 @@ agent-harness-setup --agents claude --workspace ~/code   # enable automation
 agent-harness-memory init [PATH]
 agent-harness-memory remember --type decision --summary "Chose X over Y."
 agent-harness-memory status
+agent-harness-memory curate                    # deterministic review pipeline
 
 agent-harness-memory review list                  # what is awaiting review
 agent-harness-memory review accept mem-2026-08-07-001
@@ -569,6 +572,12 @@ it), and an **accepted** entry needs real evidence -- a commit, a file, or an
 explicit `--manual` attestation. The project id attached to every entry is
 attribution, not evidence, and does not satisfy that rule. Anything that
 looks like a credential is rejected before it can reach an inbox.
+
+Routine review is automated: SessionStart and `memory_context` run the same
+deterministic curation pass. It accepts only unchanged document pointers with
+a matching source digest and rejects exact duplicate proposals. Use
+`agent-harness-memory curate` or MCP `memory_curate` to inspect the bounded
+exception queue; that is the only memory review that needs human judgment.
 
 ### Approving work in-session
 

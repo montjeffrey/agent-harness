@@ -2,6 +2,12 @@
 
 ## Now
 
+- Memory review is pipelined. Deterministic curation runs before Claude
+  SessionStart and MCP `memory_context`: it accepts only ingested document
+  pointers whose source digest still matches, rejects exact duplicate
+  proposals, and leaves agent conclusions in a bounded exception queue. Use
+  `agent-harness-memory curate` / `memory_curate` to inspect those exceptions;
+  no model, network, compaction, or index rebuild occurs in this hot path.
 - Local task-workspace coordination is implemented. `agent-harness-work start`
   records a session-level task, private plan, immutable base SHA, branch, and
   exact claimed paths under `~/.agent-harness/work/`; it never modifies a

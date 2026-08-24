@@ -1,5 +1,5 @@
-"""Portable hierarchical memory CLI: init, remember, status, review, context,
-ingest, claim, index, compact, and eval.
+"""Portable hierarchical memory CLI: init, remember, status, review, curate,
+context, ingest, claim, index, compact, and eval.
 
 Capture is explicit. Nothing in this module runs automatically or summarizes
 with an AI model. `init`, `remember`, `status`, `review`, and `context` are
@@ -20,6 +20,7 @@ Usage:
     python harness/memory.py remember --type TYPE --summary TEXT [options]
     python harness/memory.py status [--project PATH]
     python harness/memory.py review list | ACTION ENTRY_ID [options]
+    python harness/memory.py curate [--project PATH]
     python harness/memory.py context [--query TEXT] [--json] [--strategy S]
     python harness/memory.py ingest [--project PATH] [--dry-run]
     python harness/memory.py claim list|claim|release [ENTRY_ID] --owner NAME [options]
@@ -40,6 +41,7 @@ try:
     from harness import (
         memory_claims,
         memory_compact,
+        memory_curation,
         memory_context,
         memory_eval,
         memory_index,
@@ -54,6 +56,7 @@ except ImportError:  # running as `python harness/memory.py`, not `-m harness.me
     from harness import (
         memory_claims,
         memory_compact,
+        memory_curation,
         memory_context,
         memory_eval,
         memory_index,
@@ -150,6 +153,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     rev_p.add_argument("--note", default=None, help="reviewer note; counts as resolve evidence")
     rev_p.add_argument("--commit", default=None, help="evidence commit SHA")
     rev_p.add_argument("--file", default=None, help="evidence path, repository-relative")
+
+    cur_p = sub.add_parser(
+        "curate",
+        help="automatically accept verifiable document pointers and reject exact proposal duplicates",
+    )
+    cur_p.add_argument("--project", default=".", help="project root (default: current directory)")
 
     ctx_p = sub.add_parser("context", help="emit a token-budgeted context packet")
     ctx_p.add_argument("--project", default=".", help="project root (default: current directory)")
@@ -370,6 +379,20 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         print("nothing to do -- documentation already mapped")
         return 1
     return 0
+
+
+def cmd_curate(args: argparse.Namespace) -> int:
+    root = Path(args.project).expanduser()
+    if not (root / ".agent-harness").is_dir():
+        print(f"no memory storage in {root}", file=sys.stderr)
+        return 1
+    try:
+        result = memory_curation.curate(root)
+    except (ValueError, LookupError, OSError) as exc:
+        print(f"curation failed: {exc}", file=sys.stderr)
+        return 2
+    print(memory_curation.render(result))
+    return 0 if result.changed else 1
 
 
 def cmd_claim(args: argparse.Namespace) -> int:
@@ -648,6 +671,7 @@ _COMMANDS = {
     "remember": cmd_remember,
     "status": cmd_status,
     "review": cmd_review,
+    "curate": cmd_curate,
     "context": cmd_context,
     "ingest": cmd_ingest,
     "claim": cmd_claim,

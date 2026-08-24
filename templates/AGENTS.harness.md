@@ -9,8 +9,9 @@ available, otherwise run `agent-harness-memory context --max-chars 2000`.
 Do not retrieve memory for a trivial one-shot question. Record a concise
 decision, discovery, blocker, or lesson with `memory_remember` only when it
 will help a later session; those entries are proposed until a human reviews
-them. Never record secrets, prompts, or source dumps. Do not promote your own
-proposals.
+them, except for document pointers automatically verified by source digest
+during context retrieval. Never record secrets, prompts, or source dumps. Do
+not promote your own conclusions.
 
 Before non-trivial implementation that the user has authorized, call
 `work_status` then `work_start` with this chat's unique session id and exact

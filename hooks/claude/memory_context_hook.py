@@ -29,11 +29,18 @@ Three rules this hook lives by:
    `deterministic`, and `AGENT_HARNESS_ADAPTIVE_MIN_ENTRIES` moves the size
    threshold.
 
-3. **Smaller budget than the CLI default.** This text is prepended to every
+3. **Evidence-bounded curation.** Before reading memory, the hook accepts only
+   document pointers whose recorded digest still matches the source file and
+   rejects exact duplicates. Agent conclusions remain proposed. The pass is
+   deterministic, local, and idempotent; it does not compact, index, or call a
+   model.
+
+4. **Smaller budget than the CLI default.** This text is prepended to every
    session whether or not it gets used, so it is charged against the
    context window unconditionally. `AGENT_HARNESS_HOOK_MAX_CHARS` overrides.
 
-Never builds an index, never writes, never opens a network socket.
+Never builds an index or opens a network socket. It writes only when a
+verifiable pointer or exact duplicate needs a recorded review transition.
 """
 
 from __future__ import annotations
@@ -167,13 +174,13 @@ def emit(project_root: Path) -> str:
     than announcing itself in every repository on the machine.
     """
     try:
-        from harness import memory_context, memory_index, memory_store
+        from harness import memory_context, memory_curation, memory_index, memory_store
     except ImportError:
         # Source checkout: this file is <repo>/hooks/claude/, so the package
         # root is two levels up. An installed (pipx/wheel) harness takes the
         # branch above and never reaches here.
         sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-        from harness import memory_context, memory_index, memory_store
+        from harness import memory_context, memory_curation, memory_index, memory_store
 
     if not (project_root / ".agent-harness").is_dir():
         if not should_auto_enroll(project_root):
@@ -183,6 +190,14 @@ def emit(project_root: Path) -> str:
         # front of every session start, the same trap that keeps `auto`
         # selection out of this hook. `agent-harness-enroll` does those.
         memory_store.init_project(project_root)
+
+    # Curate before selection so a newly verified document pointer is visible
+    # as accepted in this very packet. A curation failure must not suppress a
+    # working session, consistent with the hook's fail-open contract.
+    try:
+        curation_note = memory_curation.curate(project_root).note()
+    except Exception:  # noqa: BLE001 -- see the hook's fail-open rule
+        curation_note = "memory curation skipped because its local check failed"
 
     strategy = os.environ.get(STRATEGY_ENV, "adaptive")
     project_id = memory_store.project_id_for(project_root)
@@ -233,7 +248,7 @@ def emit(project_root: Path) -> str:
         max_chars=_int_env(MAX_CHARS_ENV, HOOK_MAX_CHARS),
         selector=selector,
         strategy=resolved,
-        notes=notes,
+        notes=list(notes) + ([curation_note] if curation_note else []),
         annotator=annotator,
     )
     # An empty packet returned "" here for a while, on the theory that a
