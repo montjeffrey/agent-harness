@@ -39,10 +39,10 @@ from pathlib import Path
 HARNESS_ROOT = Path(__file__).resolve().parent.parent
 
 try:
-    from harness import graph_location, graph_refresh, memory_index, memory_store
+    from harness import graph_location, graph_refresh, memory_index, memory_ingest, memory_store
 except ImportError:  # running as `python harness/enroll.py`
     sys.path.insert(0, str(HARNESS_ROOT))
-    from harness import graph_location, graph_refresh, memory_index, memory_store
+    from harness import graph_location, graph_refresh, memory_index, memory_ingest, memory_store
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -59,6 +59,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--refresh-graph", action="store_true",
         help="rebuild the code graph even if one already exists",
+    )
+    parser.add_argument(
+        "--semantic-graph", action="store_true",
+        help="opt into Graphify's LLM semantic extraction (requires a configured backend and can incur API cost)",
+    )
+    parser.add_argument(
+        "--no-docs", action="store_true",
+        help="do not seed memory from the project's existing documentation",
     )
     parser.add_argument(
         "--no-index", action="store_true",
@@ -79,23 +87,44 @@ def main(argv: list[str] | None = None) -> int:
 
     # 1. Memory -- no preflight, cannot fail on a graph-less project.
     result = memory_store.init_project(root)
-    print(f"[1/3] memory     project id {result.project_id}")
+    print(f"[1/4] memory     project id {result.project_id}")
     for created in result.created:
         print(f"                 created {created}")
     if not result.created:
         print("                 already initialized -- left untouched")
 
-    # 2. Code graph -- the thing memory selection gets to reason over.
+    # 2. Documentation -- the map. Runs before the graph so that a slow or
+    # missing graphify never costs the project its pointers, and before the
+    # index so the entries proposed here are embedded in the same enrollment
+    # rather than waiting for someone to remember to reindex.
+    if args.no_docs:
+        print("[2/4] docs       skipped (--no-docs)")
+    else:
+        try:
+            ingested = memory_ingest.ingest(root)
+            print(f"[2/4] docs       {ingested.describe()}")
+            if ingested.scope_seeded:
+                print(f"                 scope.md purpose: {ingested.scope_reason[:70]}")
+            for name, reason in ingested.rejected[:3]:
+                print(f"                 skipped {name}: {reason}", file=sys.stderr)
+        except Exception as exc:  # noqa: BLE001 -- never block enrollment
+            degraded = True
+            print(f"[2/4] docs       unavailable ({exc})", file=sys.stderr)
+
+    # 3. Code graph -- the thing memory selection gets to reason over.
     if args.no_graph:
-        print("[2/3] graph      skipped (--no-graph)")
+        print("[3/4] graph      skipped (--no-graph)")
     else:
         existing = graph_location.find_graph_in_repo(root)
         if existing and not args.refresh_graph:
-            print(f"[2/3] graph      already present at {existing}")
+            print(f"[3/4] graph      already present at {existing}")
         else:
             exc_text = ""
             try:
-                built = graph_refresh.main([str(root), "--full"])
+                refresh_args = [str(root)]
+                if args.semantic_graph:
+                    refresh_args.append("--full")
+                built = graph_refresh.main(refresh_args)
             except SystemExit as exc:
                 # graph_refresh is also a CLI entry point and exits rather
                 # than returning on failure. SystemExit derives from
@@ -104,25 +133,25 @@ def main(argv: list[str] | None = None) -> int:
                 built = exc.code if isinstance(exc.code, int) else 1
             except Exception as exc:  # noqa: BLE001 -- never block enrollment
                 built, exc_text = 1, str(exc)
-                print(f"[2/3] graph      unavailable ({exc_text})", file=sys.stderr)
+                print(f"[3/4] graph      unavailable ({exc_text})", file=sys.stderr)
             if built == 0:
-                print("[2/3] graph      built")
+                print("[3/4] graph      built")
             else:
                 degraded = True
                 if not exc_text:
                     print(
-                        "[2/3] graph      not built -- graphify or a backend key is "
-                        "missing; memory works without it",
+                        "[3/4] graph      not built -- graphify is unavailable, or "
+                        "--semantic-graph needs a configured backend; memory works without it",
                         file=sys.stderr,
                     )
 
-    # 3. Semantic index.
+    # 4. Semantic index.
     if args.no_index:
-        print("[3/3] index      skipped (--no-index)")
+        print("[4/4] index      skipped (--no-index)")
     elif not memory_index.chromadb_available():
         degraded = True
         print(
-            "[3/3] index      skipped -- chromadb is not installed, so context "
+            "[4/4] index      skipped -- chromadb is not installed, so context "
             "selection will be deterministic",
             file=sys.stderr,
         )
@@ -140,12 +169,15 @@ def main(argv: list[str] | None = None) -> int:
                 memory_index.build_index(records, index_dir)
                 built += len(records)
         if built:
-            print(f"[3/3] index      embedded {built} entries")
+            print(f"[4/4] index      embedded {built} entries")
         else:
-            print("[3/3] index      nothing to index yet")
+            print("[4/4] index      nothing to index yet")
 
     print("\nNext:")
-    print(f"  1. Describe the project in {root / '.agent-harness' / 'scope.md'}")
+    # The active objective is called out by name because it is the one field
+    # ingestion deliberately will not guess, and the one that switches semantic
+    # selection on -- `semantic_pointless_reason` declines to rank without it.
+    print(f"  1. Set the Active objective in {root / '.agent-harness' / 'scope.md'}")
     print("  2. Record:  agent-harness-memory remember --type decision --summary ...")
     print("  3. Review:  agent-harness-memory review list")
     if degraded:

@@ -33,6 +33,7 @@ machine.
 from __future__ import annotations
 
 import hashlib
+import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,7 +56,16 @@ MACHINE_INDEX_NAME = "_machine"
 
 ClientFactory = Callable[[Path], Any]
 
-STRATEGIES: tuple[str, ...] = ("auto", "semantic", "deterministic")
+STRATEGIES: tuple[str, ...] = ("adaptive", "auto", "semantic", "deterministic")
+
+# Below this many entries every section's candidate pool fits its character
+# budget, so ranking reorders what is shown but never changes *what* is shown.
+# Derived from the smallest durable budget (`relationships`, 800 chars in
+# `memory_context.DEFAULT_BUDGETS`) against a ~110-character rendered entry:
+# roughly seven fit, so eight is the first count at which a section can be
+# forced to drop a record. Override with `AGENT_HARNESS_ADAPTIVE_MIN_ENTRIES`.
+ADAPTIVE_MIN_ENTRIES = 8
+ADAPTIVE_MIN_ENTRIES_ENV = "AGENT_HARNESS_ADAPTIVE_MIN_ENTRIES"
 
 
 @dataclass(frozen=True)
@@ -91,6 +101,51 @@ def top_k_agreement(
         "semantic": semantic_ids,
         "overlap": len(set(deterministic_ids) & set(semantic_ids)),
     }
+
+
+def adaptive_min_entries() -> int:
+    """The store size below which `adaptive` refuses to load a model."""
+    try:
+        return max(0, int(os.environ[ADAPTIVE_MIN_ENTRIES_ENV]))
+    except (KeyError, ValueError):
+        return ADAPTIVE_MIN_ENTRIES
+
+
+def semantic_pointless_reason(
+    query: str | None, entry_count: int | None
+) -> str | None:
+    """Why semantic ranking cannot change this packet, or None if it can.
+
+    This is the whole of the `adaptive` decision, and it is deliberately pure
+    arithmetic over values the caller already holds. It has to be: the cost
+    being avoided is importing chromadb and building an ONNX inference
+    session, so anything that touches either to decide has already paid the
+    bill it was meant to save.
+
+    The first check is exact, not a guess. `semantic_selector`'s `select`
+    returns the deterministic ordering untouched when there is no query, so
+    with no active objective the semantic path is *defined* to produce the
+    deterministic answer -- loading a model to reproduce it is pure waste.
+    This is the common case for a freshly enrolled project, whose `scope.md`
+    is still the untouched template.
+
+    The second check is a threshold and is honest about being one: see
+    `ADAPTIVE_MIN_ENTRIES`. It can be wrong in one direction only -- an
+    unusually long entry could be dropped from a section below the threshold,
+    costing better ranking on a store of fewer than eight records. Erring
+    that way is intended; the opposite error spends seconds of every session
+    start to reorder a handful of entries the agent will read in full anyway.
+    """
+    if not (query or "").strip():
+        return "no active objective to rank against"
+    minimum = adaptive_min_entries()
+    if entry_count is not None and entry_count < minimum:
+        return (
+            f"only {entry_count} entries recorded (fewer than {minimum}); "
+            f"every section fits its budget, so ranking cannot change "
+            f"which entries are shown"
+        )
+    return None
 
 
 def chromadb_status() -> tuple[bool, str | None]:
@@ -289,8 +344,16 @@ def _existing_collection(client: Any, embedding_function: Any = None) -> Any:
     try:
         return client.get_collection(name=COLLECTION_NAME, **kwargs)
     except Exception as exc:
+        # Carry the underlying reason in the *message*, not only in `__cause__`:
+        # `probe_index` and the fallback notes render `str(exc)` alone, so a
+        # cause left only on the chain is invisible to the person reading the
+        # packet or the doctor report. A collection that exists but refuses to
+        # open -- Chroma rejects a query-time `embedding_function` whose name
+        # differs from the persisted one -- otherwise reads as a missing store
+        # and invites a rebuild, which cannot fix it.
         raise FileNotFoundError(
-            f"no collection named '{COLLECTION_NAME}' in this memory index"
+            f"could not open collection '{COLLECTION_NAME}' in this memory index"
+            f" ({type(exc).__name__}: {exc})"
         ) from exc
 
 
@@ -425,18 +488,31 @@ def resolve_selector(
     project_id: str,
     strategy: str = "auto",
     client_factory: ClientFactory | None = None,
+    query: str | None = None,
+    entry_count: int | None = None,
 ) -> tuple[Any, str, list[str]]:
     """Pick the selector for `strategy`, returning it with the strategy name
     actually used and any notes explaining a fallback.
 
-    `auto` -- the default -- prefers semantic and degrades quietly but
-    visibly: every fallback appends a note that is printed on the packet, so
-    a user who expects semantic selection is never silently served
-    deterministic results and left assuming otherwise.
+    `adaptive` decides per call whether semantic ranking could change this
+    particular packet, using `query` and `entry_count` alone, and only then
+    behaves like `auto`. That ordering is the point: the gate runs before any
+    chromadb import, so a call it declines costs nothing at all. It is what
+    makes semantic selection affordable in a short-lived process such as the
+    SessionStart hook, which would otherwise build an ONNX session on every
+    session start in every enrolled project to rank entries that all fit
+    anyway.
+
+    `auto` prefers semantic unconditionally and degrades quietly but visibly:
+    every fallback appends a note that is printed on the packet, so a user
+    who expects semantic selection is never silently served deterministic
+    results and left assuming otherwise. `adaptive` follows the same rule --
+    declining to go semantic is itself reported as a note.
 
     An explicit `semantic` raises instead of falling back: asking for a
     specific strategy and getting a different one without an error is exactly
-    what makes a benchmark meaningless.
+    what makes a benchmark meaningless. `adaptive` is therefore never allowed
+    to silently satisfy a request for `semantic`.
     """
     from harness import memory_context
 
@@ -447,6 +523,20 @@ def resolve_selector(
 
     if strategy == "deterministic":
         return memory_context.deterministic_selector, "deterministic", []
+
+    if strategy == "adaptive":
+        pointless = semantic_pointless_reason(query, entry_count)
+        if pointless is not None:
+            return (
+                memory_context.deterministic_selector,
+                "deterministic",
+                [f"semantic selection skipped ({pointless})"],
+            )
+        # The gate only decides whether semantic is *worth* attempting. Whether
+        # it is *possible* -- chromadb importable, an index built and readable
+        # -- stays below, so that judgement and its wording keep living in one
+        # place rather than being restated here.
+        strategy = "auto"
 
     dirs = index_dirs_for(project_id)
     built = {scope: path for scope, path in dirs.items() if path.exists()}

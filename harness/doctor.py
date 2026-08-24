@@ -43,6 +43,7 @@ REQUIRED_HARNESS_FILES = (
     "harness/graph_query.py",
     "harness/graph_refresh.py",
     "templates/AGENTS.harness.md",
+    "templates/MEMORY.protocol.md",
     "templates/feature-blueprint.md",
     "hooks/claude/settings-fragment.json",
 )
@@ -89,6 +90,8 @@ def _check_installed_resources() -> CheckResult:
     try:
         if not (res.files("templates") / "AGENTS.harness.md").is_file():
             missing.append("templates/AGENTS.harness.md")
+        if not (res.files("templates") / "MEMORY.protocol.md").is_file():
+            missing.append("templates/MEMORY.protocol.md")
         if not (res.files("templates") / "feature-blueprint.md").is_file():
             missing.append("templates/feature-blueprint.md")
         if not (res.files("hooks.claude") / "settings-fragment.json").is_file():
@@ -326,6 +329,62 @@ def check_memory_semantic(project_dir: Path | None = None) -> CheckResult:
     return CheckResult("PASS", "memory semantic index", "project and machine memory semantic indexes present")
 
 
+def check_memory_store(project_dir: Path | None = None) -> CheckResult:
+    """Report whether the supplied project's memory store holds anything.
+
+    Distinct from `check_memory_semantic`, which asks whether the *index* over
+    the entries is query-ready. This asks the prior question: are there any
+    entries at all? The two failure modes look identical from the outside and
+    are fixed differently -- an empty store needs recording, a stale index
+    needs rebuilding.
+
+    An enrolled store with zero entries is a WARN, not an INFO, because
+    enrollment is supposed to leave something behind. When it is empty, the
+    session hook stays nearly silent and an unenrolled project and a wired-but-
+    idle one become indistinguishable at a glance. That ambiguity is the whole
+    reason this check exists.
+    """
+    from harness import memory_store
+
+    if project_dir is None:
+        return CheckResult("INFO", "memory store", "no project supplied; cannot inspect memory store")
+
+    if not (Path(project_dir) / ".agent-harness").is_dir():
+        return CheckResult(
+            "INFO", "memory store",
+            "project is not enrolled; run agent-harness-enroll to create .agent-harness/",
+        )
+
+    try:
+        project_entries = sum(
+            1 for _ in memory_store.iter_entries(memory_store.project_memory_dir(Path(project_dir)))
+        )
+    except OSError as exc:
+        return CheckResult("FAIL", "memory store", f"project memory is unreadable ({exc})")
+
+    try:
+        machine_entries = sum(1 for _ in memory_store.iter_entries(memory_store.machine_memory_dir()))
+    except OSError:
+        machine_entries = 0
+
+    if project_entries == 0:
+        detail = (
+            "enrolled but empty -- 0 project entries recorded, so the session hook "
+            "has nothing to inject and a wired project looks identical to an "
+            "unenrolled one; run agent-harness-memory ingest to seed pointers from "
+            "existing documentation, or record by hand with "
+            "agent-harness-memory remember"
+        )
+        if machine_entries:
+            detail += f" ({machine_entries} machine-scope entries exist and are unaffected)"
+        return CheckResult("WARN", "memory store", detail)
+
+    return CheckResult(
+        "PASS", "memory store",
+        f"{project_entries} project entries, {machine_entries} machine entries",
+    )
+
+
 def check_agent_clis() -> CheckResult:
     found = [label for cmd, label in AGENT_CLIS if shutil.which(cmd)]
     if found:
@@ -467,6 +526,7 @@ def run_checks(project_dir: Path | None = None) -> list[CheckResult]:
         check_semantic(),
         check_graph_semantic(project_dir),
         check_memory_semantic(project_dir),
+        check_memory_store(project_dir),
         check_agent_clis(),
         check_telemetry(),
     ]

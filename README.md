@@ -2,7 +2,7 @@
 
 A portable, stdlib-only toolkit that gives any coding agent -- Claude Code,
 Codex CLI, Antigravity/Gemini CLI, or others that read `AGENTS.md` -- the same
-four capabilities inside any project:
+portable capabilities inside any project:
 
 1. **Queryable code relations** -- search, inspect, and traverse a
    [graphify](https://pypi.org/project/graphify/) `graph.json` without ever
@@ -15,10 +15,13 @@ four capabilities inside any project:
 3. **Agent catch-up** -- a compact, marker-delimited instruction block dropped
    into `AGENTS.md` / `CLAUDE.md` / `GEMINI.md` so any agent picks up the
    conventions on its first read of the project.
-4. **Token-efficiency conventions** -- a PreToolUse hook (Claude Code) that
+4. **Bounded project memory** -- reviewed Markdown/JSONL facts, compact
+   context packets, and optional local semantic ranking; no hosted memory
+   service or automatic durable promotion is required.
+5. **Token-efficiency conventions** -- a PreToolUse hook (Claude Code) that
    blocks direct reads of `graph.json` and redirects to the query CLI, plus
    guidance baked into the instruction block.
-5. **Self-healing graph checks** -- a SessionStart hook (Claude Code) that
+6. **Self-healing graph checks** -- a SessionStart hook (Claude Code) that
    detects a missing or stale graph at the start of every session and hands
    the agent the exact build/refresh command.
 
@@ -49,11 +52,12 @@ Pass `-NoSemantic` to skip chromadb + onnxruntime (a few hundred MB);
 everything still works, with deterministic context selection. Windows
 PowerShell 5.1 is enough — `pwsh` is not required.
 
-Bootstrap registers the SessionStart context hook, the PreToolUse graph-read
-guard, and the MCP server at **user** scope, so they apply to every project
-you open. That is deliberate: one copy of the configuration instead of one
-per project, drifting apart. Restart your agent afterwards so it picks them
-up.
+Bootstrap registers the selected agents at **user** scope, so they apply to
+every project you open. The default configures Claude Code, Codex, and
+Antigravity; pass `-Agents claude`, `-Agents codex`, or
+`-Agents antigravity` when a machine hosts only one client. This keeps one
+memory store and MCP server rather than three incompatible agent memories.
+Restart installed agent CLIs afterwards so they pick up their configuration.
 
 On macOS or Linux, do the same two steps by hand:
 
@@ -63,11 +67,11 @@ python -m pipx install --force "/path/to/agent-harness-kit[mcp,graph,semantic]"
 
 # same user-scope registration bootstrap.ps1 performs, and equally idempotent
 "$(python -m pipx environment --value PIPX_LOCAL_VENVS)/agent-harness-kit/bin/python" \
-    -m harness.bootstrap_register --harness-root /path/to/agent-harness-kit
+    -m harness.agent_setup --agents claude,codex,antigravity \
+    --harness-root /path/to/agent-harness-kit
 ```
 
-Add `--dry-run` to see what it would change first, or `--skip-mcp` to
-register the hooks only.
+Add `--dry-run` to `agent-harness-setup` to see adapter changes first.
 
 **Once per project** — one idempotent command, re-runnable any time:
 
@@ -105,6 +109,37 @@ The installer runs the preflight **doctor** first (which tells you exactly
 what is missing) and installs only if nothing FAILs. `--agents
 claude,codex,gemini` (default: all three) limits which pointer files get
 written; see `agent-harness-install --help` for the full list.
+
+### Agent setup: one client or all clients on one machine
+
+`agent-harness-setup` is the once-per-machine adapter command. It never
+creates project memory; it only configures the installed client to use the
+same local server and memory contract. Re-run it after moving the harness or
+reinstalling Python so adapter paths stay current.
+
+```powershell
+# Inspect all planned changes without modifying client configuration.
+agent-harness-setup --dry-run
+
+# Configure every supported client on a shared workstation.
+agent-harness-setup --agents claude,codex,antigravity
+
+# Configure only the client installed on a focused machine.
+agent-harness-setup --agents codex
+```
+
+| Client | What setup installs | Retrieval policy |
+|---|---|---|
+| Claude Code | User-scope SessionStart memory hook, graph-read guard, and MCP server. | An adaptively-selected, bounded packet is injected once at session start -- semantic ranking only when it could change the packet, deterministic otherwise, always stated; MCP provides focused follow-up reads and proposed writes. |
+| Codex | User-scope stdio MCP registration using `codex mcp add`. | MCP is on-demand. The managed `AGENTS.md` block asks for one `memory_context` call only for resumed or non-trivial work. |
+| Antigravity | Global `agent-harness` plugin containing `mcp_config.json` and a `PreInvocation` hook. | The hook injects a packet only at `invocationNum == 0`; later invocations return no context. MCP handles focused reads and proposed writes. |
+
+The Antigravity plugin is placed under
+`~/.gemini/config/plugins/agent-harness/`, its documented global plugin
+location. Its CLI need not be installed for the plugin files to be prepared;
+after installing Antigravity, rerun setup and restart the client. Setup leaves
+an existing Codex MCP server named `agent-harness` unchanged rather than
+replacing a configuration it cannot prove it owns.
 
 ### Install from source
 
@@ -242,6 +277,53 @@ python harness/graph_refresh.py <repo-root>          # fast: AST update + commun
 python harness/graph_refresh.py <repo-root> --full   # full LLM re-documentation
 ```
 
+For a new project, use the repairable one-command route instead of running
+individual graphify steps yourself:
+
+```bash
+agent-harness-enroll /path/to/project
+```
+
+It initializes memory first, then attempts a local AST graph build, then
+builds the local semantic index when available. A missing `graphifyy` or
+unavailable semantic dependency makes the command return `1` with an
+actionable diagnostic, but leaves memory usable. After installing the missing
+dependency, rerun the exact same command; it is idempotent.
+
+The default graph build does not call an LLM. Opt into Graphify's more
+expensive semantic extraction only after explicitly configuring a backend:
+
+```powershell
+$env:HARNESS_GRAPH_BACKEND = "openai"
+$env:OPENAI_API_KEY = "<read from your secret manager>"
+agent-harness-enroll C:\path\to\project --semantic-graph
+```
+
+On macOS/Linux, export the same two variables in the shell before running the
+enrollment command.
+
+### Large-project operating mode
+
+The graph is an infrastructure index, not text sent wholesale to an agent.
+Agents query a bounded neighborhood (`find`, `node`, `impact`, or `file`), and
+memory packets annotate only remembered symbols that resolve unambiguously.
+This keeps prompt growth bounded as a repository grows.
+
+For a very large repository, build the graph once outside an interactive
+session, keep the startup packet at 1.5–2k characters, and turn off startup
+graph annotation while retaining on-demand MCP queries:
+
+```powershell
+setx AGENT_HARNESS_HOOK_GRAPH 0
+agent-harness-enroll C:\path\to\large-project
+agent-harness-memory context --project C:\path\to\large-project --max-chars 2000
+```
+
+Measure graph-build duration, graph size, context length, and task completion
+quality before increasing budgets or adding a hosted retrieval system. The
+local semantic index ranks remembered facts; it is not a source-code dump or
+a replacement for structural graph queries.
+
 Backend resolution: `--backend` flag, then `HARNESS_GRAPH_BACKEND` env var,
 then `"auto"`. API keys are read from the environment; if a backend's key
 isn't set, `graph_refresh.py` will look for `~/.agent-harness/config.json`:
@@ -276,6 +358,10 @@ entry that doesn't match, or a `.mcp.json` that isn't valid JSON. It does
 **not** set `enableAllProjectMcpServers` -- Claude Code will still prompt to
 approve the project's MCP servers on first use.
 
+For user-scope setup across Claude, Codex, and Antigravity, prefer
+`agent-harness-setup`; it uses each client's configuration surface rather
+than copying Claude's `.mcp.json` format into another client.
+
 Run the server directly with the console script or as a module:
 
 ```bash
@@ -300,13 +386,11 @@ commands and capped at the same `MAX_ROWS` the CLI already enforces:
 | `graph_file` | `file` |
 | `graph_community` | `community` |
 
-**Codex / Gemini**: documentation-only for now -- their MCP config formats
-differ from Claude Code's `.mcp.json`, so `install.py --mcp` only writes
-Claude Code's file. To wire the server into Codex or Gemini CLI manually,
-point their MCP server config at `python -m harness.mcp_server` (with
-`--graph PATH` if you want to skip auto-discovery) the same way you would
-register any other stdio MCP server for that client -- consult each CLI's
-own MCP documentation for its config file location and schema.
+**Codex / Antigravity**: use `agent-harness-setup`, not the project-local
+`.mcp.json`. Codex is registered with its own `codex mcp add` command.
+Antigravity receives a standards-shaped `mcp_config.json` inside its global
+plugin together with the guarded context hook. Gemini CLI is not configured
+by this release; use `GEMINI.md` / `AGENTS.md` as its portable fallback.
 
 ## The blueprint gate
 
@@ -326,11 +410,12 @@ should:
 
 ## Per-agent support matrix
 
-| Agent | Reads `AGENTS.md`? | Pointer file | PreToolUse hook support | MCP tools |
-|---|---|---|---|---|
-| Claude Code | Yes | `CLAUDE.md` (3-line pointer) | Yes -- `--hooks` installs the fragment | Yes -- `--mcp` registers `.mcp.json` |
-| Codex CLI | Yes (native convention) | -- (uses `AGENTS.md` directly) | No hook mechanism generalized yet | Manual only (see MCP server section) |
-| Antigravity / Gemini CLI | Varies by version | `GEMINI.md` (3-line pointer) | No hook mechanism generalized yet | Manual only (see MCP server section) |
+| Agent | Reads `AGENTS.md`? | Adapter | MCP tools |
+|---|---|---|---|
+| Claude Code | Yes | `CLAUDE.md` pointer plus SessionStart / PreToolUse hooks | Yes |
+| Codex CLI | Yes | Native `AGENTS.md` plus on-demand MCP | Yes |
+| Antigravity CLI | Yes through project rules/instructions | First-invocation plugin hook plus MCP | Yes |
+| Gemini CLI | Varies by version | `GEMINI.md` pointer | Manual only |
 
 `AGENTS.md` is written unconditionally -- it is the common-denominator file
 most agent runtimes already read. `CLAUDE.md` and `GEMINI.md` only get the
@@ -393,12 +478,24 @@ reads on-disk (module docstrings document exact discovery findings).
 ## Memory
 
 A portable, local-first project memory: short-term working context plus
-durable knowledge, in ordinary Markdown and JSONL. Nothing here runs
-automatically, calls an AI model, or opens a network socket -- capture is
-explicit, and every entry is something you (or an agent, on your behalf)
-chose to record.
+durable knowledge, in ordinary Markdown and JSONL. Nothing here calls an AI
+model or opens a network socket, and capture stays a decision rather than a
+side effect -- every entry is something you, or an agent acting on the
+protocol installed into your user-scope rules, chose to record. No hook ever
+writes an entry; the hooks only read.
+
+Two things do run on their own once configured. `agent-harness-setup
+--workspace <dir>` creates a memory store for any project under `<dir>` on
+first sight, so a new repository is enrolled without being asked; and that
+same setup installs the memory protocol into `~/.claude/CLAUDE.md`, which is
+what tells an agent to retrieve before planning and to record what a later
+session would otherwise rediscover. Without `--workspace` a project never
+gets a store, the SessionStart hook stays silent, and every packet comes
+back empty -- the usual reason this harness looks like it is doing nothing.
+Everything an agent records is still `proposed` until a human accepts it.
 
 ```bash
+agent-harness-setup --agents claude --workspace ~/code   # enable automation
 agent-harness-memory init [PATH]
 agent-harness-memory remember --type decision --summary "Chose X over Y."
 agent-harness-memory status
@@ -433,6 +530,30 @@ Project storage is created in the repo so memory travels with the code:
 Machine-scope memory (`~/.agent-harness/memory/`) holds the project registry
 and reusable cross-project knowledge. It is local by default and is never
 committed into a project.
+
+### Parallel task workspaces
+
+For a user-authorized implementation task, start it before editing. This
+records a unique chat/session owner, exact repository-relative path claims,
+the immutable base SHA, a branch, and a private plan outside the repository.
+It refuses active path overlap. When another task is active, or the primary
+checkout is dirty, it creates an external worktree automatically; otherwise it
+switches a clean primary checkout to the task branch.
+
+```bash
+agent-harness-work list
+agent-harness-work start --summary "Add rate-limit headers" --session codex-<chat-id> \
+  --path src/api/headers.py --path tests/test_headers.py
+agent-harness-work diff work-YYYYMMDD-XXXXXXXX
+agent-harness-work finish work-YYYYMMDD-XXXXXXXX --session codex-<chat-id>
+```
+
+Plans, task state, and external worktrees live under
+`~/.agent-harness/work/<repository-id>/`; the project `.gitignore` is never
+modified. Finishing releases path claims but deliberately does not rebase,
+merge, delete branches, or delete worktrees. Use the matching MCP tools
+(`work_start`, `work_status`, `work_diff`, `work_finish`) when the client has
+the harness server registered.
 
 | Entry field | Notes |
 |---|---|
@@ -504,13 +625,24 @@ record reads to a model as a complete one. `--query` sets what to select for
 and defaults to the active objective in `scope.md`; `--id` pins specific
 entries to the front of their section.
 
-**Selection is ChromaDB-backed by default.** `--strategy auto` (the default)
-uses semantic ranking whenever `chromadb` is installed *and* an index exists,
-and otherwise falls back to deterministic tag/keyword/recency ranking with a
-note printed on the packet, so a fallback is never silent. Pass
+**Selection is ChromaDB-backed by default.** `--strategy auto` (the CLI
+default) uses semantic ranking whenever `chromadb` is installed *and* an index
+exists, and otherwise falls back to deterministic tag/keyword/recency ranking
+with a note printed on the packet, so a fallback is never silent. Pass
 `--strategy semantic` to make an unavailable index a hard error (exit 1)
 rather than a fallback, and `--strategy deterministic` to force the baseline
 -- that pairing is what makes the two comparable on your own models.
+
+`--strategy adaptive` adds a cheap gate in front of `auto`, and is what the
+SessionStart hook and the MCP server use. Before importing chromadb at all, it
+asks whether semantic ranking could change *this* packet: it cannot when there
+is no active objective to rank against (the semantic selector is defined to
+return deterministic order without a query), and effectively cannot when the
+store is small enough that every section already fits its budget. Either way
+it declines, costs nothing, and says so on the packet. A project with a real
+objective and a real store gets semantic ranking without opting in.
+`AGENT_HARNESS_ADAPTIVE_MIN_ENTRIES` moves the size threshold;
+`AGENT_HARNESS_HOOK_STRATEGY` overrides the hook's choice entirely.
 
 ```bash
 python -m pip install -e ".[semantic]"   # run from this checkout

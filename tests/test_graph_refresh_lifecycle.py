@@ -40,9 +40,9 @@ def test_full_refresh_invokes_extract_then_update_then_label(monkeypatch, tmp_pa
 
     monkeypatch.setattr(graph_refresh, "detect_graphify", lambda: graph_refresh.GraphifyStatus(True, "1.0"))
     monkeypatch.setattr(graph_refresh.subprocess, "run", fake_run)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
 
-    graph_refresh.refresh(tmp_path, "auto", full=True)
+    graph_refresh.refresh(tmp_path, "openai", full=True)
 
     subcommands = [c[3] for c in calls]
     assert subcommands == ["extract", "update", "label"]
@@ -61,7 +61,7 @@ def test_fast_refresh_invokes_update_then_label_only(monkeypatch, tmp_path: Path
     graph_refresh.refresh(tmp_path, "auto", full=False)
 
     subcommands = [c[3] for c in calls]
-    assert subcommands == ["update", "label"]
+    assert subcommands == ["update"]
     assert not any(c[3] == "extract" for c in calls)
 
 
@@ -83,7 +83,17 @@ def test_named_backend_passes_backend_flag() -> None:
     assert cmd[-2:] == ["--backend", "nvidia-nim"]
 
 
-def test_full_refresh_with_auto_backend_never_passes_backend_flag(monkeypatch, tmp_path: Path) -> None:
+def test_full_refresh_without_backend_fails_before_any_subprocess(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(graph_refresh, "detect_graphify", lambda: graph_refresh.GraphifyStatus(True, "1.0"))
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
+
+    with pytest.raises(SystemExit, match="full semantic extraction"):
+        graph_refresh.refresh(tmp_path, "auto", full=True)
+
+
+def test_auto_backend_labels_when_a_supported_key_is_present(monkeypatch, tmp_path: Path) -> None:
     calls: list[list[str]] = []
 
     def fake_run(cmd, check=False, **kwargs):  # noqa: ANN001
@@ -92,12 +102,11 @@ def test_full_refresh_with_auto_backend_never_passes_backend_flag(monkeypatch, t
 
     monkeypatch.setattr(graph_refresh, "detect_graphify", lambda: graph_refresh.GraphifyStatus(True, "1.0"))
     monkeypatch.setattr(graph_refresh.subprocess, "run", fake_run)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
 
-    graph_refresh.refresh(tmp_path, "auto", full=True)
+    graph_refresh.refresh(tmp_path, "auto", full=False)
 
-    for cmd in calls:
-        assert "--backend" not in cmd
-        assert "auto" not in cmd
+    assert [command[3] for command in calls] == ["update", "label"]
 
 
 # --- graphify presence/version compatibility --------------------------------
@@ -336,6 +345,7 @@ def test_refresh_never_performs_a_real_graphify_or_network_call(monkeypatch, tmp
         return subprocess.CompletedProcess(cmd, 0)
 
     monkeypatch.setattr(graph_refresh.subprocess, "run", fake_run)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     graph_refresh.refresh(tmp_path, "auto", full=True)
     assert len(seen) == 3
     for cmd in seen:

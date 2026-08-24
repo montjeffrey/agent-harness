@@ -94,24 +94,108 @@ def test_the_hook_is_silent_in_an_unenrolled_project(tmp_path: Path) -> None:
     assert hook.emit(bare) == ""
 
 
-def test_the_hook_is_silent_when_there_is_nothing_recorded_yet(
-    tmp_path: Path,
-) -> None:
+def test_the_hook_reports_an_enrolled_but_empty_store(tmp_path: Path) -> None:
+    """The whole point: empty must not look the same as unenrolled.
+
+    Paired with `test_the_hook_is_silent_in_an_unenrolled_project` -- together
+    they pin that the two states are distinguishable, which is the property
+    that actually matters. Neither test means much alone.
+    """
     root = tmp_path / "empty"
     root.mkdir()
     memory_store.init_project(root, now=NOW)
-    assert hook.emit(root) == ""
+
+    text = hook.emit(root)
+
+    assert text != ""
+    assert text != hook.emit(tmp_path / "never-enrolled")
+    assert "enrolled but empty" in text
+    assert "0 entries" in text
 
 
-def test_the_hook_defaults_to_deterministic_not_auto(
+def test_the_empty_store_notice_stays_one_line(tmp_path: Path) -> None:
+    """It is charged against every session's context window, so it is a line."""
+    root = tmp_path / "empty"
+    root.mkdir()
+    memory_store.init_project(root, now=NOW)
+
+    text = hook.emit(root)
+
+    assert text.count("\n") == 1
+    assert len(text) < 250
+
+
+def test_the_hook_defaults_to_adaptive_not_auto(
     project: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`auto` would import chromadb on every session start in every project."""
+    """`auto` would import chromadb on every session start in every project.
+
+    `adaptive` is allowed to reach semantic, but only after a gate that costs
+    nothing has said it could matter here.
+    """
     calls: list[str] = []
     monkeypatch.setattr(memory_index, "resolve_selector", _spy_selector(calls))
     _add(project, "Something recorded.")
     hook.emit(project)
-    assert calls == ["deterministic"]
+    assert calls == ["adaptive"]
+
+
+def test_the_hook_declines_semantic_when_no_objective_is_set(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An untouched `scope.md` yields no query, and no query means no ranking.
+
+    The packet must still say so, per the never-silent rule.
+    """
+    (project / ".agent-harness" / "scope.md").write_text(
+        """# Project scope
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        memory_index,
+        "chromadb_available",
+        lambda: pytest.fail("the gate must decide before chromadb is touched"),
+    )
+    _add(project, "Something recorded.")
+    text = hook.emit(project)
+    assert "semantic selection skipped" in text
+    assert "no active objective" in text
+
+
+def test_the_hook_declines_semantic_on_a_store_too_small_to_rank(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An objective is set, but one entry cannot overflow any section budget."""
+    monkeypatch.setattr(
+        memory_index,
+        "chromadb_available",
+        lambda: pytest.fail("the gate must decide before chromadb is touched"),
+    )
+    _add(project, "Something recorded.")
+    text = hook.emit(project)
+    assert "semantic selection skipped" in text
+    assert "fewer than" in text
+
+
+def test_the_hook_reaches_semantic_once_both_conditions_hold(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate is a filter, not a veto: a real project must still get ranking."""
+    monkeypatch.setenv(memory_index.ADAPTIVE_MIN_ENTRIES_ENV, "2")
+    seen: list[tuple[str, object]] = []
+
+    def spy(project_id: str, strategy: str = "auto", **kwargs):
+        seen.append((strategy, kwargs.get("query")))
+        return memory_context.deterministic_selector, "semantic", []
+
+    monkeypatch.setattr(memory_index, "resolve_selector", spy)
+    _add(project, "First thing recorded.")
+    _add(project, "Second thing recorded.")
+    text = hook.emit(project)
+    assert seen and seen[0][0] == "adaptive"
+    assert "Ship the automatic wiring" in str(seen[0][1])
+    assert "selection: semantic" in text
 
 
 def test_the_hook_strategy_is_opt_in_via_env(
@@ -342,6 +426,7 @@ def test_no_review_or_accept_tool_is_exposed() -> None:
     assert names == {
         "memory_context", "memory_status", "memory_remember",
         "memory_confirm", "memory_task_done", "memory_tasks",
+        "memory_claim", "memory_release",
     }
 
 
@@ -466,6 +551,40 @@ def test_enroll_survives_graph_refresh_exiting(
     code = enroll.main([str(root), "--no-index"])
     assert code == 1  # degraded, not crashed
     assert (root / ".agent-harness" / "scope.md").is_file()
+
+
+def test_enroll_defaults_to_the_local_ast_graph(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The default must not accidentally spend tokens on Graphify extract."""
+    from harness import enroll, graph_refresh
+
+    seen: list[list[str]] = []
+
+    def succeeds(argv: list[str]) -> int:
+        seen.append(argv)
+        return 0
+
+    monkeypatch.setattr(graph_refresh, "main", succeeds)
+    root = tmp_path / "fresh"
+    root.mkdir()
+
+    assert enroll.main([str(root), "--no-index"]) == 0
+    assert seen == [[str(root)]]
+
+
+def test_enroll_requires_explicit_flag_for_semantic_graph(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from harness import enroll, graph_refresh
+
+    seen: list[list[str]] = []
+    monkeypatch.setattr(graph_refresh, "main", lambda argv: seen.append(argv) or 0)
+    root = tmp_path / "fresh"
+    root.mkdir()
+
+    assert enroll.main([str(root), "--no-index", "--semantic-graph"]) == 0
+    assert seen == [[str(root), "--full"]]
 
 
 def test_enroll_is_idempotent(tmp_path: Path) -> None:

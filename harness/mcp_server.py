@@ -1,5 +1,5 @@
-"""Stdio MCP server exposing code-graph queries and project memory as 10
-typed MCP tools.
+"""Stdio MCP server exposing code-graph queries, project memory, and task
+workspaces as 19 typed MCP tools.
 
 Usage:
     python -m harness.mcp_server [--graph PATH]
@@ -26,6 +26,16 @@ Tools (all thin wrappers around `harness.graph_query.query`):
     memory_context  -- budgeted context packet: scope, open work, knowledge
     memory_status   -- entry counts, freshness, what awaits review
     memory_remember -- record one PROPOSED entry for human review
+    memory_confirm  -- record a plan the human just approved, plus its steps
+    memory_task_done -- mark one tracked action task complete
+    memory_tasks    -- open tasks in priority order, plus bottlenecks and claims
+    memory_claim    -- claim an open task/blocker for an agent program
+    memory_release  -- release a held claim
+
+    work_start       -- claim exact paths and prepare a task branch/worktree
+    work_status      -- show active/finished task records for this repository
+    work_diff        -- show a task's tracked diff from its immutable base
+    work_finish      -- release a completed task's path claims
 
 Graph output is capped by `harness.graph_query.MAX_ROWS` (no separate
 protocol-visible `limit` parameter -- callers get the same row cap the CLI
@@ -45,7 +55,7 @@ import json
 import sys
 from collections import OrderedDict
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from harness import graph_query
 
@@ -245,9 +255,62 @@ MEMORY_TOOL_DESCRIPTIONS: dict[str, str] = {
     ),
     "memory_tasks": (
         "List open action tasks in priority order, plus the topics that work "
-        "keeps stalling on (bottlenecks). Call this to decide what to pick up."
+        "keeps stalling on (bottlenecks), and who (if anyone) has claimed each "
+        "one. Call this to decide what to pick up."
+    ),
+    "memory_claim": (
+        "Claim one open task or blocker for `owner` (claude, codex, or agy) so "
+        "other agent sessions know not to pick it up too. Call this before "
+        "starting work on something from memory_tasks. Fails if someone else "
+        "already holds a live claim on it."
+    ),
+    "memory_release": (
+        "Release your claim on a task or blocker, e.g. because it's done "
+        "(prefer memory_task_done for that) or you're abandoning it so someone "
+        "else can pick it up."
     ),
 }
+
+WORK_TOOL_DESCRIPTIONS: dict[str, str] = {
+    "work_start": (
+        "Start an implementation task after its scope is agreed: claim exact "
+        "repository-relative paths for this unique session, record an immutable "
+        "base commit, create a branch, and create an external worktree when "
+        "another session is active or the primary checkout is dirty. `paths` is "
+        "one path per line. Refuses overlapping active path claims."
+    ),
+    "work_status": (
+        "List task branches, sessions, paths, private plans, and worktree paths "
+        "recorded for this repository. Call before starting implementation."
+    ),
+    "work_diff": (
+        "Show all tracked changes for one task against the exact commit it began "
+        "from. Use before handoff; it is independent of later movement on main."
+    ),
+    "work_finish": (
+        "Mark an implementation task complete and release its path claims. Does "
+        "not merge, rebase, delete the branch, or delete its worktree."
+    ),
+}
+
+
+def _memory_entry_count(memory_store: Any, root: Path) -> int:
+    """Total entries across both stores, for the `adaptive` size gate.
+
+    An unreadable store counts as zero, which sends the decision to
+    deterministic -- the cheap path that always yields a usable packet.
+    """
+    try:
+        return sum(
+            1
+            for directory in (
+                memory_store.project_memory_dir(root),
+                memory_store.machine_memory_dir(),
+            )
+            for _ in memory_store.iter_entries(directory)
+        )
+    except Exception:  # noqa: BLE001 -- a counting failure must not break the tool
+        return 0
 
 
 def dispatch_memory(tool_name: str, arguments: dict) -> str:
@@ -266,12 +329,26 @@ def dispatch_memory(tool_name: str, arguments: dict) -> str:
     try:
         if tool_name == "memory_context":
             project_id = memory_store.project_id_for(root)
-            # `auto` is right here and wrong in a hook: this server is long
-            # lived, so a one-time chromadb import amortizes over the whole
-            # session instead of being paid at every session start.
+            # Resolve the query first: `adaptive` decides on the same string
+            # the packet will actually rank by, and `build_packet` would
+            # otherwise default it a second time further down.
+            query = arguments.get("query") or memory_context.active_objective(root)
+            # `cross_check` exists to compare deterministic against semantic
+            # ranking, so it must not be given a strategy that may decline to
+            # rank semantically -- the comparison would quietly become a no-op
+            # and report nothing. Asking for it is asking for the attempt.
+            #
+            # Otherwise `adaptive`: this server is long lived, so the chromadb
+            # import amortizes, but amortized waste is still waste. Ranking a
+            # store with nothing to rank against costs an ONNX session and
+            # returns the deterministic answer either way.
+            wanted = "auto" if arguments.get("cross_check") else "adaptive"
             try:
                 selector, strategy, notes = memory_index.resolve_selector(
-                    project_id, "auto"
+                    project_id,
+                    wanted,
+                    query=query,
+                    entry_count=_memory_entry_count(memory_store, root),
                 )
             except FileNotFoundError as exc:
                 return str(exc)
@@ -338,7 +415,7 @@ def dispatch_memory(tool_name: str, arguments: dict) -> str:
             annotator, graph_notes = memory_graph.build_annotator(root)
             packet = memory_context.build_packet(
                 root,
-                query=arguments.get("query") or None,
+                query=query,
                 max_chars=int(arguments.get("max_chars") or 4000),
                 selector=selector,
                 strategy=strategy,
@@ -442,7 +519,7 @@ def dispatch_memory(tool_name: str, arguments: dict) -> str:
             return f"{entry['id']} -> resolved: {entry['summary']}"
 
         if tool_name == "memory_tasks":
-            from harness import memory_tasks
+            from harness import memory_claims, memory_tasks
 
             entries = list(
                 memory_store.iter_entries(memory_store.project_memory_dir(root))
@@ -451,14 +528,47 @@ def dispatch_memory(tool_name: str, arguments: dict) -> str:
             stuck = memory_tasks.bottlenecks(entries)
             if not ranked:
                 return "no open action tasks"
+
+            def _claim_tag(e: dict) -> str:
+                c = e.get("claim")
+                if not c:
+                    return "unclaimed"
+                if memory_claims.is_stale(c):
+                    return f"stale claim by {c.get('owner')} (free to take)"
+                return f"claimed by {c.get('owner')}"
+
             lines = [f"{len(ranked)} open, in priority order:"]
             lines += [
-                f"  {e['id']} [{e.get('type')}] {e.get('summary')}" for e in ranked
+                f"  {e['id']} [{e.get('type')}] {e.get('summary')} -- {_claim_tag(e)}"
+                for e in ranked
             ]
             if stuck:
                 lines.append("\nbottlenecks:")
                 lines += [f"  {b.describe()}" for b in stuck]
             return "\n".join(lines)
+
+        if tool_name == "memory_claim":
+            from harness import memory_claims
+
+            owner = str(arguments.get("owner") or "")
+            entry_id = str(arguments.get("entry_id") or "")
+            result = memory_claims.claim(
+                memory_store.project_memory_dir(root), entry_id, owner
+            )
+            text = f"{result.entry['id']} -> claimed by {owner}"
+            if result.reclaimed_from:
+                text += f" (took over a stale claim from {result.reclaimed_from})"
+            return text
+
+        if tool_name == "memory_release":
+            from harness import memory_claims
+
+            owner = str(arguments.get("owner") or "")
+            entry_id = str(arguments.get("entry_id") or "")
+            entry = memory_claims.release(
+                memory_store.project_memory_dir(root), entry_id, owner
+            )
+            return f"{entry['id']} -> released"
 
     except (ValueError, LookupError, OSError) as exc:
         return f"memory tool failed: {exc}"
@@ -467,6 +577,54 @@ def dispatch_memory(tool_name: str, arguments: dict) -> str:
         f"unknown tool '{tool_name}' -- choose from "
         f"{', '.join(MEMORY_TOOL_DESCRIPTIONS)}"
     )
+
+
+def dispatch_work(tool_name: str, arguments: dict) -> str:
+    """Run one local task-workspace action without requiring the MCP SDK."""
+    from harness import work
+
+    project = Path(arguments.get("project") or ".").expanduser()
+    try:
+        if tool_name == "work_start":
+            paths = [line.strip() for line in str(arguments.get("paths") or "").splitlines() if line.strip()]
+            task = work.start(
+                project,
+                summary=str(arguments.get("summary") or ""),
+                session_id=str(arguments.get("session") or ""),
+                paths=paths,
+                agent=str(arguments.get("agent") or "codex"),
+                worktree_mode=str(arguments.get("worktree") or "auto"),
+            )
+            return (
+                f"status: success\nsummary: started {task.id}\n"
+                f"next_actions: work only in {task.worktree}; call work_diff before handoff\n"
+                f"artifacts: {task.plan_path}\nbranch: {task.branch}\nbase: {task.base_sha}"
+            )
+        if tool_name == "work_status":
+            tasks = work.list_tasks(project, active_only=bool(arguments.get("active_only", False)))
+            if not tasks:
+                return "status: success\nsummary: no recorded tasks\nnext_actions: start a task before implementation\nartifacts:"
+            lines = ["status: success", f"summary: {len(tasks)} recorded task(s)", "next_actions: inspect active path claims before editing", "artifacts:"]
+            lines.extend(
+                f"{task.id} [{task.status}] session={task.session_id} branch={task.branch} "
+                f"paths={','.join(task.paths)} worktree={task.worktree} plan={task.plan_path}"
+                for task in tasks
+            )
+            return "\n".join(lines)
+        if tool_name == "work_diff":
+            return work.diff(project, str(arguments.get("task_id") or ""))
+        if tool_name == "work_finish":
+            task = work.finish(
+                project, str(arguments.get("task_id") or ""), str(arguments.get("session") or "")
+            )
+            return (
+                f"status: success\nsummary: finished {task.id}; released path claims\n"
+                "next_actions: hand off the branch for integration\n"
+                f"artifacts: {task.plan_path}"
+            )
+    except (work.WorkError, OSError) as exc:
+        return f"status: error\nsummary: {exc}\nnext_actions: correct the reported condition and retry\nartifacts:"
+    return f"unknown tool '{tool_name}' -- choose from {', '.join(WORK_TOOL_DESCRIPTIONS)}"
 
 
 def _parse_argv(argv: list[str]) -> Path | None:
@@ -484,7 +642,7 @@ def _parse_argv(argv: list[str]) -> Path | None:
 
 
 def _build_server():
-    """Construct the FastMCP server and register all 10 tools.
+    """Construct the FastMCP server and register all 19 tools.
 
     Imports the `mcp` SDK lazily -- only called from `main()`, never at
     module import time.
@@ -580,6 +738,16 @@ def _build_server():
     def memory_tasks(project: str = "") -> str:
         return dispatch_memory("memory_tasks", {"project": project})
 
+    def memory_claim(entry_id: str, owner: str, project: str = "") -> str:
+        return dispatch_memory(
+            "memory_claim", {"entry_id": entry_id, "owner": owner, "project": project}
+        )
+
+    def memory_release(entry_id: str, owner: str, project: str = "") -> str:
+        return dispatch_memory(
+            "memory_release", {"entry_id": entry_id, "owner": owner, "project": project}
+        )
+
     for func in (
         memory_context,
         memory_status,
@@ -587,11 +755,42 @@ def _build_server():
         memory_confirm,
         memory_task_done,
         memory_tasks,
+        memory_claim,
+        memory_release,
     ):
         func.__doc__ = MEMORY_TOOL_DESCRIPTIONS[func.__name__]
         mcp_app.tool(
             name=func.__name__, description=MEMORY_TOOL_DESCRIPTIONS[func.__name__]
         )(func)
+
+    def work_start(
+        summary: str,
+        session: str,
+        paths: str,
+        agent: str = "codex",
+        worktree: str = "auto",
+        project: str = "",
+    ) -> str:
+        return dispatch_work(
+            "work_start",
+            {"summary": summary, "session": session, "paths": paths, "agent": agent,
+             "worktree": worktree, "project": project},
+        )
+
+    def work_status(project: str = "", active_only: bool = False) -> str:
+        return dispatch_work("work_status", {"project": project, "active_only": active_only})
+
+    def work_diff(task_id: str, project: str = "") -> str:
+        return dispatch_work("work_diff", {"task_id": task_id, "project": project})
+
+    def work_finish(task_id: str, session: str, project: str = "") -> str:
+        return dispatch_work(
+            "work_finish", {"task_id": task_id, "session": session, "project": project}
+        )
+
+    for func in (work_start, work_status, work_diff, work_finish):
+        func.__doc__ = WORK_TOOL_DESCRIPTIONS[func.__name__]
+        mcp_app.tool(name=func.__name__, description=WORK_TOOL_DESCRIPTIONS[func.__name__])(func)
 
     return mcp_app
 

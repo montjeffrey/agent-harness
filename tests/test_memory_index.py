@@ -229,6 +229,96 @@ def test_probe_index_rejects_an_incomplete_directory_without_opening_a_client(
     assert calls == []
 
 
+def test_an_unopenable_collection_reports_why_not_just_that_it_is_absent(
+    tmp_path: Path,
+) -> None:
+    """A collection that exists but refuses to open must say so, in the message.
+
+    Chroma rejects a query-time `embedding_function` whose name differs from
+    the persisted one. That surfaced as "no collection named ..." -- which
+    reads as a missing store and invites a rebuild that cannot fix it. The
+    reason has to travel in `str(exc)`, because `probe_index` and the packet
+    notes render only that, never `__cause__`.
+    """
+    index_dir = tmp_path / "memory-index"
+    index_dir.mkdir()
+    (index_dir / "chroma.sqlite3").write_bytes(b"")
+
+    class RefusingClient:
+        def get_collection(self, name: str, **kwargs: Any):
+            raise ValueError(
+                "Embedding function conflict: new: onnx_mini_lm_l6_v2 vs persisted: default"
+            )
+
+    problem = memory_index.probe_index(index_dir, client_factory=lambda _p: RefusingClient())
+
+    assert problem is not None
+    assert "Embedding function conflict" in problem
+    assert "ValueError" in problem
+
+
+# --- adaptive strategy ----------------------------------------------------
+
+
+def test_adaptive_declines_when_there_is_no_query_to_rank_against() -> None:
+    """Without a query the semantic selector returns deterministic order."""
+    reason = memory_index.semantic_pointless_reason(None, 500)
+    assert reason is not None and "objective" in reason
+    assert memory_index.semantic_pointless_reason("   ", 500) is not None
+
+
+def test_adaptive_declines_on_a_store_too_small_for_ranking_to_matter() -> None:
+    reason = memory_index.semantic_pointless_reason("billing", 1)
+    assert reason is not None and "fits its budget" in reason
+
+
+def test_adaptive_accepts_a_real_query_against_a_real_store() -> None:
+    assert memory_index.semantic_pointless_reason("billing", 500) is None
+
+
+def test_the_adaptive_size_threshold_is_overridable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(memory_index.ADAPTIVE_MIN_ENTRIES_ENV, "2")
+    assert memory_index.adaptive_min_entries() == 2
+    assert memory_index.semantic_pointless_reason("billing", 3) is None
+    monkeypatch.setenv(memory_index.ADAPTIVE_MIN_ENTRIES_ENV, "not-a-number")
+    assert memory_index.adaptive_min_entries() == memory_index.ADAPTIVE_MIN_ENTRIES
+
+
+def test_adaptive_decides_before_chromadb_is_ever_touched(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The saved cost is the import and the ONNX session, not the query.
+
+    A gate that consulted chromadb to decide would have already spent exactly
+    what it exists to avoid.
+    """
+    monkeypatch.setattr(
+        memory_index,
+        "chromadb_available",
+        lambda: pytest.fail("adaptive must decide without importing chromadb"),
+    )
+    project_id = memory_store.project_id_for(project)
+    selector, strategy, notes = memory_index.resolve_selector(
+        project_id, "adaptive", query=None, entry_count=0
+    )
+    assert strategy == "deterministic"
+    assert selector is memory_context.deterministic_selector
+    assert any("semantic selection skipped" in note for note in notes)
+
+
+def test_adaptive_never_silently_satisfies_a_request_for_semantic(
+    project: Path,
+) -> None:
+    """`semantic` must still raise rather than degrade -- benchmarks rely on it."""
+    project_id = memory_store.project_id_for(project)
+    with pytest.raises(FileNotFoundError):
+        memory_index.resolve_selector(
+            project_id, "semantic", query=None, entry_count=0
+        )
+
+
 def test_the_index_lives_outside_the_repository(project: Path) -> None:
     """A binary index under .agent-harness/ would be committed with the repo."""
     project_id = memory_store.project_id_for(project)

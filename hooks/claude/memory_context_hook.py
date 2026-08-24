@@ -12,12 +12,22 @@ Three rules this hook lives by:
    wrapped in a bare `except Exception`, which is normally a smell and is
    correct here.
 
-2. **Deterministic selection by default.** Every hook run is a fresh
-   process, so `auto` would mean importing chromadb and loading an ONNX
-   model on *every* session start in *every* enrolled project -- seconds of
-   latency for a packet keyword ranking already fills well. Semantic
-   selection belongs in the long-lived MCP server, where the import is paid
-   once. Set `AGENT_HARNESS_HOOK_STRATEGY=auto` to opt in anyway.
+2. **Adaptive selection by default.** Every hook run is a fresh process, so
+   an unconditional `auto` would import chromadb and build an ONNX session on
+   *every* session start in *every* enrolled project -- seconds of latency
+   for a packet keyword ranking usually fills well. `adaptive` keeps that
+   cost only where it buys something: before touching chromadb it asks, in
+   arithmetic alone, whether semantic ranking could change *this* packet.
+   It cannot when there is no active objective to rank against (the semantic
+   selector is defined to return deterministic order without a query), and it
+   effectively cannot when the store is small enough that every section fits
+   its budget. Both are the common case for a young project, which pays
+   nothing. A project with a real objective and a real store gets semantic
+   ranking without anyone opting in -- which is the point, because the
+   opt-in flag was never going to be set by the people who most needed it.
+   `AGENT_HARNESS_HOOK_STRATEGY` still forces `auto`, `semantic`, or
+   `deterministic`, and `AGENT_HARNESS_ADAPTIVE_MIN_ENTRIES` moves the size
+   threshold.
 
 3. **Smaller budget than the CLI default.** This text is prepended to every
    session whether or not it gets used, so it is charged against the
@@ -31,6 +41,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 HOOK_MAX_CHARS = 3500
 STRATEGY_ENV = "AGENT_HARNESS_HOOK_STRATEGY"
@@ -86,6 +97,69 @@ def should_auto_enroll(project_root: Path) -> bool:
     return False
 
 
+def _entry_count(memory_store: Any, project_root: Path) -> int:
+    """How many entries both stores hold, for the adaptive size gate.
+
+    This re-reads append-only JSONL that `build_packet` will read again a few
+    lines later. The duplication is deliberate: the alternative is threading a
+    count out of `build_packet` for one caller's benefit, and a stdlib pass
+    over a small file is orders of magnitude cheaper than the ONNX session it
+    decides whether to pay for.
+
+    An unreadable store counts as zero, which sends the decision to
+    deterministic. That is the correct direction to fail: rule 1 says a memory
+    problem must never stop someone working, and the cheap path always
+    produces a usable packet.
+    """
+    try:
+        return sum(
+            1
+            for directory in (
+                memory_store.project_memory_dir(project_root),
+                memory_store.machine_memory_dir(),
+            )
+            for _ in memory_store.iter_entries(directory)
+        )
+    except Exception:  # noqa: BLE001 -- see rule 1 in the module docstring
+        return 0
+
+
+def _empty_packet_notice(project_root: Path, memory_store: Any) -> str:
+    """One line distinguishing a wired-but-empty store from an absent one.
+
+    An enrolled project whose packet has no units used to emit nothing at all,
+    which is exactly what an *unenrolled* project emits. Two states that need
+    opposite fixes -- one needs recording, the other needs enrolling -- looked
+    identical from the operator's seat, and the absence of an error read as
+    "no problem" rather than "no memory".
+
+    The two empty cases are worth telling apart in the line itself. Zero
+    entries means nothing was ever recorded. A non-zero count with an empty
+    packet means entries exist but none survived selection, which is a budget
+    or filter question, not a recording one.
+    """
+    try:
+        count = sum(
+            1
+            for _ in memory_store.iter_entries(
+                memory_store.project_memory_dir(project_root)
+            )
+        )
+    except Exception:  # noqa: BLE001 -- see rule 1 in the module docstring
+        count = 0
+
+    if count == 0:
+        return (
+            "_agent-harness: memory is enrolled but empty (0 entries recorded). "
+            "Nothing to inject. Record with `agent-harness-memory remember`; "
+            "`agent-harness doctor` confirms the wiring._\n"
+        )
+    return (
+        f"_agent-harness: {count} memory entries recorded, none selected into "
+        "this packet -- check the budget with `agent-harness-memory status`._\n"
+    )
+
+
 def emit(project_root: Path) -> str:
     """Build the packet text for `project_root`, or "" if there is none.
 
@@ -110,10 +184,20 @@ def emit(project_root: Path) -> str:
         # selection out of this hook. `agent-harness-enroll` does those.
         memory_store.init_project(project_root)
 
-    strategy = os.environ.get(STRATEGY_ENV, "deterministic")
+    strategy = os.environ.get(STRATEGY_ENV, "adaptive")
     project_id = memory_store.project_id_for(project_root)
+    # Resolved once and passed to both the selector decision and the packet, so
+    # the strategy is chosen against exactly the query the packet ranks by.
+    # Letting `build_packet` default the query again could, if the two ever
+    # diverged, pick semantic for a query that is not the one used.
+    objective = memory_context.active_objective(project_root)
     try:
-        selector, resolved, notes = memory_index.resolve_selector(project_id, strategy)
+        selector, resolved, notes = memory_index.resolve_selector(
+            project_id,
+            strategy,
+            query=objective,
+            entry_count=_entry_count(memory_store, project_root),
+        )
     except (FileNotFoundError, ValueError):
         selector = memory_context.deterministic_selector
         resolved = "deterministic"
@@ -145,16 +229,22 @@ def emit(project_root: Path) -> str:
 
     packet = memory_context.build_packet(
         project_root,
+        query=objective,
         max_chars=_int_env(MAX_CHARS_ENV, HOOK_MAX_CHARS),
         selector=selector,
         strategy=resolved,
         notes=notes,
         annotator=annotator,
     )
-    # A packet with no sections -- only a "nothing recorded yet" warning --
-    # is noise at session start. Stay quiet until there is something to say.
+    # An empty packet returned "" here for a while, on the theory that a
+    # "nothing recorded yet" line is noise at session start. That traded a
+    # little noise for a worse failure: silence is also what an unenrolled
+    # project emits, so "not wired" and "wired but idle" became the same
+    # observation. One line is cheaper than the debugging session that
+    # ambiguity costs. Unenrolled projects still return "" above -- this hook
+    # announces itself only where it has actually been installed.
     if not any(section.units for section in packet.sections):
-        return ""
+        return _empty_packet_notice(project_root, memory_store)
     return memory_context.render_markdown(packet)
 
 

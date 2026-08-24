@@ -245,8 +245,13 @@ Open:
 `feat/phase-2-telemetry`, `feat/phase-2-step7-8`, and
 `wip/doctor-telemetry-checks-stale` carry an earlier telemetry design
 (`telemetry_collectors` / `telemetry_schema`) that the shipped one superseded.
-Merging any of them would delete roughly 13,000 lines -- the entire memory
-system, which they predate. They are not a rebase candidate under any ordering.
+They predate the memory system and never touch it, so a merge leaves main's
+`memory_*.py` intact -- the blocker is collision, not deletion. Merging
+`feat/phase-2-step7-8` conflicts in eight files, including add/add conflicts on
+`harness/telemetry.py` and `harness/telemetry_store.py`, because both sides
+implement the same module from incompatible designs. Reconciling that by hand
+yields nothing main does not already have. They are not a rebase candidate
+under any ordering.
 
 Assessed for regressions against `main`; none found. Main is ahead on
 `.gitignore` (the branches never learned to ignore agent worktrees) and on CI.

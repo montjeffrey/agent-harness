@@ -51,10 +51,13 @@ class ReviewResult:
     created: dict | None = None
 
 
-def _locate(directory: Path, entry_id: str) -> tuple[list[str], int, dict]:
+def locate_entry(directory: Path, entry_id: str) -> tuple[list[str], int, dict]:
     """Find `entry_id` in the inbox, returning (raw lines, index, record).
 
-    Raises LookupError when no schema-valid entry carries that id.
+    Raises LookupError when no schema-valid entry carries that id. Public
+    because `memory_claims` needs the identical splice-in-place pattern --
+    read lines, find the index, mutate a copy, write back -- rather than a
+    second implementation of the same line-level lookup.
     """
     lines = memory_store.read_lines(directory)
     for index, line in enumerate(lines):
@@ -134,7 +137,7 @@ def apply_review(
 
     now = now or datetime.now(timezone.utc)
     stamp = memory_store.format_ts(now)
-    lines, index, original = _locate(directory, entry_id)
+    lines, index, original = locate_entry(directory, entry_id)
 
     status = original.get("status", "proposed")
     if status in memory_store.CLOSED_STATUSES:

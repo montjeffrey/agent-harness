@@ -18,6 +18,8 @@ agent-harness-install = "harness.install_cli:main"
 agent-harness-telemetry = "harness.telemetry:main"
 agent-harness-memory = "harness.memory:main"
 agent-harness-enroll = "harness.enroll:main"
+agent-harness-setup = "harness.agent_setup:main"
+agent-harness-work = "harness.work:main"
 
 [project.optional-dependencies]
 dev = [

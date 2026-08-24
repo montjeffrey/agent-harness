@@ -1,5 +1,5 @@
 """Portable hierarchical memory CLI: init, remember, status, review, context,
-index, compact, and eval.
+ingest, claim, index, compact, and eval.
 
 Capture is explicit. Nothing in this module runs automatically or summarizes
 with an AI model. `init`, `remember`, `status`, `review`, and `context` are
@@ -21,6 +21,8 @@ Usage:
     python harness/memory.py status [--project PATH]
     python harness/memory.py review list | ACTION ENTRY_ID [options]
     python harness/memory.py context [--query TEXT] [--json] [--strategy S]
+    python harness/memory.py ingest [--project PATH] [--dry-run]
+    python harness/memory.py claim list|claim|release [ENTRY_ID] --owner NAME [options]
     python harness/memory.py index [--project PATH]
     python harness/memory.py compact [--project PATH]
     python harness/memory.py eval [--cases PATH] [--limit N] [--strategy S] [--save]
@@ -36,23 +38,29 @@ HARNESS_ROOT = Path(__file__).resolve().parent.parent
 
 try:
     from harness import (
+        memory_claims,
         memory_compact,
         memory_context,
         memory_eval,
         memory_index,
+        memory_ingest,
         memory_review,
         memory_store,
+        memory_tasks,
         work_store,
     )
 except ImportError:  # running as `python harness/memory.py`, not `-m harness.memory`
     sys.path.insert(0, str(HARNESS_ROOT))
     from harness import (
+        memory_claims,
         memory_compact,
         memory_context,
         memory_eval,
         memory_index,
+        memory_ingest,
         memory_review,
         memory_store,
+        memory_tasks,
         work_store,
     )
 
@@ -91,6 +99,41 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
     status_p = sub.add_parser("status", help="report memory freshness, counts, and scope warnings")
     status_p.add_argument("--project", default=".", help="project root (default: current directory)")
+
+    ing_p = sub.add_parser(
+        "ingest",
+        help="propose pointer entries for the project's existing documentation",
+    )
+    ing_p.add_argument("--project", default=".", help="project root (default: current directory)")
+    ing_p.add_argument(
+        "--dry-run", action="store_true",
+        help="report what would be proposed without writing anything",
+    )
+    ing_p.add_argument(
+        "--no-scope", action="store_true",
+        help="do not seed scope.md's Purpose from the README",
+    )
+
+    clm_p = sub.add_parser(
+        "claim",
+        help="claim, release, or list ownership of open tasks/blockers, so parallel "
+             "agent sessions don't pick up the same work",
+    )
+    clm_p.add_argument(
+        "action", choices=("list", "claim", "release"),
+        help="`list` shows every open item and who (if anyone) holds it; "
+             "`claim`/`release` need entry_id and --owner",
+    )
+    clm_p.add_argument("entry_id", nargs="?", help="entry id, required for claim/release")
+    clm_p.add_argument(
+        "--owner", choices=memory_claims.KNOWN_AGENTS, default=None,
+        help="the agent program claiming/releasing/filtering (required for claim/release)",
+    )
+    clm_p.add_argument("--project", default=".", help="project root (default: current directory)")
+    clm_p.add_argument(
+        "--force", action="store_true",
+        help="release: drop another owner's claim rather than only your own",
+    )
 
     rev_p = sub.add_parser("review", help="list proposals or act on one")
     rev_p.add_argument(
@@ -289,6 +332,92 @@ def cmd_status(args: argparse.Namespace) -> int:
         if "_What this project is for._" in text:
             print("\n  WARN: scope.md is still the untouched template -- scope-drift")
             print("        detection cannot work until you fill it in.")
+    return 0
+
+
+def cmd_ingest(args: argparse.Namespace) -> int:
+    """Seed memory from documentation. Exit 1 when there was nothing to do.
+
+    Nothing-to-do is the honest outcome for a re-run on an unchanged tree, and
+    it is exit 1 rather than 0 because the contract in this module's docstring
+    reserves 1 for exactly that -- automation branching on "did this change
+    anything" should not have to diff the store to find out.
+    """
+    root = Path(args.project).expanduser()
+    if not (root / ".agent-harness").is_dir():
+        print(f"no memory storage in {root}", file=sys.stderr)
+        print("run `agent-harness-memory init` to create it", file=sys.stderr)
+        return 1
+
+    result = memory_ingest.ingest(
+        root, dry_run=args.dry_run, seed_scope=not args.no_scope
+    )
+    prefix = "would propose" if args.dry_run else "proposed"
+    print(f"{prefix}: {result.describe()}")
+
+    for entry in result.proposed:
+        print(f"  [{entry['type']}] {entry['summary'][:110]}")
+    for name, reason in result.rejected:
+        print(f"  skipped {name}: {reason}", file=sys.stderr)
+
+    if result.scope_seeded:
+        verb = "would seed" if args.dry_run else "seeded"
+        print(f"  {verb} scope.md purpose: {result.scope_reason[:110]}")
+    elif result.scope_reason:
+        print(f"  scope.md untouched: {result.scope_reason}")
+
+    if not result.wrote_anything:
+        print("nothing to do -- documentation already mapped")
+        return 1
+    return 0
+
+
+def cmd_claim(args: argparse.Namespace) -> int:
+    """Claim, release, or list ownership of open tasks/blockers.
+
+    Exit 1 for "nothing to show"/"could not act" (no open work, entry not
+    claimed, etc.); exit 2 for a rejected transition (unknown owner, already
+    claimed by someone else and not stale, wrong entry type).
+    """
+    root = Path(args.project).expanduser()
+    directory = memory_store.project_memory_dir(root)
+
+    if args.action == "list":
+        entries = list(memory_store.iter_entries(directory))
+        open_items = memory_tasks.open_work(entries)
+        if not open_items:
+            print("no open tasks or blockers")
+            return 1
+        for entry in open_items:
+            c = entry.get("claim")
+            if c and not memory_claims.is_stale(c):
+                tag = f"claimed by {c.get('owner')} since {c.get('ts')}"
+            elif c:
+                tag = f"stale claim by {c.get('owner')} (free to take)"
+            else:
+                tag = "unclaimed"
+            print(f"  {entry['id']}  [{entry.get('type')}] {entry.get('summary')}  -- {tag}")
+        return 0
+
+    if not args.entry_id or not args.owner:
+        print(f"claim {args.action} needs an entry id and --owner", file=sys.stderr)
+        return 2
+
+    try:
+        if args.action == "claim":
+            result = memory_claims.claim(directory, args.entry_id, args.owner)
+            print(f"{result.entry['id']} -> claimed by {args.owner}")
+            if result.reclaimed_from:
+                print(f"  (took over a stale claim from {result.reclaimed_from})")
+        else:
+            entry = memory_claims.release(directory, args.entry_id, args.owner, force=args.force)
+            print(f"{entry['id']} -> released")
+    except LookupError as exc:
+        print(f"{exc}", file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        print(f"claim rejected: {exc}", file=sys.stderr)
+        return 2
     return 0
 
 
@@ -520,6 +649,8 @@ _COMMANDS = {
     "status": cmd_status,
     "review": cmd_review,
     "context": cmd_context,
+    "ingest": cmd_ingest,
+    "claim": cmd_claim,
     "index": cmd_index,
     "compact": cmd_compact,
     "eval": cmd_eval,

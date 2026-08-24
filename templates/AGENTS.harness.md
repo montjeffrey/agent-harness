@@ -1,6 +1,24 @@
 <!-- agent-harness:start -->
 ## Agent Harness
 
+### Memory protocol
+
+For feature-scale work, bug investigation, or a resumed task, retrieve one
+bounded project packet before planning: use the `memory_context` MCP tool when
+available, otherwise run `agent-harness-memory context --max-chars 2000`.
+Do not retrieve memory for a trivial one-shot question. Record a concise
+decision, discovery, blocker, or lesson with `memory_remember` only when it
+will help a later session; those entries are proposed until a human reviews
+them. Never record secrets, prompts, or source dumps. Do not promote your own
+proposals.
+
+Before non-trivial implementation that the user has authorized, call
+`work_status` then `work_start` with this chat's unique session id and exact
+repository-relative paths. Work only in the returned branch/worktree;
+`work_start` refuses overlap with another active chat and records the
+immutable base for `work_diff`. Call `work_finish` only after handoff-ready
+work. Never rebase, merge, or remove another task's worktree.
+
 Code relations (never Read graphify-out/graph.json directly -- several MB,
 wastes a full context window):
 ```

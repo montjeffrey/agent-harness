@@ -31,6 +31,8 @@ CONSOLE_SCRIPTS = {
     "agent-harness-telemetry": "harness.telemetry:main",
     "agent-harness-memory": "harness.memory:main",
     "agent-harness-enroll": "harness.enroll:main",
+    "agent-harness-setup": "harness.agent_setup:main",
+    "agent-harness-work": "harness.work:main",
 }
 
 
@@ -50,7 +52,7 @@ requires_build_tooling = pytest.mark.skipif(
 )
 
 
-def test_pyproject_declares_the_four_console_scripts() -> None:
+def test_pyproject_declares_the_console_scripts() -> None:
     data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     scripts = data["project"]["scripts"]
     assert scripts == CONSOLE_SCRIPTS

@@ -19,6 +19,10 @@ pushed tag `vX.Y.Z` doesn't match) before anything is published.
 
 ### Added
 
+- `agent-harness-work` and four MCP work tools (`work_start`, `work_status`,
+  `work_diff`, `work_finish`): local-only task records with session-level path
+  claims, private plans, immutable diff bases, branches, and conditional
+  external worktrees for parallel implementation.
 - `harness/install_cli.py`: the installer's implementation, now a proper
   package module (previously only reachable as the repo-root `install.py`
   script, which was excluded from both the wheel and the sdist). Reads its
@@ -49,9 +53,30 @@ pushed tag `vX.Y.Z` doesn't match) before anything is published.
   was a follow-up `pipx inject`, which does not survive the
   `pipx install --force` that re-running bootstrap performs -- a machine set
   up that way silently lost graph refresh on its next bootstrap.
+- `harness/memory_ingest.py` + `agent-harness-memory ingest` (also wired into
+  `agent-harness-enroll` as step `[2/4] docs`): seeds project memory with
+  pointer entries -- never copies -- from the README, ROADMAP, CHANGELOG, and
+  ADRs, and seeds `scope.md`'s Purpose from the README's opening paragraph so
+  an untouched template doesn't permanently pin the project to deterministic
+  (non-semantic) selection. Idempotent via a content digest stored on each
+  entry, so a rerun only proposes what actually changed.
+- `harness/memory_claims.py` + `agent-harness-memory claim` + MCP
+  `memory_claim`/`memory_release` tools: lets an agent program (`claude`,
+  `codex`, or `agy`) claim an open task or blocker so parallel sessions don't
+  pick up the same work. `memory_tasks` now shows each item's claim status.
+  A claim held more than `CLAIM_STALE_HOURS` (4h) is presumed abandoned and
+  can be taken over by another owner.
 - This changelog.
 
 ### Fixed
+
+- `hooks/claude/memory_context_hook.py` returned silently (an empty string)
+  when a project's memory store was enrolled but had zero entries, making
+  "not wired" and "wired but idle" indistinguishable from the operator's
+  seat. It now reports which case applies, and points at `ingest`/`remember`.
+  `harness/doctor.py`'s memory-store check gained the same distinction --
+  WARN with entry counts instead of a bare INFO for an empty-but-enrolled
+  store.
 
 - `bootstrap.ps1` aborted on stock Windows. The step-5 settings merge used
   `ConvertFrom-Json -AsHashtable`, which is PowerShell 6+ only, so under

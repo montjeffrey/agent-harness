@@ -27,7 +27,8 @@
 #>
 [CmdletBinding()]
 param(
-    [switch]$NoSemantic
+    [switch]$NoSemantic,
+    [string]$Agents = "claude,codex,antigravity"
 )
 
 $ErrorActionPreference = 'Stop'
@@ -56,8 +57,18 @@ Write-Ok "Python $versionText at $python"
 # installed pipx.exe is not callable until a new terminal opens. Going through
 # the module makes this script work in the same shell that just installed it.
 Write-Step "Checking pipx"
-& $python -m pipx --version *> $null
-if ($LASTEXITCODE -ne 0) {
+# PowerShell 7 with `$ErrorActionPreference = 'Stop'` converts a missing
+# `python -m pipx` module into a terminating NativeCommandError even when its
+# output is redirected. Catch that expected probe failure so this bootstrap
+# can perform the installation it advertises on a fresh machine.
+$hasPipx = $false
+try {
+    & $python -m pipx --version *> $null
+    $hasPipx = ($LASTEXITCODE -eq 0)
+} catch {
+    $hasPipx = $false
+}
+if (-not $hasPipx) {
     Write-Warn "pipx not found -- installing for the current user"
     & $python -m pip install --user --quiet pipx
     if ($LASTEXITCODE -ne 0) { throw "failed to install pipx" }
@@ -128,38 +139,22 @@ if (-not $memoryCmd) {
     else { Write-Warn "agent-harness-memory exited non-zero -- check the install above" }
 }
 
-# --- 5. user-level hook + MCP registration --------------------------------
-# Registered once here, in the USER settings, rather than per project. That
-# is what lets `agent-harness-enroll` stay memory-only: the SessionStart
-# context hook and the MCP server apply to every project automatically, and
-# there is one copy of the configuration instead of N drifting copies.
-Write-Step "Registering the SessionStart hook and MCP server (user scope)"
+# --- 5. user-level agent adapters ------------------------------------------
+# The memory and graph server stay agent-neutral; this command only installs
+# the client-specific adapters. It is safe to name just the agent installed on
+# this machine, or all three when one machine hosts all of them.
+Write-Step "Registering user-scope agent adapters ($Agents)"
 $venvPython = Join-Path $venvBin "python.exe"
 
 if (-not (Test-Path $venvPython)) {
-    Write-Warn "could not find the pipx venv python; skipping hook and MCP registration"
+    Write-Warn "could not find the pipx venv python; skipping agent adapter registration"
 } else {
-    # The merge itself lives in `harness.bootstrap_register`, not here.
-    #
-    # It used to be inline PowerShell built on `ConvertFrom-Json -AsHashtable`,
-    # which is PowerShell 6+ only. On stock Windows -- 5.1, no pwsh -- that
-    # threw, and with $ErrorActionPreference = 'Stop' it killed the bootstrap
-    # right after the pipx install had succeeded: every command worked, no
-    # hook was ever registered, and nothing said so. One Python implementation
-    # behaves the same under 5.1, 7, and POSIX, and reuses the JSON validation
-    # and atomic writes the project-scope installer already uses.
-    #
-    # Registered at USER scope, so it covers every project:
-    #   SessionStart -> memory context packet (and optional auto-enrollment)
-    #   PreToolUse   -> block direct reads of a large graph.json
-    #   MCP server   -> agent-harness tools in ~/.claude.json
-    # This is why `agent-harness-enroll` never writes to a project's settings.
-    & $venvPython -m harness.bootstrap_register --harness-root $RepoRoot --python $venvPython
+    & $venvPython -m harness.agent_setup --agents $Agents --harness-root $RepoRoot --python $venvPython
     if ($LASTEXITCODE -ne 0) {
-        throw "hook/MCP registration failed -- see the error above. The harness itself is installed; re-run after resolving it."
+        throw "agent adapter registration failed -- see the error above. The harness itself is installed; re-run after resolving it."
     }
-    Write-Ok "hooks and MCP server registered"
-    Write-Warn "restart Claude Code for the new hooks and MCP server to load"
+    Write-Ok "agent adapters registered"
+    Write-Warn "restart installed agent CLIs so new hooks and MCP servers load"
 
     Write-Host "    To auto-enroll projects under your workspace, set these once:"
     Write-Host '      setx AGENT_HARNESS_AUTO_ENROLL 1'
@@ -169,9 +164,9 @@ if (-not (Test-Path $venvPython)) {
 Write-Host "`nMachine setup complete." -ForegroundColor Green
 Write-Host @"
 
-The SessionStart hook and MCP server are registered once, above, at user
-scope -- they apply to every project you open, so per-project setup only has
-to deal with that project's own memory:
+The selected agent adapters are registered once above at user scope. They
+apply to every project you open, so per-project setup only has to deal with
+that project's own memory:
 
     agent-harness-enroll "C:\path\to\your\project"
 

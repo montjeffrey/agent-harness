@@ -301,8 +301,16 @@ def _get_existing_collection(client: Any, embedding_function: Any = None) -> Any
     try:
         return client.get_collection(name=COLLECTION_NAME, **kwargs)
     except Exception as exc:
+        # Carry the underlying reason in the *message*, not only in `__cause__`:
+        # `probe_index` and the fallback notes render `str(exc)` alone, so a
+        # cause left only on the chain is invisible to the person reading the
+        # packet or the doctor report. A collection that exists but refuses to
+        # open -- Chroma rejects a query-time `embedding_function` whose name
+        # differs from the persisted one -- otherwise reads as a missing store
+        # and invites a rebuild, which cannot fix it.
         raise FileNotFoundError(
-            f"no collection named '{COLLECTION_NAME}' in this semantic index"
+            f"could not open collection '{COLLECTION_NAME}' in this semantic index"
+            f" ({type(exc).__name__}: {exc})"
         ) from exc
 
 

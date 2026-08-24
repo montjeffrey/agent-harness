@@ -204,6 +204,20 @@ def resolve_backend(cli_backend: str | None) -> str:
     return cli_backend or os.environ.get("HARNESS_GRAPH_BACKEND") or AUTO_BACKEND
 
 
+def has_configured_label_backend(backend: str) -> bool:
+    """Whether it is safe to request LLM-based community labels.
+
+    Graphify's AST ``update`` command is local and useful without a model.
+    Community naming is not: calling it with no configured credential can
+    either fail or prompt a client to select a paid provider.  Keep the
+    default lifecycle local-first and run the label pass only after an
+    explicit backend was selected or a harness-supported key is present.
+    """
+    if backend != AUTO_BACKEND:
+        return True
+    return any(os.environ.get(env_var) for env_var in BACKEND_ENV_VARS.values())
+
+
 def build_graphify_command(subcommand: str, repo_root: Path, backend: str) -> list[str]:
     """Assemble a `python -m graphify <subcommand> <repo_root> [--backend X]`
     argv list (list form -- never shell=True -- so paths with spaces/Unicode
@@ -289,6 +303,13 @@ def refresh(repo_root: Path, backend: str, full: bool) -> None:
             "environment instead: `pipx inject agent-harness-kit graphifyy`."
         )
 
+    if full and backend == AUTO_BACKEND and not has_configured_label_backend(backend):
+        raise SystemExit(
+            "full semantic extraction requires an explicit configured backend. "
+            "Set HARNESS_GRAPH_BACKEND and its API key, then retry; for a free "
+            "local AST graph, rerun without --full."
+        )
+
     with scoped_api_key(backend):
         os.environ["GRAPHIFY_VIZ_NODE_LIMIT"] = VIZ_NODE_LIMIT
 
@@ -296,7 +317,13 @@ def refresh(repo_root: Path, backend: str, full: bool) -> None:
             run_step(build_graphify_command("extract", repo_root, backend), "graphify extract")
 
         run_step(build_graphify_command("update", repo_root, backend), "graphify update")
-        run_step(build_graphify_command("label", repo_root, backend), "graphify label")
+        if has_configured_label_backend(backend):
+            run_step(build_graphify_command("label", repo_root, backend), "graphify label")
+        else:
+            log.info(
+                "no LLM graph backend configured; leaving community labels as local placeholders "
+                "(set HARNESS_GRAPH_BACKEND to enable naming)"
+            )
 
     update_semantic_index(repo_root)
 

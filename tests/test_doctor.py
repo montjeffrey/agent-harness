@@ -454,3 +454,63 @@ def test_run_checks_includes_telemetry_check(tmp_path: Path) -> None:
     results = doctor.run_checks()
     names = [r.name for r in results]
     assert "telemetry" in names
+
+
+# --- memory store presence -------------------------------------------------
+#
+# The pair below is the point: an empty store and an unenrolled project must
+# land on different levels, so `doctor` can say which one you are looking at.
+
+
+def test_memory_store_warns_when_enrolled_but_empty(tmp_path: Path) -> None:
+    from harness import memory_store
+
+    memory_store.init_project(tmp_path)
+
+    result = doctor.check_memory_store(tmp_path)
+
+    assert result.level == "WARN"
+    assert "enrolled but empty" in result.detail
+
+
+def test_memory_store_is_info_when_not_enrolled(tmp_path: Path) -> None:
+    result = doctor.check_memory_store(tmp_path)
+
+    assert result.level == "INFO"
+    assert "not enrolled" in result.detail
+
+
+def test_memory_store_passes_once_something_is_recorded(tmp_path: Path) -> None:
+    from harness import memory_store
+
+    memory_store.init_project(tmp_path)
+    memory_store.append_entries(
+        [{
+            "type": "decision",
+            "scope": "project",
+            "status": "proposed",
+            "confidence": "inferred",
+            "source": {"manual": True},
+            "summary": "chose the boring option",
+        }],
+        directory=memory_store.project_memory_dir(tmp_path),
+    )
+
+    result = doctor.check_memory_store(tmp_path)
+
+    assert result.level == "PASS"
+    assert "1 project entries" in result.detail
+
+
+def test_memory_store_is_info_without_a_project() -> None:
+    assert doctor.check_memory_store(None).level == "INFO"
+
+
+def test_memory_store_check_is_wired_into_run_checks(tmp_path: Path) -> None:
+    from harness import memory_store
+
+    memory_store.init_project(tmp_path)
+
+    names = [r.name for r in doctor.run_checks(tmp_path)]
+
+    assert "memory store" in names
