@@ -8,7 +8,7 @@ nothing is ever summarized by an AI model in this layer.
 Two storage scopes (see the design spec under
 ``docs/superpowers/specs/2026-07-22-portable-hierarchical-memory-design.md``):
 
-    <project>/.agent-harness/        project-owned, committed with the repo
+    <project>/.agent-harness/        project-owned, machine-local, never in git
       scope.md                       purpose, boundaries, acceptance criteria
       memory/active.md               bounded weekly working context
       memory/durable.md              stable project knowledge
@@ -19,6 +19,11 @@ Two storage scopes (see the design spec under
       registry.json                  stable project ids -> locations
       durable.md                     reusable cross-project knowledge
       inbox.jsonl                    machine-scope proposals
+
+Project storage sits beside the code but is excluded from git through the
+repository's private ``.git/info/exclude`` (ADR 0004), so memory never shows
+up in anyone's status, diff, or commit -- not even as a ``.gitignore`` change.
+The machine registry, not git, is what links projects to each other.
 
 Entry contract (schema 1) -- one JSON object per line:
 
@@ -47,6 +52,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -102,12 +108,40 @@ _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 
 @dataclass(frozen=True)
+class ExcludeResult:
+    """Outcome of `ensure_git_exclude` for one repository.
+
+    `status` is one of:
+
+        not-git   the project is not inside a git repository; nothing done
+        present   the exclusion was already there; nothing written
+        added     the exclusion line was appended
+        failed    the exclude file could not be read or written (see `note`)
+
+    `path` is the exclude file consulted, or None for ``not-git``.
+    """
+
+    status: str
+    path: Path | None = None
+    note: str = ""
+
+    @property
+    def changed(self) -> bool:
+        return self.status == "added"
+
+
+@dataclass(frozen=True)
 class InitResult:
-    """Outcome of `init_project`: the stable id plus what was newly created."""
+    """Outcome of `init_project`: the stable id plus what was newly created.
+
+    `exclude` reports what happened to the repository's git exclusion; it is
+    informational, never a failure -- see `ensure_git_exclude`.
+    """
 
     project_id: str
     root: Path
     created: tuple[str, ...]
+    exclude: ExcludeResult = ExcludeResult("not-git")
 
 
 def machine_memory_dir() -> Path:
@@ -481,6 +515,124 @@ def project_id_for(project_root: Path) -> str:
     return f"{slug}-{digest}"
 
 
+def register_project(project_root: Path, now: datetime | None = None) -> str:
+    """Record `project_root` in the machine registry and return its id.
+
+    Upsert semantics: `first_seen` is kept from any existing record so the
+    registry preserves when a project was first met, while `last_seen` always
+    advances to `now`. The write goes through `save_registry`, so it is
+    atomic.
+    """
+    now = now or datetime.now(timezone.utc)
+    resolved = Path(project_root).resolve()
+    project_id = project_id_for(resolved)
+    registry = load_registry()
+    stamp = format_ts(now)
+    existing = registry["projects"].get(project_id, {})
+    registry["projects"][project_id] = {
+        **existing,
+        "path": str(resolved),
+        "name": resolved.name,
+        "first_seen": existing.get("first_seen", stamp),
+        "last_seen": stamp,
+    }
+    save_registry(registry)
+    return project_id
+
+
+def touch_project(project_root: Path, now: datetime | None = None) -> bool:
+    """Refresh `last_seen` for an already-registered project.
+
+    Returns True when the registry was updated. Unlike `register_project`
+    this never adds a record: touching is a side effect of ordinary commands
+    that run in whatever directory the operator happens to be in, and
+    enrolling every such directory would fill the registry with noise. Only
+    `init`/`enroll` decide what belongs in it.
+
+    Registry upkeep must never be the reason a read-only command fails, so a
+    store that cannot be written (read-only home, vanished directory) is
+    reported as "not touched" rather than raised.
+    """
+    project_id = project_id_for(project_root)
+    registry = load_registry()
+    record = registry["projects"].get(project_id)
+    if not isinstance(record, dict):
+        return False
+    stamp = format_ts(now or datetime.now(timezone.utc))
+    if record.get("last_seen") == stamp:
+        return False
+    record["last_seen"] = stamp
+    try:
+        save_registry(registry)
+    except OSError:
+        return False
+    return True
+
+
+@dataclass(frozen=True)
+class PruneResult:
+    """Outcome of `prune_registry`.
+
+    `removed` holds `(project_id, path, reason)` triples in registry order so
+    a caller can report exactly what went and why; `kept` is what survived.
+    """
+
+    removed: tuple[tuple[str, str, str], ...]
+    kept: tuple[str, ...]
+    dry_run: bool
+
+    @property
+    def changed(self) -> bool:
+        return bool(self.removed)
+
+
+def prune_registry(
+    ids: Iterable[str] = (), dry_run: bool = False
+) -> PruneResult:
+    """Drop registry records whose path is gone, plus the named `ids`.
+
+    A record is stale when its recorded `path` no longer resolves to an
+    existing directory -- the project was deleted, renamed, or lived on a
+    drive that is not mounted. Named ids are removed regardless of whether
+    their path still exists, which is how an operator retires a project they
+    keep on disk but no longer want memory to reason about.
+
+    Raises `LookupError` when a named id is not in the registry: silently
+    succeeding on a typo would report "nothing to do" for a project the
+    operator believes they just retired.
+    """
+    named = list(dict.fromkeys(ids))
+    registry = load_registry()
+    projects = registry["projects"]
+
+    unknown = [pid for pid in named if pid not in projects]
+    if unknown:
+        raise LookupError(
+            "not in the registry: " + ", ".join(sorted(unknown))
+        )
+
+    removed: list[tuple[str, str, str]] = []
+    kept: list[str] = []
+    for project_id, record in projects.items():
+        path = str(record.get("path", "")) if isinstance(record, dict) else ""
+        if project_id in named:
+            removed.append((project_id, path, "named"))
+        elif not path or not Path(path).is_dir():
+            removed.append((project_id, path, "missing"))
+        else:
+            kept.append(project_id)
+
+    if removed and not dry_run:
+        registry["projects"] = {
+            pid: rec for pid, rec in projects.items() if pid in set(kept)
+        }
+        save_registry(registry)
+
+    return PruneResult(
+        removed=tuple(removed), kept=tuple(kept), dry_run=dry_run
+    )
+
+
 # --- project initialization ----------------------------------------------
 
 _SCOPE_TEMPLATE = """# Project scope
@@ -567,16 +719,128 @@ def init_project(project_root: Path, now: datetime | None = None) -> InitResult:
             path.write_text(template, encoding="utf-8")
             created.append(path.relative_to(root).as_posix())
 
-    project_id = project_id_for(root)
-    registry = load_registry()
-    stamp = format_ts(now)
-    existing = registry["projects"].get(project_id, {})
-    registry["projects"][project_id] = {
-        "path": str(Path(root).resolve()),
-        "name": Path(root).resolve().name,
-        "first_seen": existing.get("first_seen", stamp),
-        "last_seen": stamp,
-    }
-    save_registry(registry)
+    project_id = register_project(root, now=now)
+    exclude = ensure_git_exclude(root)
 
-    return InitResult(project_id=project_id, root=root, created=tuple(created))
+    return InitResult(
+        project_id=project_id, root=root, created=tuple(created), exclude=exclude
+    )
+
+
+# --- git exclusion ---------------------------------------------------------
+
+# The directory name as it appears in git pattern files. No leading slash so
+# it also covers a project enrolled from a subdirectory of a larger repo, and
+# the trailing slash so only a directory of that name is matched.
+EXCLUDE_LINE = ".agent-harness/"
+
+_EXCLUDE_COMMENT = (
+    "# agent-harness memory is machine-local, never shared through git (ADR 0004)"
+)
+
+
+def _git_stdout(directory: Path, *args: str) -> str | None:
+    """Run one fixed-shape git command; stdout on success, None otherwise.
+
+    ``stdin=DEVNULL`` matters: `init_project` also runs under the stdio MCP
+    server and the SessionStart hook, whose stdin is a live pipe. A git child
+    that inherits it blocks until the timeout instead of returning at once.
+    A missing git binary, a timeout, or a non-zero exit all read as "no
+    answer" -- memory setup must never depend on git being present.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(directory), *args],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def git_common_dir(project_root: Path) -> Path | None:
+    """The repository's common git directory for `project_root`, or None.
+
+    Resolved through git rather than assumed to be ``<root>/.git`` because
+    ``.git`` is a *file* in a linked worktree or a submodule, pointing at the
+    real directory. ``info/exclude`` is read from the common directory, so a
+    worktree's exclusion is written where every worktree of that repository
+    will honour it. Returns None when `project_root` has no ``.git`` entry at
+    all (the cheap common case) or git cannot resolve it.
+    """
+    root = Path(project_root)
+    if not (root / ".git").exists():
+        return None
+    out = _git_stdout(root, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    if not out:
+        return None
+    return Path(out).resolve()
+
+
+def _exclusion_present(text: str) -> bool:
+    """Whether some non-comment line of a git pattern file already covers
+    ``.agent-harness/``, in any of the spellings git treats the same way."""
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.lstrip("/").rstrip("/") == ".agent-harness":
+            return True
+    return False
+
+
+def ensure_git_exclude(project_root: Path) -> ExcludeResult:
+    """Make sure the repository around `project_root` ignores ``.agent-harness/``.
+
+    The line goes into the repository's private ``.git/info/exclude`` and
+    never into ``.gitignore``: the exclusion itself must not surface as a
+    diff in anyone else's work, which a shared ``.gitignore`` edit would.
+    Idempotent -- an existing line, however spelled, is left alone and the
+    file is otherwise untouched. A project that is not in a git repository
+    gets ``not-git`` and nothing on disk changes.
+
+    Never raises. Memory storage must exist even when the exclude file cannot
+    be written (read-only checkout, odd permissions); the failure is reported
+    in the result for the caller to surface as a note.
+    """
+    git_dir = git_common_dir(project_root)
+    if git_dir is None:
+        return ExcludeResult("not-git")
+
+    exclude = git_dir / "info" / "exclude"
+    try:
+        existing = exclude.read_text(encoding="utf-8") if exclude.is_file() else ""
+        if _exclusion_present(existing):
+            return ExcludeResult("present", exclude)
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        with exclude.open("a", encoding="utf-8") as fh:
+            if existing and not existing.endswith("\n"):
+                fh.write("\n")
+            fh.write(f"{_EXCLUDE_COMMENT}\n{EXCLUDE_LINE}\n")
+    except OSError as exc:
+        return ExcludeResult("failed", exclude, f"could not update {exclude}: {exc}")
+    return ExcludeResult("added", exclude)
+
+
+def tracked_memory_files(project_root: Path) -> tuple[str, ...]:
+    """Paths under ``.agent-harness/`` that git currently tracks (or has
+    staged), relative to `project_root`; empty when none or not a repo.
+
+    An exclude line only keeps *untracked* files out of git. A directory
+    that was committed before the exclusion existed stays tracked until
+    someone runs ``git rm -r --cached .agent-harness`` -- a visible history
+    change this module deliberately never performs on the caller's behalf.
+    """
+    root = Path(project_root)
+    if not (root / ".git").exists():
+        return ()
+    out = _git_stdout(root, "ls-files", "-z", "--", ".agent-harness")
+    if not out:
+        return ()
+    return tuple(p for p in out.split("\0") if p)

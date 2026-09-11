@@ -36,12 +36,29 @@ exception queue. It never auto-accepts an agent's conclusion.
 
 **Coordinate before implementation.** After the user has authorized a
 non-trivial code change, call `work_status` and then `work_start` before
-editing. Give `work_start` this chat's unique session id and one exact
-repository-relative path per line. It refuses files already claimed by an
-active chat, records the immutable diff base, and returns the branch/worktree
-to use. Call `work_diff` before handoff and `work_finish` only when the task
-is complete. Do not use these tools for read-only investigation, and never
-rebase, merge, or delete a worktree on another task's behalf.
+editing. Give `work_start` the session id printed at session start (the
+`_Session ..._` line) and one exact repository-relative path per line. It
+refuses files already claimed by an active session, records the immutable diff
+base, and returns the branch/worktree to use plus a task-scoped memory packet.
+In Claude Code the claim is enforced: an `Edit` or `Write` to a path another
+active session claims is refused with the owner's task id -- choose another
+path or wait for that task's `work_finish`; your own claims never block you.
+Call `work_diff` before handoff and `work_finish` only when the task is
+complete; finish records the branch, base, and final commit and releases the
+claim -- it never rebases, merges, or removes a worktree. Do not use these
+tools for read-only investigation.
+
+**Retrieve narrowly, then follow up.** `memory_context` takes `tags`, `types`,
+and `exclude`; filtering happens before ranking, so a narrow call is also a
+cheaper one. For a specific question mid-task use `memory_search` instead of a
+second packet -- it returns ranked entries with no framing, and its `projects`
+parameter reads other registered projects on this machine (`current`, `all`,
+`related`, or an explicit list).
+
+**Progress is captured for you.** At the end of every turn a hook proposes an
+entry for each new commit and each finished task, with the commit SHA as its
+source. These are evidence pointers for review, not knowledge: reject the ones
+that only restate git, and do not re-record commits yourself.
 
 If a project has no memory store yet, `memory_context` returns an empty packet
 with a warning rather than an error -- that is normal, not a failure.

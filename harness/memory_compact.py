@@ -30,6 +30,12 @@ the inbox is spliced *last*: archive, then durable, then active, then inbox. A
 crash at any earlier point loses only derived work that the next run redoes.
 Had the inbox been rewritten first, the same crash would lose entries.
 
+**When to run it** is answered by `compaction_due`, which reads the
+``Last compacted:`` stamp `render_active` writes into `active.md` and
+compares it with `COMPACT_INTERVAL_DAYS`. `memory_maintain.maintain` is the
+unattended caller: it compacts only when due, so running it on every
+session start costs one file read the rest of the week.
+
 **Project scope only.** `compact()` operates on `project_memory_dir`. The
 machine inbox that `remember --scope machine` feeds has no compaction pass yet,
 so the half of the store shared across every project still grows without
@@ -54,7 +60,7 @@ import os
 import re
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Iterator, Mapping, Sequence
 
@@ -76,7 +82,19 @@ WORK_TYPES: frozenset[str] = frozenset({"task", "blocker"})
 LOCK_NAME = ".compact.lock"
 LOCK_STALE_SECONDS = 900
 
+# How often a project is due for compaction. Weekly is the design's cadence
+# (the archive is filed by ISO week); the override exists so an operator can
+# tighten it on a busy store or set it to 0 to make `maintain` compact on
+# every run. Read through `compact_interval_days`, the same shape as
+# `memory_index.adaptive_min_entries`: an unset or unparseable value falls
+# back to the default rather than failing the command.
+COMPACT_INTERVAL_DAYS = 7
+COMPACT_INTERVAL_ENV = "AGENT_HARNESS_COMPACT_INTERVAL_DAYS"
+
 _ENTRY_ID_RE = re.compile(r"mem-\d{4}-\d{2}-\d{2}-\d{3,}")
+# The stamp `render_active` writes; reading it back is how "when did this
+# last run" is answered without a second state file that could disagree.
+_LAST_COMPACTED_RE = re.compile(r"^Last compacted: (\S+)", re.MULTILINE)
 _PUNCTUATION_RE = re.compile(r"[^\w\s]")
 _WHITESPACE_RE = re.compile(r"\s+")
 
@@ -252,6 +270,76 @@ def render_active(entries: Sequence[Mapping], week: str, now: datetime) -> tuple
         if len(text) <= ACTIVE_MAX_CHARS or not chosen:
             return text, len(chosen), omitted
         chosen.pop()
+
+
+# --- due-ness -------------------------------------------------------------
+
+
+def compact_interval_days() -> int:
+    """Days between compactions before a project counts as due."""
+    try:
+        return max(0, int(os.environ[COMPACT_INTERVAL_ENV]))
+    except (KeyError, ValueError):
+        return COMPACT_INTERVAL_DAYS
+
+
+def last_compacted(directory: Path) -> datetime | None:
+    """When `directory` was last compacted, from `active.md`'s own stamp.
+
+    None when the project has never been compacted (the file is still the
+    `init_project` template, or was hand-rewritten without the line) or the
+    stamp cannot be parsed. Both read as "never", which errs toward running
+    a pass that is safe to repeat rather than skipping one that is owed.
+    """
+    try:
+        text = (Path(directory) / "active.md").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = _LAST_COMPACTED_RE.search(text)
+    if not match:
+        return None
+    try:
+        stamp = datetime.fromisoformat(match.group(1).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp.astimezone(timezone.utc)
+
+
+@dataclass(frozen=True)
+class DueStatus:
+    """Whether a project is owed a compaction pass, and why."""
+
+    due: bool
+    reason: str
+    last: datetime | None
+    interval_days: int
+
+
+def compaction_due(directory: Path, now: datetime | None = None) -> DueStatus:
+    """Decide whether `directory` is due, from the stamp and the interval.
+
+    Pure file arithmetic: no lock is taken and nothing is written, so this
+    is safe to call from `status` on every invocation. A never-compacted
+    store is due immediately -- the pass is idempotent and stamps
+    `active.md`, so the next call answers "not due" until the interval has
+    elapsed again.
+    """
+    now = now or datetime.now(timezone.utc)
+    interval = compact_interval_days()
+    last = last_compacted(directory)
+    if last is None:
+        return DueStatus(True, "never compacted", None, interval)
+    age = now - last
+    days = age.days
+    if age >= timedelta(days=interval):
+        return DueStatus(
+            True, f"last compacted {days} day(s) ago, interval is {interval}", last, interval
+        )
+    return DueStatus(
+        False, f"compacted {days} day(s) ago, next due in {interval - days} day(s)", last, interval
+    )
 
 
 # --- locking --------------------------------------------------------------

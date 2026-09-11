@@ -489,3 +489,297 @@ def test_context_cli_accepts_no_graph(scoped: Path, capsys) -> None:
     _add(scoped, "Rewrote build_packet.")
     assert memory.main(["context", "--project", str(scoped), "--no-graph"]) == 0
     assert "# Project context:" in capsys.readouterr().out
+
+
+# --- filters: narrowing happens before ranking ----------------------------
+
+
+def test_parse_filter_lowercases_trims_and_deduplicates() -> None:
+    f = memory_context.parse_filter(" Retry, http ,retry", "Decision", "mem-2026-08-07-001, HTTP")
+    assert f.tags == ("retry", "http")
+    assert f.types == ("decision",)
+    assert f.exclude == ("mem-2026-08-07-001", "http")
+    assert not f.is_empty
+    assert memory_context.parse_filter("", "", "").is_empty
+
+
+def test_parse_filter_rejects_an_unknown_type_instead_of_matching_nothing() -> None:
+    with pytest.raises(ValueError, match="unknown type"):
+        memory_context.parse_filter(types="decsion")
+
+
+def test_entry_filter_semantics() -> None:
+    f = memory_context.EntryFilter(tags=("retry",), types=("decision",), exclude=("mem-x", "legacy"))
+    base = {"id": "mem-1", "type": "decision", "tags": ["Retry"]}
+    assert f.matches(base)
+    assert not f.matches({**base, "tags": ["http"]})
+    assert not f.matches({**base, "type": "lesson"})
+    assert not f.matches({**base, "id": "mem-x"})
+    assert not f.matches({**base, "tags": ["retry", "legacy"]})
+    assert memory_context.EntryFilter().matches({"id": "anything"})
+
+
+def test_a_filter_removes_entries_before_ranking_and_says_so(scoped: Path) -> None:
+    _add(scoped, "Retry policy uses exponential backoff", tags=["retry"])
+    _add(scoped, "Logging is local JSONL", tags=["logging"])
+    _add(scoped, "An open retry task", type="task", status="proposed",
+         confidence="inferred", source=None, tags=["retry"])
+    packet = memory_context.build_packet(
+        scoped, entry_filter=memory_context.parse_filter(tags="retry"), now=NOW
+    )
+    text = memory_context.render_markdown(packet)
+    assert "exponential backoff" in text
+    assert "An open retry task" in text  # open work is filtered too, not just knowledge
+    assert "local JSONL" not in text
+    assert "_Note: filters applied (tags: retry); 1 entry excluded before ranking_" in text
+
+
+def test_warnings_describe_the_store_not_the_filtered_slice(scoped: Path) -> None:
+    _add(scoped, "A proposal about logging", status="proposed", confidence="inferred",
+         source=None, tags=["logging"])
+    _add(scoped, "A retry decision", tags=["retry"])
+    packet = memory_context.build_packet(
+        scoped, entry_filter=memory_context.parse_filter(tags="retry"), now=NOW
+    )
+    assert any("1 entry awaiting review" in w for w in packet.warnings)
+
+
+def test_a_filter_matching_nothing_is_a_visible_warning(scoped: Path) -> None:
+    _add(scoped, "A retry decision", tags=["retry"])
+    packet = memory_context.build_packet(
+        scoped, entry_filter=memory_context.parse_filter(tags="nosuchtag"), now=NOW
+    )
+    assert any("filters matched no entries" in w for w in packet.warnings)
+    assert "1 entry excluded before ranking" in " ".join(packet.notes)
+
+
+def test_an_empty_filter_leaves_the_packet_byte_identical(scoped: Path) -> None:
+    _add(scoped, "A retry decision", tags=["retry"])
+    plain = memory_context.render_markdown(memory_context.build_packet(scoped, now=NOW))
+    filtered = memory_context.render_markdown(
+        memory_context.build_packet(scoped, entry_filter=memory_context.EntryFilter(), now=NOW)
+    )
+    assert plain == filtered
+
+
+def test_load_entries_counts_what_the_gate_can_rank(scoped: Path, fake_home: Path) -> None:
+    for n in range(5):
+        _add(scoped, f"retry fact {n}", tags=["retry"])
+    _add(scoped, "unrelated", tags=["other"])
+    machine = fake_home / ".agent-harness" / "memory"
+    machine.mkdir(parents=True, exist_ok=True)
+    memory_store.append_entries(
+        [{"type": "lesson", "scope": "machine", "status": "accepted", "confidence": "confirmed",
+          "source": {"manual": True}, "summary": "machine retry lesson", "tags": ["retry"]}],
+        directory=machine, now=NOW,
+    )
+    loaded = memory_context.load_entries(scoped, memory_context.parse_filter(tags="retry"))
+    assert loaded.count == 6
+    assert loaded.excluded == 1
+    assert len(loaded.project_all) == 6 and len(loaded.machine_all) == 1
+
+    project_only = memory_context.load_entries(scoped, include_machine=False)
+    assert project_only.machine == () and project_only.machine_all == ()
+    assert project_only.count == 6
+
+
+def test_a_preloaded_store_is_used_instead_of_reading_again(scoped: Path) -> None:
+    _add(scoped, "A retry decision", tags=["retry"])
+    loaded = memory_context.load_entries(scoped, memory_context.parse_filter(tags="retry"))
+    _add(scoped, "Recorded after the load", tags=["retry"])
+    packet = memory_context.build_packet(scoped, loaded=loaded, now=NOW)
+    text = memory_context.render_markdown(packet)
+    assert "A retry decision" in text
+    assert "Recorded after the load" not in text
+
+
+# --- focused search -------------------------------------------------------
+
+
+def _entry(id: str, summary: str, **overrides) -> dict:
+    return {
+        "id": id, "type": "decision", "scope": "project", "status": "accepted",
+        "confidence": "confirmed", "summary": summary, "ts": "2026-08-07T12:00:00Z",
+        **overrides,
+    }
+
+
+def test_search_ranks_by_the_query_and_labels_each_hit_with_its_source() -> None:
+    result = memory_context.search(
+        "retry backoff",
+        [
+            ("alpha", [_entry("mem-1", "Logging is JSONL"), _entry("mem-2", "Retry uses backoff")]),
+            ("beta", [_entry("mem-3", "Beta retry backoff too")]),
+        ],
+        limit=5,
+    )
+    assert [(h.source, h.entry["id"]) for h in result.hits] == [
+        ("alpha", "mem-2"), ("beta", "mem-3"), ("alpha", "mem-1"),
+    ]
+    text = memory_context.render_search_markdown(result)
+    assert "- [alpha] `mem-2` [decision] Retry uses backoff" in text
+    assert "- [beta] `mem-3`" in text
+    assert "ranked: alpha=deterministic, beta=deterministic" in text
+    assert "## " not in text  # no packet sections
+
+
+def test_search_merges_sources_by_rank_current_project_first() -> None:
+    result = memory_context.search(
+        "x",
+        [
+            ("current", [_entry("c1", "x one"), _entry("c2", "x two")]),
+            ("other", [_entry("o1", "x uno"), _entry("o2", "x dos")]),
+        ],
+        limit=3,
+    )
+    assert [h.entry["id"] for h in result.hits] == ["c1", "o1", "c2"]
+
+
+def test_search_limit_is_clamped_and_the_clamp_is_stated() -> None:
+    entries = [_entry(f"mem-{n}", f"fact {n}") for n in range(40)]
+    result = memory_context.search("fact", [("p", entries)], limit=100, max_chars=100_000)
+    assert len(result.hits) == memory_context.SEARCH_MAX_LIMIT
+    assert any("capped at 25" in n for n in result.notes)
+    assert result.limit == memory_context.SEARCH_MAX_LIMIT
+
+
+def test_search_never_shows_a_closed_entry_or_a_partial_line() -> None:
+    entries = [
+        _entry("mem-1", "resolved task", type="task", status="resolved"),
+        _entry("mem-2", "superseded", status="superseded"),
+        _entry("mem-3", "rejected", status="rejected"),
+        _entry("mem-4", "live " + "x" * 200),
+        _entry("mem-5", "also live " + "y" * 200),
+    ]
+    result = memory_context.search("live", [("p", entries)], limit=8, max_chars=250)
+    assert [h.entry["id"] for h in result.hits] == ["mem-4"]
+    assert result.omitted == 1
+    text = memory_context.render_search_markdown(result)
+    assert "_... 1 more omitted for budget._" in text
+    assert "mem-5" not in text
+
+
+def test_search_says_when_nothing_matched_and_skips_empty_sources() -> None:
+    calls: list[str] = []
+
+    def resolver(source: str, count: int):
+        calls.append(source)
+        return memory_context.deterministic_selector, "deterministic", ["ranked plainly"]
+
+    result = memory_context.search(
+        "anything", [("empty", []), ("full", [_entry("m", "one")])], resolver=resolver
+    )
+    assert calls == ["full"]
+    assert ("empty", "no live entries") in result.strategies
+    assert result.notes == ("full: ranked plainly",)
+    nothing = memory_context.render_search_markdown(memory_context.search("q", [("empty", [])]))
+    assert "No live entries matched" in nothing
+
+
+def test_identical_source_notes_are_stated_once_with_every_source_named() -> None:
+    def resolver(source: str, count: int):
+        return memory_context.deterministic_selector, "deterministic", ["semantic selection skipped"]
+
+    result = memory_context.search(
+        "q", [("a", [_entry("1", "q")]), ("b", [_entry("2", "q")])], resolver=resolver
+    )
+    assert result.notes == ("a, b: semantic selection skipped",)
+
+
+# --- cross-project resolution --------------------------------------------
+
+
+def _registry(*projects: tuple[str, Path]) -> dict:
+    return {
+        "schema": 1,
+        "projects": {pid: {"path": str(path), "name": path.name} for pid, path in projects},
+    }
+
+
+def test_current_is_the_project_alone_without_touching_the_registry(project: Path) -> None:
+    scope = memory_context.resolve_search_projects("current", project, None)  # type: ignore[arg-type]
+    assert scope.projects == ((memory_store.project_id_for(project), project),)
+    assert scope.notes == ()
+
+
+def test_an_empty_or_missing_registry_narrows_to_current_with_a_note(project: Path) -> None:
+    empty = {"schema": 1, "projects": {}}  # what load_registry returns for missing/corrupt too
+    for spec in ("all", "related", "someone-11111111"):
+        scope = memory_context.resolve_search_projects(spec, project, empty)
+        assert len(scope.projects) == 1
+        assert any("registry missing, unreadable, or empty" in n for n in scope.notes)
+
+
+def test_all_with_only_the_current_project_registered_says_so(project: Path) -> None:
+    scope = memory_context.resolve_search_projects("all", project, memory_store.load_registry())
+    assert len(scope.projects) == 1
+    assert any("no other projects registered on this machine" in n for n in scope.notes)
+
+
+def test_all_reads_every_registered_project_and_reports_vanished_paths(
+    project: Path, tmp_path: Path
+) -> None:
+    other = tmp_path / "other"
+    other.mkdir()
+    gone = tmp_path / "gone"
+    registry = _registry(
+        (memory_store.project_id_for(project), project),
+        ("other-11111111", other),
+        ("gone-22222222", gone),
+    )
+    scope = memory_context.resolve_search_projects("all", project, registry)
+    assert [pid for pid, _ in scope.projects] == [
+        memory_store.project_id_for(project), "other-11111111"
+    ]
+    assert any("gone-22222222" in n and "no longer exists" in n for n in scope.notes)
+
+
+def test_an_explicit_list_skips_unknown_ids_visibly(project: Path, tmp_path: Path) -> None:
+    other = tmp_path / "other"
+    other.mkdir()
+    registry = _registry(("other-11111111", other))
+    scope = memory_context.resolve_search_projects(
+        "other-11111111, nope-00000000, other-11111111", project, registry
+    )
+    assert [pid for pid, _ in scope.projects][1:] == ["other-11111111"]
+    assert any("'nope-00000000' is not registered" in n for n in scope.notes)
+
+
+def test_related_resolves_through_accepted_relationships_only(
+    project: Path, tmp_path: Path
+) -> None:
+    other = tmp_path / "other"
+    other.mkdir()
+    third = tmp_path / "third"
+    third.mkdir()
+    current_id = memory_store.project_id_for(project)
+    registry = _registry(
+        (current_id, project), ("other-11111111", other), ("third-33333333", third)
+    )
+    relationships = [
+        {"type": "relationship", "status": "accepted", "scope": "machine",
+         "summary": "shares a client", "projects": [current_id, "other-11111111"]},
+        {"type": "relationship", "status": "proposed", "scope": "machine",
+         "summary": "maybe linked to third-33333333"},
+    ]
+    scope = memory_context.resolve_search_projects("related", project, registry, relationships)
+    assert [pid for pid, _ in scope.projects] == [current_id, "other-11111111"]
+
+    none = memory_context.resolve_search_projects("related", project, registry, [])
+    assert len(none.projects) == 1
+    assert any("no accepted relationship" in n for n in none.notes)
+
+
+def test_related_project_ids_reads_every_plausible_field() -> None:
+    registered = ["me-00000000", "a-11111111", "b-22222222", "c-33333333", "d-44444444"]
+    entries = [
+        {"type": "relationship", "status": "accepted", "summary": "x",
+         "source": {"project": "me-00000000", "related_project": "a-11111111"}},
+        {"type": "relationship", "status": "accepted", "summary": "depends on b-22222222"},
+        {"type": "relationship", "status": "accepted", "summary": "x", "tags": ["c-33333333"]},
+        {"type": "relationship", "status": "accepted", "summary": "x", "projects": ["unknown-99999999"]},
+        {"type": "decision", "status": "accepted", "summary": "names d-44444444 but is not a relationship"},
+    ]
+    assert memory_context.related_project_ids(entries, registered, "me-00000000") == [
+        "a-11111111", "b-22222222", "c-33333333"
+    ]

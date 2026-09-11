@@ -37,16 +37,42 @@ def _commands(settings: dict, event: str) -> list[str]:
 
 
 class TestMergeHooks:
-    def test_registers_both_hooks_into_empty_settings(self, harness_root: Path) -> None:
+    def test_registers_every_user_scope_hook_into_empty_settings(
+        self, harness_root: Path
+    ) -> None:
         merged, actions = br.merge_hooks({}, harness_root, "/py")
 
         assert _commands(merged, "SessionStart") == [
             f"/py {harness_root.as_posix()}/hooks/claude/memory_context_hook.py"
         ]
         assert _commands(merged, "PreToolUse") == [
-            f"/py {harness_root.as_posix()}/hooks/claude/graph_read_guard.py"
+            f"/py {harness_root.as_posix()}/hooks/claude/graph_read_guard.py",
+            f"/py {harness_root.as_posix()}/hooks/claude/claim_guard.py",
         ]
+        # Progress capture is registered on both events deliberately: Stop
+        # fires per turn so work survives a crash, SessionEnd sweeps up
+        # commits made after the final turn. One idempotent script serves both.
+        progress = f"/py {harness_root.as_posix()}/hooks/claude/progress_capture_hook.py"
+        assert _commands(merged, "Stop") == [progress]
+        assert _commands(merged, "SessionEnd") == [progress]
         assert all(action.endswith("registered") for action in actions)
+
+    def test_only_the_deny_capable_guards_pin_a_timeout(self, harness_root: Path) -> None:
+        """A hook that can block an edit must not be able to hang it forever."""
+        merged, _ = br.merge_hooks({}, harness_root, "/py")
+
+        timeouts = {
+            hook["command"].rsplit("/", 1)[-1]: hook.get("timeout")
+            for entries in merged["hooks"].values()
+            for entry in entries
+            for hook in entry["hooks"]
+        }
+        assert timeouts["claim_guard.py"] == 10
+        assert timeouts["progress_capture_hook.py"] == 15
+        # Unset means "use the client default", and must stay absent rather
+        # than being written as an explicit null.
+        assert timeouts["memory_context_hook.py"] is None
+        assert timeouts["graph_read_guard.py"] is None
 
     def test_pretooluse_carries_the_read_matcher(self, harness_root: Path) -> None:
         merged, _ = br.merge_hooks({}, harness_root, "/py")

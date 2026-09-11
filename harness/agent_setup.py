@@ -55,13 +55,29 @@ def antigravity_plugin_dir(home: Path | None = None) -> Path:
     return (home or Path.home()) / ".gemini" / "config" / "plugins" / MCP_SERVER_NAME
 
 
+def mcp_registration(harness_root: Path, python_exe: str) -> dict:
+    """The single MCP server entry every client adapter registers.
+
+    One function, one shape, one harness root, for all three clients. This
+    existed in three places before and they disagreed: Claude Code was
+    registered with a `PYTHONPATH` pointing at site-packages while Codex got
+    one pointing at a checkout, so the same tool name served different code
+    depending on which client asked. A divergence like that is invisible from
+    inside any one client -- each looks correctly configured -- and it is only
+    noticed when an agent calls a tool that exists in one install and not the
+    other. Every adapter below therefore renders its command, arguments and
+    environment from here rather than assembling its own.
+    """
+    return bootstrap_register.render_mcp_entry(Path(harness_root).resolve(), python_exe)
+
+
 def render_antigravity_plugin(harness_root: Path, python_exe: str) -> dict[str, str]:
     """Return the complete managed Antigravity plugin, without writing it."""
-    root = harness_root.resolve()
+    root = Path(harness_root).resolve()
     hook_command = bootstrap_register.render_hook_command(
         python_exe, root / "hooks" / "antigravity" / "memory_context_hook.py"
     )
-    server = bootstrap_register.render_mcp_entry(root, python_exe)
+    server = mcp_registration(root, python_exe)
     return {
         "plugin.json": json.dumps(
             {
@@ -123,18 +139,18 @@ def install_antigravity(
 
 
 def _codex_command(harness_root: Path, python_exe: str) -> list[str]:
-    return [
-        "codex",
-        "mcp",
-        "add",
-        MCP_SERVER_NAME,
-        "--env",
-        f"PYTHONPATH={harness_root.resolve()}",
-        "--",
-        str(Path(python_exe)),
-        "-m",
-        "harness.mcp_server",
-    ]
+    """Translate the shared registration into Codex's CLI surface.
+
+    Derived from `mcp_registration` rather than spelled out again, so Codex
+    receives byte-identical command, args and environment to Claude Code and
+    Antigravity for the same harness root.
+    """
+    entry = mcp_registration(harness_root, python_exe)
+    command = ["codex", "mcp", "add", MCP_SERVER_NAME]
+    for key, value in entry["env"].items():
+        command += ["--env", f"{key}={value}"]
+    command += ["--", entry["command"], *entry["args"]]
+    return command
 
 
 def install_codex(harness_root: Path, python_exe: str, *, dry_run: bool) -> list[str]:
@@ -256,7 +272,7 @@ def install_claude(
     home: Path | None = None,
 ) -> list[str]:
     """Use the established atomic Claude registration path."""
-    args = ["--harness-root", str(harness_root), "--python", python_exe]
+    args = ["--harness-root", str(Path(harness_root).resolve()), "--python", python_exe]
     if dry_run:
         args.append("--dry-run")
     if bootstrap_register.main(args) != 0:
@@ -299,10 +315,19 @@ def main(argv: list[str] | None = None) -> int:
         print(f"invalid --agents value; choose one or more of: {choices}", file=sys.stderr)
         return 2
 
+    # Resolved once, here, so every adapter in this run is handed the same
+    # root: a relative `--harness-root .` must not become a checkout path for
+    # one client and something else for the next.
+    harness_root = Path(args.harness_root).resolve()
+    # Said out loud because it is the one fact that decides which copy of the
+    # harness every client will talk to. Run from an installed console script
+    # this defaults to site-packages, run from a checkout it is the checkout;
+    # an operator who cannot see which one they got cannot notice the split.
+    print(f"registering harness root {harness_root} for: {', '.join(requested)}")
     installers = {
-        "claude": lambda: install_claude(args.harness_root, args.python, dry_run=args.dry_run),
-        "codex": lambda: install_codex(args.harness_root, args.python, dry_run=args.dry_run),
-        "antigravity": lambda: install_antigravity(args.harness_root, args.python, dry_run=args.dry_run),
+        "claude": lambda: install_claude(harness_root, args.python, dry_run=args.dry_run),
+        "codex": lambda: install_codex(harness_root, args.python, dry_run=args.dry_run),
+        "antigravity": lambda: install_antigravity(harness_root, args.python, dry_run=args.dry_run),
     }
     failed = False
     if args.workspace:

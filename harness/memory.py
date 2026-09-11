@@ -1,13 +1,16 @@
-"""Portable hierarchical memory CLI: init, remember, status, review, curate,
-context, ingest, claim, index, compact, and eval.
+"""Portable hierarchical memory CLI: init, remember, status, review, triage,
+curate, context, ingest, claim, index, compact, maintain, prune, relate, and
+eval.
 
 Capture is explicit. Nothing in this module runs automatically or summarizes
-with an AI model. `init`, `remember`, `status`, `review`, and `context` are
-stdlib-only and never open a network socket; `index` is the one command that
-may touch the optional `chromadb` extra, and it is deliberately separate from
-`context` so the agent hot path can never trigger a model download. `eval`
-reads the semantic index when one exists but never builds it, so it inherits
-the same guarantee.
+with an AI model. `init`, `remember`, `status`, `review`, `triage`,
+`maintain`, and `context` are stdlib-only and never open a network socket;
+`index` is the one command that may touch the optional `chromadb` extra, and
+it is deliberately separate from `context` so the agent hot path can never
+trigger a model download. `eval` reads the semantic index when one exists
+but never builds it, so it inherits the same guarantee. `maintain` and
+`status` report index drift from the build manifest `index` leaves behind,
+never by opening the index.
 
 Exit codes are part of the contract so automation can branch on them:
 
@@ -20,12 +23,17 @@ Usage:
     python harness/memory.py remember --type TYPE --summary TEXT [options]
     python harness/memory.py status [--project PATH]
     python harness/memory.py review list | ACTION ENTRY_ID [options]
+    python harness/memory.py triage [list|template|apply] [--by topic|type] [--group KEY]
+    python harness/memory.py triage apply --decisions FILE | --accept SEL ... [--dry-run]
     python harness/memory.py curate [--project PATH]
     python harness/memory.py context [--query TEXT] [--json] [--strategy S]
     python harness/memory.py ingest [--project PATH] [--dry-run]
     python harness/memory.py claim list|claim|release [ENTRY_ID] --owner NAME [options]
-    python harness/memory.py index [--project PATH]
+    python harness/memory.py index [--project PATH] [--if-stale]
     python harness/memory.py compact [--project PATH]
+    python harness/memory.py maintain [--project PATH] [--check] [--force]
+    python harness/memory.py prune [--id PROJECT_ID] [--dry-run]
+    python harness/memory.py relate [--dry-run] [--min-score N] [--project ID]...
     python harness/memory.py eval [--cases PATH] [--limit N] [--strategy S] [--save]
 """
 
@@ -46,6 +54,8 @@ try:
         memory_eval,
         memory_index,
         memory_ingest,
+        memory_maintain,
+        memory_relate,
         memory_review,
         memory_store,
         memory_tasks,
@@ -61,6 +71,8 @@ except ImportError:  # running as `python harness/memory.py`, not `-m harness.me
         memory_eval,
         memory_index,
         memory_ingest,
+        memory_maintain,
+        memory_relate,
         memory_review,
         memory_store,
         memory_tasks,
@@ -154,6 +166,51 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     rev_p.add_argument("--commit", default=None, help="evidence commit SHA")
     rev_p.add_argument("--file", default=None, help="evidence path, repository-relative")
 
+    tri_p = sub.add_parser(
+        "triage",
+        help="review the proposed backlog by topic and decide many entries in one pass",
+    )
+    tri_p.add_argument(
+        "action", nargs="?", choices=("list", "template", "apply"), default="list",
+        help="`list` groups the backlog (default); `template` writes a decisions "
+             "file to edit; `apply` carries out decisions non-interactively",
+    )
+    tri_p.add_argument("--project", default=".", help="project root (default: current directory)")
+    tri_p.add_argument("--scope", choices=memory_store.SCOPES, default="project")
+    tri_p.add_argument(
+        "--by", choices=("topic", "type"), default="topic",
+        help="group by dominant tag (topic, default) or by entry type",
+    )
+    tri_p.add_argument(
+        "--group", default=None, metavar="KEY",
+        help="list only this group, e.g. tag:memory or type:task",
+    )
+    tri_p.add_argument(
+        "--out", default=None, metavar="FILE",
+        help="template: write the decisions file here instead of stdout",
+    )
+    tri_p.add_argument(
+        "--decisions", default=None, metavar="FILE",
+        help="apply: decisions file, one `ACTION ENTRY_ID [options]` per line",
+    )
+    for verb in ("accept", "reject", "resolve"):
+        tri_p.add_argument(
+            f"--{verb}", action="append", default=[], metavar="SEL", dest=f"{verb}_selectors",
+            help=f"apply: {verb} an entry id, tag:X, type:X, or all (repeatable)",
+        )
+    tri_p.add_argument(
+        "--supersede", default=None, metavar="ENTRY_ID",
+        help="apply: supersede one entry with --summary",
+    )
+    tri_p.add_argument("--summary", default=None, help="apply: replacement statement for --supersede")
+    tri_p.add_argument("--note", default=None, help="apply: reviewer note for every flag decision")
+    tri_p.add_argument("--commit", default=None, help="apply: evidence commit SHA for every flag decision")
+    tri_p.add_argument("--file", default=None, help="apply: evidence path for every flag decision")
+    tri_p.add_argument(
+        "--dry-run", action="store_true",
+        help="apply: validate and print the plan without writing",
+    )
+
     cur_p = sub.add_parser(
         "curate",
         help="automatically accept verifiable document pointers and reject exact proposal duplicates",
@@ -193,12 +250,65 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "index", help="build or refresh the ChromaDB semantic index (needs the `semantic` extra)"
     )
     idx_p.add_argument("--project", default=".", help="project root (default: current directory)")
+    idx_p.add_argument(
+        "--if-stale", action="store_true",
+        help="only build when the store has drifted past "
+             f"${memory_maintain.DRIFT_THRESHOLD_ENV} changed entries since the last build",
+    )
 
     cmp_p = sub.add_parser(
         "compact",
         help="archive closed work, promote durable knowledge, and bound active memory",
     )
     cmp_p.add_argument("--project", default=".", help="project root (default: current directory)")
+
+    mnt_p = sub.add_parser(
+        "maintain",
+        help="compact if due, then report index drift and the review backlog; "
+             "safe to run unattended and idempotent within the interval",
+    )
+    mnt_p.add_argument("--project", default=".", help="project root (default: current directory)")
+    mnt_p.add_argument(
+        "--check", action="store_true",
+        help="report only; never compact (exit 0 when due, 1 when not)",
+    )
+    mnt_p.add_argument(
+        "--force", action="store_true",
+        help="compact even when not due",
+    )
+
+    prn_p = sub.add_parser(
+        "prune",
+        help="drop machine-registry entries whose project directory is gone",
+    )
+    prn_p.add_argument(
+        "--id", action="append", default=[], dest="ids",
+        help="also drop this project id even if its path still exists (repeatable)",
+    )
+    prn_p.add_argument(
+        "--dry-run", action="store_true",
+        help="report what would be dropped without writing the registry",
+    )
+
+    rel_p = sub.add_parser(
+        "relate",
+        help="propose cross-project relationships from shared tags, "
+             "cross-references, and shared symbols (machine scope, always proposed)",
+    )
+    rel_p.add_argument(
+        "--dry-run", action="store_true",
+        help="print candidates with scores and evidence without writing anything",
+    )
+    rel_p.add_argument(
+        "--min-score", type=float, default=memory_relate.DEFAULT_MIN_SCORE,
+        help=f"minimum evidence score to propose (default: {memory_relate.DEFAULT_MIN_SCORE})",
+    )
+    # dest is deliberately not `project`: `_touch_registry` reads that
+    # attribute as a path, and here it is a list of registry ids.
+    rel_p.add_argument(
+        "--project", action="append", default=[], dest="project_ids", metavar="ID",
+        help="only pairs involving this registered project id (repeatable)",
+    )
 
     eval_p = sub.add_parser(
         "eval",
@@ -341,6 +451,12 @@ def cmd_status(args: argparse.Namespace) -> int:
         if "_What this project is for._" in text:
             print("\n  WARN: scope.md is still the untouched template -- scope-drift")
             print("        detection cannot work until you fill it in.")
+
+    # Maintenance: what is owed. Read from files and the index manifest
+    # only, so `status` stays as cheap as it always was.
+    print("\n  maintenance:")
+    for line in memory_maintain.status_lines(root):
+        print("  " + line)
     return 0
 
 
@@ -494,6 +610,150 @@ def cmd_review(args: argparse.Namespace) -> int:
     return 0
 
 
+TRIAGE_SUMMARY_CHARS = 96
+
+
+def _triage_line(entry: dict) -> str:
+    summary = str(entry.get("summary") or "").strip().replace("\n", " ")
+    if len(summary) > TRIAGE_SUMMARY_CHARS:
+        summary = summary[: TRIAGE_SUMMARY_CHARS - 3] + "..."
+    date = str(entry.get("ts") or "")[:10]
+    return f"    {entry.get('id')}  {date}  [{entry.get('type')}] {summary}"
+
+
+def _flag_decisions(args: argparse.Namespace, entries: list[dict]) -> list[memory_review.Decision]:
+    """Turn `--accept/--reject/--resolve/--supersede` flags into decisions.
+
+    Selectors expand against the *pending* entries, so `--reject tag:plan`
+    can never touch an accepted entry that happens to share the tag.
+    """
+    # Overlapping selectors are normal (`tag:a` and `tag:b` share entries).
+    # The same verb twice is one decision; two different verbs for one entry
+    # is a real conflict and is named as such rather than left for the batch
+    # to reject as a bare "decided more than once".
+    chosen: dict[str, tuple[str, str]] = {}
+    for verb in ("accept", "reject", "resolve"):
+        for selector in getattr(args, f"{verb}_selectors"):
+            for entry in memory_review.select_pending(entries, selector):
+                entry_id = str(entry["id"])
+                previous = chosen.get(entry_id)
+                if previous is not None and previous[0] != verb:
+                    raise ValueError(
+                        f"{entry_id} matched both --{previous[0]} {previous[1]} "
+                        f"and --{verb} {selector}; narrow the selectors"
+                    )
+                chosen.setdefault(entry_id, (verb, selector))
+    decisions = [
+        memory_review.Decision(
+            entry_id=entry_id, action=verb,
+            note=args.note, commit=args.commit, file=args.file,
+        )
+        for entry_id, (verb, _selector) in chosen.items()
+    ]
+    if args.supersede:
+        if args.supersede in chosen:
+            raise ValueError(
+                f"{args.supersede} matched both --{chosen[args.supersede][0]} "
+                f"and --supersede; narrow the selectors"
+            )
+        decisions.append(memory_review.Decision(
+            entry_id=args.supersede, action="supersede", summary=args.summary,
+            note=args.note, commit=args.commit, file=args.file,
+        ))
+    return decisions
+
+
+def cmd_triage(args: argparse.Namespace) -> int:
+    """Review the proposed backlog in bulk, by topic, without a prompt loop.
+
+    `list` and `template` are read-only. `apply` is the only writer, and it
+    writes once: every decision is validated against one snapshot of the
+    inbox before the splice, so exit 2 always means "nothing changed". This
+    command is for the human operator; agents have no route into it.
+    """
+    root = Path(args.project).expanduser()
+    directory = _scope_dir(args.scope, root)
+    pending = memory_review.pending_entries(directory)
+
+    if args.action in ("list", "template"):
+        if not pending:
+            print(f"nothing awaiting review in {args.scope} memory")
+            return 1
+        if args.action == "template":
+            text = memory_review.render_template(pending)
+            if args.out:
+                out = Path(args.out).expanduser()
+                out.write_text(text, encoding="utf-8")
+                print(f"wrote decisions template for {len(pending)} entries to {out}")
+                print(f"edit the verbs, then: agent-harness-memory triage apply --decisions {out}")
+            else:
+                sys.stdout.write(text)
+            return 0
+
+        groups = memory_review.group_pending(pending, by=args.by)
+        if args.group:
+            groups = [g for g in groups if g.key == args.group]
+            if not groups:
+                print(f"no group {args.group!r}; groups are: "
+                      + ", ".join(g.key for g in memory_review.group_pending(pending, by=args.by)),
+                      file=sys.stderr)
+                return 2
+        print(f"{len(pending)} proposed in {args.scope} memory, {len(groups)} group(s) by {args.by}:\n")
+        for group in groups:
+            kinds = ", ".join(f"{k}={v}" for k, v in sorted(group.types.items()))
+            print(f"  {group.key}  ({group.size}: {kinds})")
+            for entry in group.entries:
+                print(_triage_line(entry))
+            print()
+        print("Decide in bulk:  agent-harness-memory triage apply --accept tag:X --reject <id> ...")
+        print("Or by file:      agent-harness-memory triage template --out decisions.txt")
+        return 0
+
+    # apply
+    decisions: list[memory_review.Decision] = []
+    try:
+        if args.decisions:
+            path = Path(args.decisions).expanduser()
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except OSError as exc:
+                print(f"triage rejected: cannot read {path}: {exc}", file=sys.stderr)
+                return 2
+            decisions.extend(memory_review.parse_decisions(lines))
+        decisions.extend(_flag_decisions(args, pending))
+    except ValueError as exc:
+        print(f"triage rejected: {exc}", file=sys.stderr)
+        return 2
+
+    live = [d for d in decisions if not d.is_skip]
+    if not live:
+        if not decisions and not args.decisions:
+            print("triage apply needs --decisions FILE or at least one of "
+                  "--accept/--reject/--resolve/--supersede", file=sys.stderr)
+            return 2
+        print("nothing to apply -- every decision is `skip`")
+        return 1
+
+    try:
+        results = memory_review.apply_reviews(directory, live, dry_run=args.dry_run)
+    except LookupError as exc:
+        print(f"triage rejected: {exc}", file=sys.stderr)
+        return 2
+    except ValueError as exc:
+        print(f"triage rejected: {exc}", file=sys.stderr)
+        return 2
+
+    verb = "would apply" if args.dry_run else "applied"
+    print(f"{verb} {len(results)} decision(s) to {args.scope} memory:")
+    for result in results:
+        print(f"  {result.entry['id']} -> {result.entry['status']}")
+        if result.created:
+            print(f"    replacement: {result.created['id']} {result.created['summary']}")
+    if args.dry_run:
+        print("\ndry run -- nothing was written.")
+    return 0
+
+
 def cmd_context(args: argparse.Namespace) -> int:
     root = Path(args.project).expanduser()
     project_id = memory_store.project_id_for(root)
@@ -534,7 +794,6 @@ def cmd_context(args: argparse.Namespace) -> int:
 
 def cmd_index(args: argparse.Namespace) -> int:
     root = Path(args.project).expanduser()
-    project_id = memory_store.project_id_for(root)
 
     if not memory_index.chromadb_available():
         print(
@@ -544,27 +803,29 @@ def cmd_index(args: argparse.Namespace) -> int:
         )
         return 1
 
+    # Drift is decided from the manifest alone, before chromadb is imported:
+    # a `--if-stale` run that finds nothing to do must cost nothing.
+    if args.if_stale:
+        drift = memory_maintain.project_drift(root)
+        if not memory_maintain.any_stale(drift):
+            for scope in ("project", "machine"):
+                print(f"{drift[scope].describe()}")
+            print("index is fresh -- nothing to rebuild")
+            return 1
+
     # Two indexes, not one: project entries are this repo's, machine entries
     # are shared by every project. Building them separately is what keeps a
     # machine-scope lesson from being re-embedded once per enrolled project.
-    project_entries = list(
-        memory_store.iter_entries(memory_store.project_memory_dir(root))
-    )
-    machine_entries = list(
-        memory_store.iter_entries(memory_store.machine_memory_dir())
-    )
-    if not project_entries and not machine_entries:
+    # `build_indexes` also writes the manifest that `status`, `maintain`,
+    # and `--if-stale` read drift from.
+    reports = memory_maintain.build_indexes(root)
+    if not reports:
         print(f"no memory entries to index in {root}")
         return 1
 
-    for label, entries, index_dir in (
-        ("project", project_entries, memory_index.index_dir_for(project_id)),
-        ("machine", machine_entries, memory_index.machine_index_dir()),
-    ):
-        if not entries:
-            continue
-        stats = memory_index.build_index(entries, index_dir)
-        print(f"{label}: indexed {len(entries)} entries into {index_dir}")
+    for report in reports:
+        stats = report.stats
+        print(f"{report.scope}: indexed {report.count} entries into {report.index_dir}")
         print(
             f"  added={stats.added} updated={stats.updated} "
             f"deleted={stats.deleted} unchanged={stats.unchanged}"
@@ -598,6 +859,89 @@ def cmd_compact(args: argparse.Namespace) -> int:
     if result.index_stale:
         print("\nentries were removed -- the semantic index still serves them.")
         print("run `agent-harness-memory index` to drop them from retrieval.")
+    return 0
+
+
+def cmd_maintain(args: argparse.Namespace) -> int:
+    """Compact if due; report what else is owed. Idempotent within the interval.
+
+    Exit 0 when compaction ran (or, with `--check`, when it is due), 1 when
+    there was nothing to do, 2 when another compaction holds the lock. The
+    index is never built here -- see the module docstring -- so a stale
+    index is advice in the output, not an action.
+    """
+    root = Path(args.project).expanduser()
+    if not (root / ".agent-harness").is_dir():
+        print(f"no memory storage in {root}", file=sys.stderr)
+        print("run `agent-harness-memory init` to create it", file=sys.stderr)
+        return 1
+    try:
+        result = memory_maintain.maintain(root, force=args.force, check=args.check)
+    except memory_compact.CompactLockError as exc:
+        print(f"maintenance refused: {exc}", file=sys.stderr)
+        return 2
+
+    print(memory_maintain.render(result, root))
+    if args.check:
+        return 0 if result.due.due else 1
+    return 0 if result.ran else 1
+
+
+def cmd_prune(args: argparse.Namespace) -> int:
+    """Remove dead entries from the machine project registry.
+
+    Exit 1 when there is nothing to prune, per this module's contract -- an
+    unchanged registry is the same "nothing to do" that `ingest` and
+    `compact` report, and automation should not have to diff the file to find
+    out. A named id that is not registered is exit 2: succeeding quietly on a
+    typo would tell the operator they retired a project they did not.
+    """
+    try:
+        result = memory_store.prune_registry(args.ids, dry_run=args.dry_run)
+    except LookupError as exc:
+        print(f"prune rejected: {exc}", file=sys.stderr)
+        return 2
+
+    total = len(result.removed) + len(result.kept)
+    if not result.changed:
+        print(f"nothing to prune -- all {total} registered projects still exist")
+        return 1
+
+    verb = "would remove" if args.dry_run else "removed"
+    print(f"{verb} {len(result.removed)} of {total} registered projects:")
+    for project_id, path, reason in result.removed:
+        why = "path is gone" if reason == "missing" else "named by --id"
+        print(f"  {project_id}  ({why}) {path or '(no path recorded)'}")
+    print(f"  kept: {len(result.kept)}")
+    if args.dry_run:
+        print("\ndry run -- the registry was not written.")
+    return 0
+
+
+def cmd_relate(args: argparse.Namespace) -> int:
+    """Propose cross-project relationships into machine memory.
+
+    Exit 0 when something was proposed (or, on a dry run, would be); exit 1
+    when every candidate is already covered or nothing reached the
+    threshold; exit 2 for an unregistered `--project` id, a negative
+    `--min-score`, or a proposal the store contract refuses. Everything
+    written is `proposed`/`inferred`; review is what promotes it.
+    """
+    try:
+        result = memory_relate.relate(
+            only=args.project_ids, min_score=args.min_score, dry_run=args.dry_run
+        )
+    except LookupError as exc:
+        print(f"relate rejected: {exc}", file=sys.stderr)
+        return 2
+    except ValueError as exc:
+        print(f"relate rejected: {exc}", file=sys.stderr)
+        return 2
+
+    print(memory_relate.render(result))
+    if not result.proposed:
+        print("nothing to propose")
+        return 1
     return 0
 
 
@@ -671,18 +1015,46 @@ _COMMANDS = {
     "remember": cmd_remember,
     "status": cmd_status,
     "review": cmd_review,
+    "triage": cmd_triage,
     "curate": cmd_curate,
     "context": cmd_context,
     "ingest": cmd_ingest,
     "claim": cmd_claim,
     "index": cmd_index,
     "compact": cmd_compact,
+    "maintain": cmd_maintain,
+    "prune": cmd_prune,
+    "relate": cmd_relate,
     "eval": cmd_eval,
 }
 
 
+def _touch_registry(args: argparse.Namespace) -> None:
+    """Refresh `last_seen` for the project this invocation is about.
+
+    Without this every registry record carries `first_seen == last_seen`
+    forever, so nothing can tell a project worked on this week from one
+    abandoned a year ago -- which is exactly the question `prune` and any
+    future staleness policy need answered.
+
+    Only already-registered projects are touched (`touch_project` will not
+    add one), and failure is swallowed: the registry is bookkeeping, and a
+    read-only home should not turn `status` into an error.
+    """
+    target = getattr(args, "project", None) or getattr(args, "path", None)
+    if not target:
+        return
+    root = Path(target).expanduser()
+    try:
+        if (root / ".agent-harness").is_dir():
+            memory_store.touch_project(root)
+    except OSError:
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv if argv is not None else sys.argv[1:])
+    _touch_registry(args)
     return _COMMANDS[args.command](args)
 
 

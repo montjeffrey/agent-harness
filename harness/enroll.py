@@ -22,6 +22,14 @@ Memory comes first deliberately -- it has no prerequisites and cannot fail
 on a project that lacks a graph, so a project always ends up with working
 memory even when steps 2 and 3 are skipped.
 
+**Memory never enters git.** `.agent-harness/` stays on disk beside the
+project, and the memory step lists it in the repository's private
+`.git/info/exclude` (ADR 0004) -- never in `.gitignore`, which would itself
+show up as a diff in everyone else's work. Re-running enroll adds the
+exclusion to a project enrolled before this rule existed. If the directory
+is *already tracked* by git the exclusion cannot hide it; enroll then prints
+the `git rm -r --cached` command and leaves that history change to you.
+
 Every step is idempotent, so this is also the right command to re-run later.
 
 Exit codes:
@@ -39,10 +47,24 @@ from pathlib import Path
 HARNESS_ROOT = Path(__file__).resolve().parent.parent
 
 try:
-    from harness import graph_location, graph_refresh, memory_index, memory_ingest, memory_store
+    from harness import (
+        graph_location,
+        graph_refresh,
+        memory_index,
+        memory_ingest,
+        memory_maintain,
+        memory_store,
+    )
 except ImportError:  # running as `python harness/enroll.py`
     sys.path.insert(0, str(HARNESS_ROOT))
-    from harness import graph_location, graph_refresh, memory_index, memory_ingest, memory_store
+    from harness import (
+        graph_location,
+        graph_refresh,
+        memory_index,
+        memory_ingest,
+        memory_maintain,
+        memory_store,
+    )
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -75,6 +97,48 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+UNTRACK_COMMAND = "git rm -r --cached .agent-harness"
+
+
+def _report_git_exclusion(root: Path, exclude: memory_store.ExcludeResult) -> bool:
+    """Print what happened to the git exclusion; True when it needs attention.
+
+    Two things can need attention, and both are reported rather than acted
+    on: an exclude file that could not be written, and a `.agent-harness/`
+    that git already tracks. The second is deliberately left to the operator.
+    Untracking is a visible change to the repository's history that every
+    collaborator sees on their next pull, so enroll names the command and
+    stops there.
+    """
+    attention = False
+    if exclude.status == "added":
+        print(f"                 excluded .agent-harness/ via {exclude.path}")
+    elif exclude.status == "present":
+        print(f"                 already excluded via {exclude.path}")
+    elif exclude.status == "failed":
+        attention = True
+        print(
+            f"                 note: {exclude.note}; memory works, but git "
+            "will list .agent-harness/ as untracked until the line is added",
+            file=sys.stderr,
+        )
+    # "not-git": nothing to say -- there is no git for memory to leak into.
+
+    tracked = memory_store.tracked_memory_files(root)
+    if tracked:
+        attention = True
+        print(
+            f"                 note: git tracks {len(tracked)} file(s) under "
+            ".agent-harness/, so the exclusion cannot hide them. Memory must "
+            "not be shared through git (ADR 0004); to untrack it, run in "
+            f"{root}:\n                   {UNTRACK_COMMAND}\n"
+            "                 enroll does not do this for you -- it changes "
+            "history that others will see",
+            file=sys.stderr,
+        )
+    return attention
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     root = Path(args.path).expanduser().resolve()
@@ -92,6 +156,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"                 created {created}")
     if not result.created:
         print("                 already initialized -- left untouched")
+    degraded |= _report_git_exclusion(root, result.exclude)
 
     # 2. Documentation -- the map. Runs before the graph so that a slow or
     # missing graphify never costs the project its pointers, and before the
@@ -145,33 +210,42 @@ def main(argv: list[str] | None = None) -> int:
                         file=sys.stderr,
                     )
 
-    # 4. Semantic index.
+    # 4. Semantic index. This is the one place enrolment touches chromadb,
+    # and it is the right place: enrolment is an explicit, one-off operator
+    # command, not a retrieval path. `build_indexes` also leaves the manifest
+    # that lets `status` and `maintain` report drift later without opening
+    # the index.
     if args.no_index:
         print("[4/4] index      skipped (--no-index)")
     elif not memory_index.chromadb_available():
         degraded = True
+        reason = memory_index.chromadb_unavailable_reason()
         print(
-            "[4/4] index      skipped -- chromadb is not installed, so context "
-            "selection will be deterministic",
+            "[4/4] index      skipped -- chromadb is not importable"
+            + (f" ({reason})" if reason else "")
+            + "; context selection will be deterministic until you run\n"
+            '                 `python -m pip install -e ".[semantic]"` from the '
+            "harness checkout, then `agent-harness-memory index` here",
             file=sys.stderr,
         )
     else:
-        entries = list(
-            memory_store.iter_entries(memory_store.project_memory_dir(root))
-        )
-        machine = list(memory_store.iter_entries(memory_store.machine_memory_dir()))
-        built = 0
-        for records, index_dir in (
-            (entries, memory_index.index_dir_for(result.project_id)),
-            (machine, memory_index.machine_index_dir()),
-        ):
-            if records:
-                memory_index.build_index(records, index_dir)
-                built += len(records)
-        if built:
-            print(f"[4/4] index      embedded {built} entries")
+        try:
+            reports = memory_maintain.build_indexes(root)
+        except Exception as exc:  # noqa: BLE001 -- never block enrollment
+            degraded = True
+            reports = []
+            print(
+                f"[4/4] index      failed ({type(exc).__name__}: {exc}); memory "
+                "works without it -- retry with `agent-harness-memory index`",
+                file=sys.stderr,
+            )
         else:
-            print("[4/4] index      nothing to index yet")
+            built = sum(r.count for r in reports)
+            if built:
+                detail = ", ".join(f"{r.scope} {r.count}" for r in reports)
+                print(f"[4/4] index      embedded {built} entries ({detail})")
+            else:
+                print("[4/4] index      nothing to index yet")
 
     print("\nNext:")
     # The active objective is called out by name because it is the one field
@@ -179,7 +253,8 @@ def main(argv: list[str] | None = None) -> int:
     # selection on -- `semantic_pointless_reason` declines to rank without it.
     print(f"  1. Set the Active objective in {root / '.agent-harness' / 'scope.md'}")
     print("  2. Record:  agent-harness-memory remember --type decision --summary ...")
-    print("  3. Review:  agent-harness-memory review list")
+    print("  3. Review:  agent-harness-memory triage")
+    print("  4. Upkeep:  agent-harness-memory maintain  (compacts when due; reports drift)")
     if degraded:
         print("\nSome steps degraded -- see the messages above.", file=sys.stderr)
     return 1 if degraded else 0

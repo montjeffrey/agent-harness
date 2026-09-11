@@ -405,6 +405,151 @@ def durable_pools(
     }
 
 
+# --- filtering ------------------------------------------------------------
+#
+# A filter narrows *what is ranked*, not what is shown after ranking. That
+# ordering matters twice over: a job about one topic never has unrelated
+# entries competing for its budget, and the `adaptive` gate in
+# `harness.memory_index` counts the entries that survive the filter, so
+# narrowing also makes selection cheaper instead of merely hiding its output.
+
+
+def _split_terms(value: object) -> tuple[str, ...]:
+    """Comma-separated string (or list) -> lowercased, de-duplicated terms."""
+    if value is None:
+        return ()
+    items = value.split(",") if isinstance(value, str) else [str(v) for v in value]
+    terms: list[str] = []
+    for item in items:
+        term = item.strip().lower()
+        if term and term not in terms:
+            terms.append(term)
+    return tuple(terms)
+
+
+@dataclass(frozen=True)
+class EntryFilter:
+    """What a caller asked to narrow retrieval to, applied before ranking.
+
+    `tags` keeps entries carrying at least one of them; `types` keeps entries
+    of those types; `exclude` drops entries carrying any of those tags or
+    having one of those ids. Matching is case-insensitive. An empty filter
+    keeps everything, so a caller passing nothing gets exactly the packet it
+    always got.
+    """
+
+    tags: tuple[str, ...] = ()
+    types: tuple[str, ...] = ()
+    exclude: tuple[str, ...] = ()
+
+    @property
+    def is_empty(self) -> bool:
+        return not (self.tags or self.types or self.exclude)
+
+    def matches(self, entry: dict) -> bool:
+        entry_tags = {str(t).lower() for t in entry.get("tags") or []}
+        if self.tags and not (entry_tags & set(self.tags)):
+            return False
+        if self.types and str(entry.get("type") or "").lower() not in self.types:
+            return False
+        if self.exclude:
+            if str(entry.get("id") or "").lower() in self.exclude:
+                return False
+            if entry_tags & set(self.exclude):
+                return False
+        return True
+
+    def describe(self) -> str:
+        parts = []
+        if self.tags:
+            parts.append("tags: " + ", ".join(self.tags))
+        if self.types:
+            parts.append("types: " + ", ".join(self.types))
+        if self.exclude:
+            parts.append("exclude: " + ", ".join(self.exclude))
+        return "; ".join(parts)
+
+
+def parse_filter(
+    tags: object = None, types: object = None, exclude: object = None
+) -> EntryFilter:
+    """Build an `EntryFilter` from the comma-separated strings a tool call carries.
+
+    An unknown type is an error rather than an empty match: a typo there
+    would otherwise filter out every entry and read exactly like an empty
+    store, which is the silent failure the design forbids.
+    """
+    parsed_types = _split_terms(types)
+    unknown = [t for t in parsed_types if t not in memory_store.ENTRY_TYPES]
+    if unknown:
+        raise ValueError(
+            f"unknown type(s) {', '.join(unknown)} -- choose from "
+            f"{', '.join(memory_store.ENTRY_TYPES)}"
+        )
+    return EntryFilter(_split_terms(tags), parsed_types, _split_terms(exclude))
+
+
+@dataclass(frozen=True)
+class LoadedEntries:
+    """Both stores read once, with the filter already applied.
+
+    The unfiltered lists are kept alongside because the packet's warnings
+    describe the *store*, not the slice: "7 entries awaiting review" must stay
+    true whether or not the caller narrowed to one tag, and `relationships`
+    are read from the unfiltered machine store so `projects="related"` does
+    not depend on the caller having asked for the `relationship` type.
+    """
+
+    project: tuple[dict, ...]
+    machine: tuple[dict, ...]
+    project_all: tuple[dict, ...]
+    machine_all: tuple[dict, ...]
+    entry_filter: EntryFilter = field(default_factory=EntryFilter)
+    excluded: int = 0
+
+    @property
+    def count(self) -> int:
+        """What the `adaptive` gate should count: entries that can be ranked."""
+        return len(self.project) + len(self.machine)
+
+    def note(self) -> str | None:
+        """The packet note stating which filters applied and what they cost."""
+        if self.entry_filter.is_empty:
+            return None
+        plural = "y" if self.excluded == 1 else "ies"
+        return (
+            f"filters applied ({self.entry_filter.describe()}); "
+            f"{self.excluded} entr{plural} excluded before ranking"
+        )
+
+
+def load_entries(
+    project_root: Path,
+    entry_filter: EntryFilter | None = None,
+    include_machine: bool = True,
+) -> LoadedEntries:
+    """Read a project's store (and, by default, the machine store) filtered.
+
+    `include_machine=False` is for reading *another* project's inbox during a
+    cross-project search: machine memory is shared, so it is read once for
+    the current project and must not be counted again per project.
+    """
+    root = Path(project_root)
+    chosen = entry_filter or EntryFilter()
+    project_all = tuple(
+        memory_store.iter_entries(memory_store.project_memory_dir(root))
+    )
+    machine_all: tuple[dict, ...] = ()
+    if include_machine:
+        machine_all = tuple(
+            memory_store.iter_entries(memory_store.machine_memory_dir())
+        )
+    project = tuple(e for e in project_all if chosen.matches(e))
+    machine = tuple(e for e in machine_all if chosen.matches(e))
+    excluded = (len(project_all) - len(project)) + (len(machine_all) - len(machine))
+    return LoadedEntries(project, machine, project_all, machine_all, chosen, excluded)
+
+
 def _freshness_warnings(entries: Sequence[dict], now: datetime) -> list[str]:
     warnings: list[str] = []
     stamps = [str(e.get("ts")) for e in entries if e.get("ts")]
@@ -442,6 +587,8 @@ def build_packet(
     notes: Sequence[str] = (),
     annotator: Annotator | None = None,
     now: datetime | None = None,
+    entry_filter: EntryFilter | None = None,
+    loaded: LoadedEntries | None = None,
 ) -> ContextPacket:
     """Assemble a budget-bounded context packet for `project_root`.
 
@@ -459,6 +606,12 @@ def build_packet(
     `harness.memory_graph`). With none supplied the packet is exactly what it
     was before that join existed -- memory has never needed a graph to work,
     and adding one must not change that.
+
+    `entry_filter` narrows the entries *before* they are ranked (see
+    `EntryFilter`); the packet then states the filter and how many entries
+    it excluded, in a note. `loaded` lets a caller that has already read the
+    stores -- to count entries for the adaptive gate, say -- hand them over
+    instead of reading twice; it already carries its filter.
     """
     now = now or datetime.now(timezone.utc)
     root = Path(project_root)
@@ -466,12 +619,10 @@ def build_packet(
     choose = selector or deterministic_selector
     pinned = set(include_ids)
 
-    project_entries = list(
-        memory_store.iter_entries(memory_store.project_memory_dir(root))
-    )
-    machine_entries = list(
-        memory_store.iter_entries(memory_store.machine_memory_dir())
-    )
+    if loaded is None:
+        loaded = load_entries(root, entry_filter)
+    project_entries = list(loaded.project)
+    machine_entries = list(loaded.machine)
 
     if query is None:
         query = active_objective(root)
@@ -556,15 +707,25 @@ def build_packet(
         spent += section.chars
         sections.append(section)
 
-    warnings = _freshness_warnings(project_entries, now)
+    # Warnings describe the store, not the filtered slice (see LoadedEntries).
+    warnings = _freshness_warnings(list(loaded.project_all), now)
     scope_path = root / ".agent-harness" / "scope.md"
     if scope_path.is_file() and not scope_units:
         warnings.append(
             "scope.md is still the untouched template; scope-drift detection "
             "and objective-focused selection cannot work until it is filled in"
         )
-    if not project_entries:
+    if not loaded.project_all:
         warnings.append("no project memory recorded yet")
+    elif not loaded.entry_filter.is_empty and loaded.count == 0:
+        warnings.append(
+            "filters matched no entries; loosen tags/types or drop exclude"
+        )
+
+    all_notes = list(notes)
+    filter_note = loaded.note()
+    if filter_note:
+        all_notes.append(filter_note)
 
     return ContextPacket(
         project_id=memory_store.project_id_for(root),
@@ -573,9 +734,303 @@ def build_packet(
         strategy=strategy,
         sections=tuple(sections),
         warnings=tuple(warnings),
-        notes=tuple(notes),
+        notes=tuple(all_notes),
         max_chars=max_chars,
     )
+
+
+# --- focused search -------------------------------------------------------
+#
+# `memory_context` answers "what should I know before I start?" and pays for
+# a whole packet to do it. Mid-task an agent has a narrower question -- "what
+# was decided about the retry policy?" -- and the right answer is a handful
+# of ranked entries, not a second packet. `search` is that: no scope prose, no
+# warnings, no graph join, a hard result cap, and every hit labelled with the
+# project it came from so cross-project hits cannot be mistaken for local ones.
+
+SEARCH_DEFAULT_LIMIT = 8
+SEARCH_MAX_LIMIT = 25
+SEARCH_DEFAULT_MAX_CHARS = 4000
+
+# The source label for machine-scope entries. Machine memory is shared by
+# every project, so it is searched once, as its own source, rather than being
+# folded into whichever project happened to be current.
+MACHINE_SOURCE = "machine"
+
+# Resolves the selector for one search source: `(source_id, entry_count) ->
+# (selector, strategy, notes)`. Injected so this module never imports the
+# semantic index; `harness.mcp_server` supplies one that routes each source
+# to its own index.
+SelectorResolver = Callable[[str, int], tuple[Selector, str, Sequence[str]]]
+
+
+@dataclass(frozen=True)
+class SearchHit:
+    source: str
+    entry: dict
+
+
+@dataclass(frozen=True)
+class SearchResult:
+    query: str
+    limit: int
+    max_chars: int
+    hits: tuple[SearchHit, ...] = ()
+    omitted: int = 0
+    strategies: tuple[tuple[str, str], ...] = ()
+    notes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SearchScope:
+    """Which projects a search will read, resolved before any store is opened.
+
+    `projects` is `(project_id, root)` pairs, current project first; `notes`
+    say what was asked for and could not be searched, per project, so a
+    skipped project is visible rather than silently absent from the results.
+    """
+
+    projects: tuple[tuple[str, Path], ...]
+    notes: tuple[str, ...] = ()
+
+
+def related_project_ids(
+    entries: Sequence[dict], registered_ids: Sequence[str], current_id: str
+) -> list[str]:
+    """Counterpart project ids named by accepted relationship entries.
+
+    A relationship entry has no single fixed counterpart field yet -- the
+    proposal side of cross-project relationships is still being built -- so
+    this reads every place a project id plausibly lives: list fields such as
+    `projects` or `related`, the `source` mapping, tags, and any registered id
+    spelled out in the summary. Only ids actually in the registry count: a
+    relationship to a project this machine does not know cannot be searched
+    anyway, and the current project is never its own counterpart.
+    """
+    registered = set(registered_ids)
+    found: list[str] = []
+
+    def consider(value: object) -> None:
+        if isinstance(value, str):
+            candidate = value.strip()
+            if candidate in registered and candidate != current_id and candidate not in found:
+                found.append(candidate)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                consider(item)
+
+    for entry in entries:
+        if entry.get("type") != "relationship" or entry.get("status") != "accepted":
+            continue
+        for key in ("projects", "related", "related_projects", "project_ids", "counterparts", "target", "target_project"):
+            consider(entry.get(key))
+        source = entry.get("source")
+        if isinstance(source, dict):
+            for key in ("project", "projects", "related", "related_project", "counterpart", "target", "target_project", "from", "to"):
+                consider(source.get(key))
+        consider(entry.get("tags"))
+        summary = str(entry.get("summary") or "")
+        for project_id in sorted(registered):
+            if project_id in summary:
+                consider(project_id)
+    return found
+
+
+def resolve_search_projects(
+    spec: str | None,
+    current_root: Path,
+    registry: dict,
+    relationships: Sequence[dict] = (),
+) -> SearchScope:
+    """Turn a `projects` argument into the projects a search will read.
+
+    `"current"` (the default) is the project alone. `"all"` is every
+    registered project whose path still exists. `"related"` is every
+    counterpart named by an accepted relationship (see `related_project_ids`).
+    Anything else is a comma-separated list of registered project ids.
+
+    A missing, unreadable, or empty registry -- `memory_store.load_registry`
+    returns an empty one for all three -- narrows to the current project with
+    a note; so does a registered project whose path has since vanished. Never
+    an error: another project's absence must not stop work on this one.
+    """
+    root = Path(current_root)
+    current_id = memory_store.project_id_for(root)
+    wanted_spec = (spec or "current").strip()
+    chosen: list[tuple[str, Path]] = [(current_id, root)]
+    notes: list[str] = []
+
+    if wanted_spec.lower() == "current":
+        return SearchScope(tuple(chosen))
+
+    registered = registry.get("projects") if isinstance(registry, dict) else None
+    if not isinstance(registered, dict) or not registered:
+        return SearchScope(
+            tuple(chosen),
+            (
+                "no other projects registered on this machine (registry "
+                "missing, unreadable, or empty); searched the current project only",
+            ),
+        )
+
+    wanted: list[str]
+    if wanted_spec.lower() == "all":
+        wanted = [pid for pid in registered if pid != current_id]
+        if not wanted:
+            notes.append(
+                "no other projects registered on this machine; searched the "
+                "current project only"
+            )
+    elif wanted_spec.lower() == "related":
+        wanted = related_project_ids(relationships, list(registered), current_id)
+        if not wanted:
+            notes.append(
+                "no accepted relationship names another registered project; "
+                "searched the current project only"
+            )
+    else:
+        wanted = []
+        for pid in (p.strip() for p in wanted_spec.split(",")):
+            if not pid or pid == current_id:
+                continue
+            if pid not in registered:
+                notes.append(f"project {pid!r} is not registered on this machine; skipped")
+                continue
+            if pid not in wanted:
+                wanted.append(pid)
+
+    seen_paths = {root.resolve()}
+    for pid in wanted:
+        record = registered.get(pid)
+        raw_path = record.get("path") if isinstance(record, dict) else None
+        path = Path(str(raw_path)) if raw_path else None
+        if path is None or not path.is_dir():
+            notes.append(
+                f"project {pid}: registered path {raw_path or '?'} no longer "
+                "exists; skipped"
+            )
+            continue
+        resolved = path.resolve()
+        if resolved in seen_paths:
+            # The current project, registered under its own id.
+            continue
+        seen_paths.add(resolved)
+        chosen.append((pid, path))
+    return SearchScope(tuple(chosen), tuple(notes))
+
+
+def _interleave_by_rank(
+    ranked: Sequence[tuple[str, Sequence[dict]]], limit: int
+) -> list[SearchHit]:
+    """Merge per-source rankings: every source's rank 1, then rank 2, and so on.
+
+    Sources are visited in the order given -- current project first -- so a
+    tie on rank favours the project the agent is actually working in. Rank is
+    the only signal the `Selector` contract exposes, and it is comparable
+    across sources in a way raw scores from different strategies are not.
+    """
+    hits: list[SearchHit] = []
+    depth = 0
+    while len(hits) < limit:
+        added = False
+        for source, entries in ranked:
+            if depth < len(entries):
+                hits.append(SearchHit(source, entries[depth]))
+                added = True
+                if len(hits) >= limit:
+                    break
+        if not added:
+            break
+        depth += 1
+    return hits
+
+
+def search(
+    query: str,
+    sources: Sequence[tuple[str, Sequence[dict]]],
+    limit: int = SEARCH_DEFAULT_LIMIT,
+    max_chars: int = SEARCH_DEFAULT_MAX_CHARS,
+    resolver: SelectorResolver | None = None,
+    notes: Sequence[str] = (),
+) -> SearchResult:
+    """Rank live entries from each source against `query`; keep the top `limit`.
+
+    Each source is ranked by its own selector (from `resolver`, or
+    `deterministic_selector` when none is given) and asked for at most
+    `limit` entries, so the work stays bounded by the cap however many
+    projects are searched. The per-source rankings are then merged by rank.
+    `limit` is clamped to `SEARCH_MAX_LIMIT`, and the rendered hits are then
+    budgeted like a packet section -- whole or omitted, with the count stated.
+    """
+    requested = int(limit)
+    limit = max(1, min(requested, SEARCH_MAX_LIMIT))
+    all_notes = list(notes)
+    if requested > SEARCH_MAX_LIMIT:
+        all_notes.append(f"limit {requested} capped at {SEARCH_MAX_LIMIT}")
+
+    ranked: list[tuple[str, list[dict]]] = []
+    strategies: list[tuple[str, str]] = []
+    # Identical notes from several sources ("semantic selection skipped ...")
+    # are stated once, prefixed by every source they apply to, so a search
+    # across many projects does not spend its output repeating one sentence.
+    source_notes: dict[str, list[str]] = {}
+    for source, candidates in sources:
+        live = [e for e in candidates if _is_live(e)]
+        if not live:
+            # Nothing to rank, so no selector is resolved and no index opened.
+            strategies.append((source, "no live entries"))
+            ranked.append((source, []))
+            continue
+        if resolver is None:
+            selector, strategy, extra = deterministic_selector, "deterministic", ()
+        else:
+            selector, strategy, extra = resolver(source, len(live))
+        for note in extra:
+            source_notes.setdefault(note, []).append(source)
+        strategies.append((source, strategy))
+        ranked.append((source, selector(live, query, limit)))
+    all_notes.extend(
+        f"{', '.join(names)}: {note}" for note, names in source_notes.items()
+    )
+
+    hits = _interleave_by_rank(ranked, limit)
+    kept, omitted = _fit([render_search_hit(h) for h in hits], max(int(max_chars), 0))
+    return SearchResult(
+        query=query,
+        limit=limit,
+        max_chars=int(max_chars),
+        hits=tuple(hits[: len(kept)]),
+        omitted=omitted,
+        strategies=tuple(strategies),
+        notes=tuple(all_notes),
+    )
+
+
+def render_search_hit(hit: SearchHit) -> str:
+    """One hit as a single line: the entry's own line, prefixed by its source."""
+    line = render_entry(hit.entry)
+    return f"- [{hit.source}] {line[2:]}" if line.startswith("- ") else f"- [{hit.source}] {line}"
+
+
+def render_search_markdown(result: SearchResult) -> str:
+    """The search result as Markdown: a header, notes, and one line per hit."""
+    shown = len(result.hits)
+    ranked_by = ", ".join(f"{source}={strategy}" for source, strategy in result.strategies)
+    out = [
+        f"# Memory search: {result.query}",
+        "",
+        f"_{shown} result{'' if shown == 1 else 's'} (limit {result.limit}) - "
+        f"ranked: {ranked_by or 'nothing to rank'}_",
+    ]
+    out.extend(f"_Note: {note}_" for note in result.notes)
+    out.append("")
+    if result.hits:
+        out.extend(render_search_hit(hit) for hit in result.hits)
+    elif not result.omitted:
+        out.append("_No live entries matched; try broader terms, another `projects` value, or fewer filters._")
+    if result.omitted:
+        out.append(f"_... {result.omitted} more omitted for budget._")
+    return "\n".join(out).rstrip() + "\n"
 
 
 # --- rendering ------------------------------------------------------------

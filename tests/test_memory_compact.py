@@ -490,3 +490,82 @@ def test_context_still_builds_a_packet_after_compaction(project: Path) -> None:
     )
     assert "Open work here." in rendered
     assert "A real decision." in rendered
+
+
+# --------------------------------------------------------------------------
+# due-ness -- when `maintain` should run this
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def no_interval_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(memory_compact.COMPACT_INTERVAL_ENV, raising=False)
+
+
+def test_the_interval_defaults_and_is_overridable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(memory_compact.COMPACT_INTERVAL_ENV, raising=False)
+    assert memory_compact.compact_interval_days() == memory_compact.COMPACT_INTERVAL_DAYS
+    monkeypatch.setenv(memory_compact.COMPACT_INTERVAL_ENV, "3")
+    assert memory_compact.compact_interval_days() == 3
+    monkeypatch.setenv(memory_compact.COMPACT_INTERVAL_ENV, "weekly")
+    assert memory_compact.compact_interval_days() == memory_compact.COMPACT_INTERVAL_DAYS
+    monkeypatch.setenv(memory_compact.COMPACT_INTERVAL_ENV, "-2")
+    assert memory_compact.compact_interval_days() == 0
+
+
+def test_a_fresh_project_has_never_been_compacted(project: Path) -> None:
+    assert memory_compact.last_compacted(memory_store.project_memory_dir(project)) is None
+
+
+def test_compaction_stamps_active_md_with_when_it_ran(project: Path) -> None:
+    """The stamp `render_active` writes is the record of the last run -- there
+    is deliberately no second state file that could disagree with it."""
+    memory_compact.compact(project, now=NOW)
+    assert memory_compact.last_compacted(memory_store.project_memory_dir(project)) == NOW
+
+
+def test_an_unparseable_stamp_reads_as_never(project: Path) -> None:
+    directory = memory_store.project_memory_dir(project)
+    (directory / "active.md").write_text(
+        "# Active memory\n\nLast compacted: yesterday\n", encoding="utf-8"
+    )
+    assert memory_compact.last_compacted(directory) is None
+
+
+def test_a_never_compacted_project_is_due(project: Path, no_interval_override: None) -> None:
+    status = memory_compact.compaction_due(memory_store.project_memory_dir(project), now=NOW)
+    assert status.due is True
+    assert status.reason == "never compacted"
+    assert status.last is None
+
+
+def test_a_recently_compacted_project_is_not_due(project: Path, no_interval_override: None) -> None:
+    directory = memory_store.project_memory_dir(project)
+    memory_compact.compact(project, now=NOW)
+    status = memory_compact.compaction_due(directory, now=NOW + timedelta(days=2))
+    assert status.due is False
+    assert "next due in 5 day(s)" in status.reason
+    assert status.last == NOW
+
+
+def test_a_project_past_the_interval_is_due(project: Path, no_interval_override: None) -> None:
+    directory = memory_store.project_memory_dir(project)
+    memory_compact.compact(project, now=NOW)
+    status = memory_compact.compaction_due(directory, now=NOW + timedelta(days=7))
+    assert status.due is True
+    assert "7 day(s) ago" in status.reason
+
+
+def test_a_zero_interval_is_always_due(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(memory_compact.COMPACT_INTERVAL_ENV, "0")
+    directory = memory_store.project_memory_dir(project)
+    memory_compact.compact(project, now=NOW)
+    assert memory_compact.compaction_due(directory, now=NOW).due is True
+
+
+def test_deciding_due_ness_takes_no_lock_and_writes_nothing(project: Path) -> None:
+    directory = memory_store.project_memory_dir(project)
+    before = (directory / "active.md").read_bytes()
+    memory_compact.compaction_due(directory, now=NOW)
+    assert (directory / "active.md").read_bytes() == before
+    assert not (directory / memory_compact.LOCK_NAME).exists()

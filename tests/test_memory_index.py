@@ -863,3 +863,78 @@ def test_selection_still_ranks_by_text_when_no_embedder_is_available(
 
     assert FakeClient.stores["idx::memory_entries"].queried_by == "texts"
     assert "magic links" in ranked[0]["summary"]
+
+
+# --- per-scope selector resolution (cross-project search) -----------------
+
+
+def test_scopes_limits_which_indexes_a_selector_routes_on(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A search source is one scope; a note about the *other* scope's missing
+    index must not be attached to it."""
+    monkeypatch.setattr(memory_index, "chromadb_available", lambda: True)
+    monkeypatch.setattr(
+        memory_index, "probe_index", lambda _idx, client_factory=None: None, raising=False
+    )
+    project_id = memory_store.project_id_for(project)
+    memory_index.index_dir_for(project_id).mkdir(parents=True)
+
+    _sel, strategy, notes = memory_index.resolve_selector(
+        project_id, "auto", client_factory=FakeClient, scopes=("project",)
+    )
+    assert strategy == "semantic"
+    assert notes == []
+
+    _sel, strategy, notes = memory_index.resolve_selector(
+        project_id, "auto", client_factory=FakeClient, scopes=("machine",)
+    )
+    assert strategy == "deterministic"
+    assert any(str(memory_index.machine_index_dir()) in n for n in notes)
+
+    with pytest.raises(ValueError, match="unknown scopes"):
+        memory_index.resolve_selector(project_id, "auto", scopes=("nowhere",))
+
+
+def test_a_search_uses_each_projects_own_index_and_states_the_rest(
+    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Project B has an index, project A does not: B is ranked semantically
+    through B's index, A deterministically with a note naming A, and no
+    index is ever built by the search."""
+    from harness import mcp_server
+
+    monkeypatch.setattr(memory_index, "chromadb_available", lambda: True)
+    monkeypatch.setattr(
+        memory_index, "probe_index", lambda _idx, client_factory=None: None, raising=False
+    )
+    monkeypatch.setenv(memory_index.ADAPTIVE_MIN_ENTRIES_ENV, "0")
+
+    other = tmp_path / "other"
+    other.mkdir()
+    memory_store.init_project(other, now=NOW)
+    _add(other, "Beta chose exponential backoff for retries")
+    _add(other, "Beta logs to JSONL")
+    other_id = memory_store.project_id_for(other)
+    memory_index.build_index(_entries(other), memory_index.index_dir_for(other_id), client_factory=FakeClient)
+
+    _add(project, "Alpha retry decision")
+    project_id = memory_store.project_id_for(project)
+
+    def never_build(*args, **kwargs):
+        raise AssertionError("a search must never build an index")
+
+    monkeypatch.setattr(memory_index, "build_index", never_build)
+
+    result = memory_context.search(
+        "retries backoff",
+        [(project_id, _entries(project)), ("machine", []), (other_id, _entries(other))],
+        limit=4,
+        resolver=mcp_server._search_selector_resolver(project_id, "retries backoff", client_factory=FakeClient),
+    )
+    assert dict(result.strategies) == {
+        project_id: "deterministic", "machine": "no live entries", other_id: "semantic"
+    }
+    assert any(n.startswith(f"{project_id}: ") and "no semantic index" in n for n in result.notes)
+    assert not any("machine-scope" in n for n in result.notes)
+    assert [h.entry["summary"] for h in result.hits if h.source == other_id][0].startswith("Beta chose")

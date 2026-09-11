@@ -77,13 +77,27 @@ class Task:
     status: str
     created_at: str
     finished_at: str | None = None
+    # Git evidence recorded by ``finish``: the tip of the task branch at the
+    # moment the claim was released. ``base_sha`` is the immutable start, so
+    # ``base_sha..final_sha`` is exactly the task's committed work. ``None``
+    # on records written before this field existed, and when the branch had
+    # already been deleted by the time the task was finished.
+    final_sha: str | None = None
 
 
 def _git(directory: Path, *args: str) -> str:
-    """Run a fixed-shape Git command and return stdout, never through a shell."""
+    """Run a fixed-shape Git command and return stdout, never through a shell.
+
+    ``stdin=DEVNULL`` is required, not cosmetic. These commands also run inside
+    the long-lived stdio MCP server (the ``work_*`` tools), whose own stdin is
+    the live JSON-RPC pipe. A git child that inherits that pipe blocks before
+    git starts -- GIT_TRACE never emits a line -- until the timeout below
+    fires, so every call costs its full timeout instead of milliseconds.
+    """
     try:
         result = subprocess.run(
             ["git", "-C", str(directory), *args],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             check=False,
@@ -107,6 +121,9 @@ def repository_for(directory: Path) -> Repository:
     try:
         branch_result = subprocess.run(
             ["git", "-C", str(root), "symbolic-ref", "--quiet", "--short", "HEAD"],
+            # Same reason as `_git`: under the stdio MCP server an inherited
+            # JSON-RPC stdin pipe makes git hang until the timeout.
+            stdin=subprocess.DEVNULL,
             capture_output=True, text=True, check=False, timeout=30,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -335,10 +352,36 @@ def start(
     return task
 
 
+def recorded_tasks(repo: Repository) -> list[Task]:
+    """Every task ever recorded for ``repo``, for a caller that already
+    resolved the repository (see ``active_tasks``)."""
+    return _load_tasks(repo)
+
+
+def active_tasks(repo: Repository) -> list[Task]:
+    """Every task still holding path claims in ``repo``.
+
+    Takes an already-resolved ``Repository`` rather than a directory so a
+    caller on a hot path -- the PreToolUse claim guard runs before every
+    edit -- resolves the repository once and reads state once.
+    """
+    return [task for task in _load_tasks(repo) if task.status == ACTIVE]
+
+
 def list_tasks(directory: Path, active_only: bool = False) -> list[Task]:
     repo = repository_for(directory)
-    tasks = _load_tasks(repo)
-    return [task for task in tasks if task.status == ACTIVE] if active_only else tasks
+    return active_tasks(repo) if active_only else _load_tasks(repo)
+
+
+def primary_root(repo: Repository) -> Path | None:
+    """The primary checkout of ``repo``, or None for a bare/unusual layout.
+
+    Linked worktrees share the primary checkout's ``.git`` directory, so the
+    directory that *contains* the common git dir is the primary checkout.
+    """
+    if repo.common_git_dir.name.lower() == ".git":
+        return repo.common_git_dir.parent
+    return None
 
 
 def find_task(directory: Path, task_id: str) -> tuple[Repository, Task]:
@@ -358,8 +401,35 @@ def diff(directory: Path, task_id: str) -> str:
     return _git(worktree, "diff", task.base_sha, "--")
 
 
+def _final_sha(repo: Repository, task: Task) -> str | None:
+    """The task branch's tip, read-only, or None when it cannot be resolved.
+
+    The branch ref is asked first because it is the task's work by
+    definition. The worktree's HEAD is a fallback only for a *private*
+    external worktree whose branch was renamed or detached: the primary
+    checkout is shared, so its HEAD after the branch is gone is whatever a
+    human switched to, which is not evidence of anything. Neither lookup may
+    fail the finish: releasing the claim is the contract, evidence is a
+    bonus, and a task whose branch is already gone still needs releasing.
+    """
+    with contextlib.suppress(WorkError):
+        return _git(repo.root, "rev-parse", "--verify", "--quiet", f"refs/heads/{task.branch}^{{commit}}")
+    worktree = Path(task.worktree)
+    if worktree.is_dir() and worktree.resolve() != primary_root(repo):
+        with contextlib.suppress(WorkError):
+            return _git(worktree, "rev-parse", "--verify", "--quiet", "HEAD^{commit}")
+    return None
+
+
 def finish(directory: Path, task_id: str, session_id: str, now: datetime | None = None) -> Task:
-    """Mark an active task complete and release its path claims; retain Git artifacts."""
+    """Mark an active task complete and release its path claims; retain Git artifacts.
+
+    Records git evidence on the task -- ``final_sha``, the tip of the task
+    branch at this moment, next to the ``branch`` and immutable ``base_sha``
+    recorded at start -- and nothing else. It never rebases, merges, checks
+    out, or removes a branch or worktree: those remain explicit human
+    integration steps (ADR 0002).
+    """
     if not session_id.strip():
         raise WorkError("session_id is required to finish a task")
     repo = repository_for(directory)
@@ -372,11 +442,101 @@ def finish(directory: Path, task_id: str, session_id: str, now: datetime | None 
                 raise WorkError(f"{task_id} is already {task.status}")
             if task.session_id != session_id.strip():
                 raise WorkError(f"{task_id} belongs to session {task.session_id!r}, not {session_id!r}")
-            finished = Task(**{**asdict(task), "status": DONE, "finished_at": _now(now)})
+            finished = Task(
+                **{
+                    **asdict(task),
+                    "status": DONE,
+                    "finished_at": _now(now),
+                    "final_sha": _final_sha(repo, task),
+                }
+            )
             tasks[index] = finished
             _save_tasks(repo, tasks)
             return finished
     raise WorkError(f"no task {task_id!r} is recorded for {repo.root}")
+
+
+# --- git evidence for progress capture ------------------------------------
+#
+# The Claude Code hooks (`hooks/claude/`) turn commits and finished tasks into
+# proposed memory entries. They need two things this module already knows how
+# to get safely -- where per-repository state lives and how to run git with
+# stdin closed -- so the helpers live here rather than being reimplemented in
+# a hook with its own subprocess conventions.
+
+
+@dataclass(frozen=True)
+class Commit:
+    sha: str
+    subject: str
+    files: tuple[str, ...]
+
+
+def commit_log(directory: Path, base_sha: str, head: str = "HEAD", limit: int = 20) -> list[Commit]:
+    """Commits reachable from ``head`` but not ``base_sha``, newest first.
+
+    Bounded by ``limit`` so a base that turns out to be unrelated (a branch
+    switch since it was recorded) cannot turn one hook run into a walk of
+    the whole history. Merge commits list no files, which is accurate.
+    """
+    if not base_sha.strip():
+        return []
+    output = _git(
+        directory, "log", "--format=%x1e%H%x1f%s", "--name-only", f"-n{int(limit)}",
+        f"{base_sha.strip()}..{head}", "--",
+    )
+    commits: list[Commit] = []
+    for block in output.split("\x1e"):
+        lines = block.strip("\n").splitlines()
+        if not lines or "\x1f" not in lines[0]:
+            continue
+        sha, subject = lines[0].split("\x1f", 1)
+        files = tuple(line.strip() for line in lines[1:] if line.strip())
+        commits.append(Commit(sha=sha.strip(), subject=subject.strip(), files=files))
+    return commits
+
+
+def commit_count(directory: Path, base_sha: str, head: str) -> int | None:
+    """How many commits ``base_sha..head`` spans, or None when git cannot say."""
+    if not base_sha or not head:
+        return None
+    try:
+        return int(_git(directory, "rev-list", "--count", f"{base_sha}..{head}", "--"))
+    except (WorkError, ValueError):
+        return None
+
+
+def session_marker_path(repo: Repository, session_id: str) -> Path:
+    """Where a client session's progress marker lives for ``repo``.
+
+    A marker is written at session start (HEAD then) and advanced by every
+    progress scan, so "new since the session started" is a git range rather
+    than a guess. It sits with the task state, outside the repository, and
+    is keyed by a digest of the session id so any client's id shape is a
+    safe file name.
+    """
+    digest = hashlib.sha256(session_id.strip().encode("utf-8")).hexdigest()[:16]
+    return state_dir(repo) / "sessions" / f"{digest}.json"
+
+
+def load_session_marker(repo: Repository, session_id: str) -> dict | None:
+    path = session_marker_path(repo, session_id)
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def save_session_marker(repo: Repository, session_id: str, marker: dict) -> Path:
+    path = session_marker_path(repo, session_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+    tmp.write_text(json.dumps(marker, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(path)
+    return path
 
 
 def _render_task(task: Task) -> str:
@@ -386,7 +546,8 @@ def _render_task(task: Task) -> str:
         f"  session: {task.session_id} ({task.agent})\n"
         f"  branch: {task.branch}\n"
         f"  base: {task.base_sha}\n"
-        f"  worktree: {task.worktree}\n"
+        + (f"  final: {task.final_sha}\n" if task.final_sha else "")
+        + f"  worktree: {task.worktree}\n"
         f"  plan: {task.plan_path}\n"
         f"  paths: {', '.join(task.paths)}"
     )
