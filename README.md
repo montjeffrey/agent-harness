@@ -85,6 +85,13 @@ files** — no AGENTS.md, no CLAUDE.md, no project-local settings. Memory is
 set up first and independently, so a project without a graph still gets
 working memory.
 
+Memory **never enters git.** Enroll lists `.agent-harness/` in the
+repository's private `.git/info/exclude` — not in `.gitignore`, which would
+itself show up as a diff in other people's work. Re-running enroll adds the
+exclusion to a project enrolled before this rule existed. If git already
+tracks the directory, enroll prints the `git rm -r --cached .agent-harness`
+command and leaves that history change to you (ADR 0004).
+
 **Or never run it at all.** Set these two once and any project under your
 workspace gets its memory created the first time you open a session in it:
 
@@ -519,7 +526,9 @@ agent-harness-memory eval --strategy deterministic --strategy semantic --save
 python -m harness.memory init
 ```
 
-Project storage is created in the repo so memory travels with the code:
+Project storage is created beside the code, on this machine only. It is kept
+out of git through `.git/info/exclude` and never appears in anyone's status,
+diff, or commit (ADR 0004):
 
 ```text
 .agent-harness/
@@ -531,8 +540,9 @@ Project storage is created in the repo so memory travels with the code:
 ```
 
 Machine-scope memory (`~/.agent-harness/memory/`) holds the project registry
-and reusable cross-project knowledge. It is local by default and is never
-committed into a project.
+and reusable cross-project knowledge. It is local and is never committed into
+a project. The registry, not git, is what links projects to each other; a
+second machine starts with blank memory for both scopes.
 
 ### Parallel task workspaces
 

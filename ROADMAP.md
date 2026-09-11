@@ -221,9 +221,10 @@ Open:
 
 - **Codex has no read path.** It is named as a target agent but has neither a
   session hook nor a verified MCP registration.
-- **Machine-scope sync.** Project scope travels by git. Machine scope travels
-  by nothing -- which is correct by design, but means a second machine starts
-  blank with no documented way to seed it.
+- **Cross-machine sync.** Neither scope travels. Project memory is
+  machine-local and excluded from git by design (ADR 0004), and machine scope
+  travels by nothing -- correct, but it means a second machine starts blank
+  for both scopes with no documented way to seed it.
 - **Concurrent writes.** Advisory locking was designed and never built. Two
   agents appending to one inbox is an ordinary case in this setup, not an edge
   case.

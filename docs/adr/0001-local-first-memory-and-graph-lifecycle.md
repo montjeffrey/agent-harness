@@ -28,3 +28,6 @@ requires a configured provider and may incur API cost.
   than copied wholesale into prompts.
 - A missing client or optional dependency degrades with a diagnostic instead
   of disabling project memory.
+
+Superseded in part by ADR 0004: project memory is still the durable source of
+truth, but it is machine-local and never committed with the repository.
