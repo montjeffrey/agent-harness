@@ -13,6 +13,7 @@ so every write here lands in the sandbox and not in the real `~/.claude`.
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 
 import pytest
@@ -111,7 +112,12 @@ class TestMergeHooks:
         merged, _ = br.merge_hooks({}, spaced, "/py")
 
         command = _commands(merged, "SessionStart")[0]
-        assert '"' in command, f"unquoted spaced path would split into extra argv: {command}"
+        # The quote character is platform-specific (list2cmdline uses ", shlex
+        # uses '), so assert what quoting is for: exactly two argv tokens.
+        script = (spaced / "hooks" / "claude" / "memory_context_hook.py").as_posix()
+        assert shlex.split(command) == ["/py", script], (
+            f"spaced path would split into extra argv: {command}"
+        )
 
 
 class TestMergeMcp:
