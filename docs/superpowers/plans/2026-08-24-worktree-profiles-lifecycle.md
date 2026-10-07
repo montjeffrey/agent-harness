@@ -1,633 +1,655 @@
-# Worktree Profiles and Lifecycle Implementation Plan
+# Worktree Profiles and Lifecycle — Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+Spec: `docs/superpowers/specs/2026-08-24-worktree-profiles-lifecycle-design.md` (approved)
 
-**Goal:** Extend the existing offline `agent-harness-work` task/worktree command with private and portable profiles, strict handoffs, verification receipts, gated rebase/integration, and safe retirement.
+Plan revision: 2 (2026-08-25). Revision 1 restated the spec as prose and left six
+design questions for the executor to answer mid-implementation. This revision
+answers them. Nothing below requires the implementer to design anything.
 
-**Architecture:** Keep private task state in the existing machine-local registry under `~/.agent-harness/work/<repository-id>/`. Add small focused modules for layered settings, `.git/info/exclude` updates, strict portable manifests, verification execution, and lifecycle gates; keep `harness/work.py` as the compatibility-preserving CLI/orchestration adapter. Portable state is an explicit, sanitized commit on the task branch and never requires a network call.
+**Goal:** extend `agent-harness-work` with a private/portable profile, verification
+receipts, and gated rebase / integration-prep / retirement — offline, with no new
+runtime dependency and no change to the four existing commands or four existing
+MCP tools.
 
-**Tech Stack:** Python 3.11+, standard-library `json`/`subprocess`/`pathlib`/`dataclasses`, Git CLI, existing `harness.config_validation`, existing `harness.atomicwrite`, pytest, and the current MCP dispatch layer.
-
-## Global Constraints
-
-- The built-in profile is `private`; the current work device may set that default in machine-local settings.
-- Private work creates no committed settings or handoff data.
-- A repository-local private artifact is excluded only through `.git/info/exclude`; the root `.gitignore` must remain unchanged.
-- The core workflow makes no network call, push, merge, pull request, or hosted-service request.
-- Portable handoffs contain only schema version, task ID, objective, repository-relative paths, branch, base SHA, lifecycle status, verification receipts, and next action.
-- Portable handoffs reject unknown fields, absolute paths, machine paths, session IDs, plans, logs, credentials, transcripts, and dirty-worktree state.
-- Verification commands use an argv list with `shell=False`; repository-supplied commands are never executed automatically.
-- Rebase, merge, push, branch deletion, and worktree deletion require explicit commands or flags.
-- Existing `agent-harness-work start`, `list`, `diff`, and `finish` behavior and MCP tool names remain compatible unless a new optional argument is being added.
-- No new runtime dependency is introduced.
-- Every state-changing write is validated first and replaced atomically; failed transitions leave the previous usable state intact.
+**How to execute:** work the numbered tasks in order. Each task is independently
+committable and leaves the suite green. Steps are `- [ ]` for tracking. Run
+`python -m pytest -q tests/test_work.py` after every task; it is the regression
+baseline and must never go red.
 
 ---
 
-## File map and ownership
+## Part 1 — Decisions
 
-Create these focused modules:
+These were open in revision 1. They are now settled; implement them as written.
 
-- `harness/work_state.py` — shared repository/task models, schema-2 migration, task registry persistence, and the short-lived task lock.
-- `harness/work_config.py` — built-in defaults, machine/project settings paths, strict layered settings resolution, and effective-profile reporting.
-- `harness/work_exclude.py` — idempotent exact-pattern updates to the common Git directory’s `info/exclude`; never touches root `.gitignore`.
-- `harness/work_manifest.py` — portable handoff schema, sanitizer, strict loader, atomic writer, and removal preview.
-- `harness/work_verify.py` — trusted local verification profile lookup, argv-only subprocess execution, and verification receipts.
-- `harness/work_flow.py` — lifecycle gate state and explicit promote/handoff/resume/rebase/prepare/privatize/retire transitions.
+### D1. No `harness/work_state.py`. Extend `Task` in place.
 
-Modify these existing files:
+Revision 1 extracted the task model into a new module and re-exported it. The
+spec does not ask for this, `work.py` is 446 lines (limit 800), and the split
+creates a compatibility surface for two real importers — `mcp_server.dispatch_work`
+(`from harness import work`) and `tests/test_work.py`.
 
-- `harness/work.py` — re-export the shared models/persistence names, retain start/list/diff/finish compatibility, add CLI subcommands, and call the lifecycle module without breaking current callers.
-- `harness/mcp_server.py` — expose the lifecycle actions through the existing `dispatch_work` and MCP decorators.
-- `README.md` — document private default, portable promotion, lifecycle commands, and the no-root-`.gitignore` rule.
+Add two fields to the existing `Task` dataclass in `harness/work.py`:
 
-Create or extend these tests:
+```python
+profile: str = PROFILE_PRIVATE          # "private" | "portable"
+verification: tuple[dict[str, object], ...] = ()
+```
 
-- `tests/test_work_config.py` — settings precedence, schema rejection, and effective-profile source.
-- `tests/test_work_exclude.py` — exact local exclusion behavior and root `.gitignore` preservation.
-- `tests/test_work_manifest.py` — portable field allowlist, path/branch/base validation, round-trip, and atomic failure behavior.
-- `tests/test_work_verify.py` — argv-only execution, receipt recording, timeout/nonzero result, and untrusted-command refusal.
-- `tests/test_work.py` — existing regression tests plus lifecycle, profile, state migration, two-clone resume, rebase recovery, and retirement gates.
+Both have defaults, so every existing `Task(...)` construction and the
+`Task(**{**asdict(task), ...})` idiom in `finish()` keep working untouched.
 
-## Shared interfaces
+### D2. The stage is derived, never stored.
 
-The implementation tasks use these exact contracts:
+Revision 1 contradicted itself — Task 3 stored `phase="active"`, Task 6 declared
+five different phase values. Storing a stage creates a second source of truth for
+a fact Git already knows.
+
+One vocabulary throughout: these are **stages**, and they are what D3 gates on. The
+word "phase" from revision 1 is retired — do not reintroduce it in code or tests.
+
+`Task` gets **no** `stage` field. `work_flow.derive_stage()` computes it from
+stored facts plus live Git. Exactly six derived stages (plus `retired`, reached only
+through the `retire` transition, which sets `status = DONE`):
+
+Let `head` = `git rev-parse HEAD` in the task worktree, and define:
+
+- `has_own_work` = `git rev-list --count <task.base_sha>..HEAD` is **> 0**
+- `contained_in_onto` = `git rev-list --count <onto>..HEAD` is **0**
+- `contains_onto` = `git merge-base --is-ancestor <onto> HEAD` exits 0
+- `verified` = `any(r["passed"] and r["commit"] == head for r in task.verification)`
+
+| Stage | Condition (evaluated in this order) |
+|---|---|
+| `integrated` | `onto` given and `has_own_work` and `contained_in_onto` |
+| `rebased-ready` | `onto` given and `verified` and `contains_onto` |
+| `portable-verified` | `profile == portable` and `verified` |
+| `portable-active` | `profile == portable` |
+| `private-verified` | `profile == private` and `verified` |
+| `private-active` | otherwise |
+
+**`has_own_work` is load-bearing, not decoration.** Immediately after `work start`
+the task branch has zero commits of its own, so `HEAD` *is* the tip of `onto` and a
+bare `merge-base --is-ancestor HEAD <onto>` succeeds vacuously — a freshly started
+task would report `integrated` and be told to `retire --delete-branch`. Requiring at
+least one commit past `base_sha` closes that. Cover it with
+`test_a_freshly_started_task_with_onto_is_not_integrated` (Task 5). The same fact
+surfaces as the `no-own-work` blocker on `promote`, so an empty branch cannot be
+published either.
+
+Receipts pinned to a commit are what make `verified` derivable — a receipt for an
+older commit is simply not counted, which is also why rebase needs no
+receipt-clearing bookkeeping.
+
+`onto` is optional. Without it, `integrated` and `rebased-ready` are unreachable and
+`status` reports the `needs-onto-ref` blocker rather than guessing a ref.
+
+### D3. Ship a built-in verification profile; gate the stage, not the command.
+
+Revision 1 made verification profiles machine-settings-only, never seeded
+`~/.agent-harness/settings.json`, and then gated `handoff`, `rebase`,
+`prepare-integrate` and `retire` on a passing receipt. On a fresh machine that is
+zero runnable profiles → no receipt → every gate shut permanently, including
+`retire` on a private task, whose worktree the tool could then never remove.
+
+Two changes:
+
+1. `work_config.BUILTIN_VERIFICATION_PROFILES = {"tests": ("python", "-m", "pytest", "-q")}`.
+   Machine settings may add or override entries. This is harness-shipped, not
+   repository-supplied, so it does not violate "never auto-execute repository
+   configuration" — and it never runs on its own; the operator must type
+   `work verify <id> --profile tests`.
+
+2. **The gate lives on the stage transition. Commands are instruments.**
+
+   Revision 1 attached a receipt requirement to each of `handoff`, `rebase`,
+   `prepare-integrate` and `retire` individually. That scatters one policy across six
+   call sites, so the CLI and the MCP surface can drift apart, and every command added
+   later re-litigates the rules. It also mis-frames the tools: `verify`, `diff` and
+   `status` exist to help a task *satisfy* a stage — they are how you earn the
+   transition, not things that should each carry a veto.
+
+   Exactly one function decides whether state may change:
+
+   ```python
+   def transition(directory: Path, task_id: str, to_stage: str, *,
+                  confirm: bool = False, onto: str | None = None,
+                  delete_branch: bool = False) -> GateStatus: ...
+   ```
+
+   Every state-changing command is a one-line wrapper naming its target stage. The
+   strict preconditions live here and nowhere else:
+
+| Transition | Command | Strict preconditions (**all** must hold) |
+|---|---|---|
+| `private-active → portable-active` | `promote --portable --confirm` | clean worktree; `has_own_work`; `portable_allowed`; explicit `--confirm` |
+| `portable-active → private-active` | `privatize --confirm` | not published (D7); explicit `--confirm` |
+| `* → rebased-ready` | `rebase --onto REF` | clean worktree; no *failing* receipt at HEAD; `onto` resolves as a local ref |
+| `rebased-ready → integrated` | `prepare-integrate --confirm` | clean; **passing** receipt at HEAD; portable tasks only (private tasks have no manifest to remove) |
+| `* → retired` | `retire --target REF` | clean worktree. Removes the external worktree only; the branch is left intact |
+| `integrated → retired` | `retire --target REF --delete-branch` | clean; passing receipt at HEAD; `git merge-base --is-ancestor <branch> <target>` succeeds |
+
+   **`verify` is not in this table, by design.** It is an evidence tool: it writes a
+   receipt and returns the command's own exit code. Because D2 derives the stage from
+   receipts, `*-active → *-verified` happens as a *consequence* of evidence rather than
+   as a gated act. Nothing to gate — there is no way to reach `-verified` except by
+   actually passing.
+
+   **So `portable-verified` and `private-verified` have no row, and that is correct.**
+   You do not transition into them; you run `work verify <id> --profile P` until a
+   receipt passes at HEAD, and the stage re-derives on the next `status`. The table
+   covers only acts that mutate Git or the registry.
+
+   `rebase` is deliberately `* → rebased-ready`, not `*-verified → rebased-ready`.
+   Rebasing changes HEAD, which invalidates any receipt anyway, so requiring a passing
+   one first would re-open the D3 deadlock through the stage column. A *failing* receipt
+   at HEAD still blocks, because that is a known-broken tree.
+
+   The `retire` rows preserve the deadlock fix: an abandoned task with no receipt can
+   always have its worktree reclaimed, because only `--delete-branch` requires
+   `integrated`.
+
+### D4. Drop `harness/work_exclude.py`. Replace it with a guard test.
+
+Revision 1 built and tested `ensure_local_exclude` / `remove_local_exclude`, then
+never called them from tasks 3–8. Nothing in this feature writes a repo-local
+private artifact: private mode writes only under `~/.agent-harness/`, and the
+portable manifest at `.agent-harness/handoffs/<id>.json` is *deliberately tracked*.
+
+The spec's wording is conditional — "*if* a repository-local private artifact is
+unavoidable". Here it is avoidable, so building the module now is speculative code.
+
+What the spec actually protects is the invariant, so **test the invariant instead**:
+`test_private_lifecycle_leaves_root_gitignore_and_tracked_files_untouched` (Task 1).
+If a future feature genuinely needs a repo-local private file, `.git/info/exclude`
+is the mechanism, and commit `790beff` is the precedent for doing it by hand.
+
+Note `.agent-harness/work/` carries its own `*` gitignore (see `work_store.py`), and
+`.agent-harness/handoffs/` is a *sibling* of that directory, so the manifest is
+trackable with no gitignore change anywhere.
+
+### D5. `advance` creates a recovery ref and nothing else.
+
+The spec allows `advance` to make "safe local transitions", listing manifest updates —
+but a manifest update is a commit, and committing is a history change, not a safe
+automatic transition. Narrow it: `advance` returns the next action and may perform
+exactly one mutation — creating the pre-rebase recovery ref when a rebase is next.
+Refs under `refs/agent-harness/` are invisible to normal Git workflows and purely
+additive. `advance` never commits, rebases, merges, pushes, or deletes.
+
+**Ref ownership:** `rebase` is the sole creator. `advance` calls the same
+`ensure_recovery_ref(repo, task, head)` helper, which is idempotent — if a ref under
+`refs/agent-harness/recovery/<task-id>/` already points at the current `head`, it
+returns that ref instead of minting a second timestamped one. Without this,
+`advance` followed by `rebase` leaves two refs for one rebase.
+
+### D6. Recovery ref name uses a colon-free timestamp.
+
+`refs/agent-harness/recovery/<task-id>/<YYYYMMDDTHHMMSSZ>`
+
+`memory_store.format_ts` emits ISO-8601 with colons, which `git check-ref-format`
+rejects. Use `now.strftime("%Y%m%dT%H%M%SZ")` for the ref component only; receipts
+and task timestamps keep the existing `format_ts` shape.
+
+### D7. `privatize` changes the source of truth, or it does nothing at all.
+
+Revision 1 had `privatize` "remove the manifest in an explicit commit" while noting it
+"cannot erase a manifest already committed or pushed." That describes a command that
+half-works: it reports success, tidies the working tree, and leaves the data public.
+An operator reading `status: success` would reasonably believe the handoff is private.
+
+Make it binary. There is no partial privatize.
+
+- **Not published** — the manifest-introducing commit is not reachable from any
+  remote-tracking ref. Then privatize really changes the source of truth: set
+  `profile = private` in `tasks.json` **and** remove the manifest in one explicit
+  commit. The task stops producing portable updates. This is a genuine state change,
+  not a cosmetic one.
+- **Published** — **drop the operation entirely.** No commit, no registry write, no
+  partial cleanup. Return the `already-published` blocker. History that has left the
+  machine cannot be made private by a local toggle, and a local tidy-up would
+  misrepresent what actually happened.
+
+The manifest-introducing commit is **derived, never stored** — same rule as D2. Do not
+add a field to `Task` for it; ask Git:
+
+```text
+git log --diff-filter=A --format=%H -1 -- .agent-harness/handoffs/<id>.json
+```
+
+Empty output means no manifest was ever committed, so the task is trivially unpublished.
+
+The publication check is offline and uses only local refs — never a fetch:
+
+```text
+git for-each-ref --format=%(refname) refs/remotes
+→ for each ref: git merge-base --is-ancestor <manifest-commit> <ref>
+```
+
+This reflects *last-known* remote state, which is the most an offline tool can honestly
+know. The refusal text must say so, so the operator understands a stale remote-tracking
+ref is possible and that "not published" is a best-effort answer, not a guarantee.
+
+### Verified helper contracts
+
+Checked against the working tree — use these exact names:
+
+| Symbol | Location | Signature |
+|---|---|---|
+| `atomic_sibling` | `harness/atomicwrite.py:81` | `@contextmanager (dst: Path) -> Iterator[Path]` — yields temp path, replaces on clean exit |
+| `replace_with_retry` | `harness/atomicwrite.py:50` | `(src, dst, *, attempts=5, delay=0.01) -> None` |
+| `load_json_object` | `harness/config_validation.py:42` | `(path: Path) -> dict` — reads a file |
+| `parse_json_object` | `harness/config_validation.py:24` | `(text: str, *, source: str) -> dict` — parses a string |
+| `ConfigValidationError` | `harness/config_validation.py:20` | subclass of `ValueError` |
+
+Both `config_validation` names are real and do different jobs; use `load_json_object`
+for settings files and `parse_json_object` for manifest text already in hand.
+
+`tests/conftest.py` has an **autouse** `isolated_home` fixture that patches
+`Path.home` and `HOME`/`USERPROFILE`. Revision 1 told every test to
+`monkeypatch.setattr(Path, "home", ...)` — that is redundant. Do not repeat it.
+
+---
+
+## Part 2 — File map
+
+Create:
+
+| File | Owns |
+|---|---|
+| `harness/work_config.py` | built-in defaults, layered settings resolution, `EffectiveSettings` |
+| `harness/work_manifest.py` | portable handoff schema, strict codec, sanitizer |
+| `harness/work_verify.py` | argv-only verification execution, receipts |
+| `harness/work_flow.py` | stage derivation, blockers, and the single `transition()` chokepoint |
+
+Modify:
+
+| File | Change |
+|---|---|
+| `harness/work.py` | `Task.profile` + `Task.verification`, schema-2 migration, `atomic_sibling` in `_save_tasks`, new CLI subcommands |
+| `harness/mcp_server.py` | nine new actions in `dispatch_work` + decorated wrappers |
+| `README.md` | "Parallel task workspaces" section, lines 537–559 |
+
+Tests — create `tests/test_work_config.py`, `tests/test_work_manifest.py`,
+`tests/test_work_verify.py`, `tests/test_work_flow.py`; extend the existing
+150-line `tests/test_work.py`, whose `repo` fixture is the base for the two-clone
+portable test.
+
+## Part 3 — Contracts
 
 ```python
 # harness/work_config.py
 PROFILE_PRIVATE = "private"
 PROFILE_PORTABLE = "portable"
+SETTINGS_SCHEMA = 1
+BUILTIN_VERIFICATION_PROFILES = {"tests": ("python", "-m", "pytest", "-q")}
 
 @dataclass(frozen=True)
 class EffectiveSettings:
     profile: str
-    profile_source: str
-    portable_allowed: bool
+    profile_source: str          # "built-in" | "machine" | "project" | "cli"
+    portable_allowed: bool       # default False
     worktree_root: Path | None
     verification_profiles: Mapping[str, tuple[str, ...]]
 
-def load_settings(
-    project_root: Path,
-    profile_override: str | None = None,
-) -> EffectiveSettings: ...
-
-# harness/work_exclude.py
-def ensure_local_exclude(common_git_dir: Path, pattern: str) -> Path: ...
-def remove_local_exclude(common_git_dir: Path, pattern: str) -> Path: ...
+def load_settings(project_root: Path, profile_override: str | None = None) -> EffectiveSettings: ...
 
 # harness/work_manifest.py
 HANDOFF_SCHEMA = 1
+HANDOFF_KEYS = frozenset({"schema", "task_id", "summary", "paths",
+                          "branch", "base_sha", "status", "verification", "next_action"})
+RECEIPT_KEYS = frozenset({"name", "returncode", "passed", "commit", "completed_at"})
 
 @dataclass(frozen=True)
 class PortableHandoff:
-    task_id: str
-    summary: str
-    paths: tuple[str, ...]
-    branch: str
-    base_sha: str
-    status: str
-    verification: tuple[dict[str, object], ...]
-    next_action: str
+    task_id: str; summary: str; paths: tuple[str, ...]; branch: str
+    base_sha: str; status: str; verification: tuple[dict[str, object], ...]; next_action: str
 
-def handoff_path(project_root: Path, task_id: str) -> Path: ...
+def handoff_path(project_root: Path, task_id: str) -> Path: ...   # <root>/.agent-harness/handoffs/<id>.json
 def load_handoff(path: Path) -> PortableHandoff: ...
 def write_handoff(path: Path, handoff: PortableHandoff) -> None: ...
 def remove_handoff(path: Path) -> None: ...
+def sanitize(task: Task, next_action: str) -> PortableHandoff: ...
 
 # harness/work_verify.py
 @dataclass(frozen=True)
 class VerificationReceipt:
-    name: str
-    returncode: int
-    passed: bool
-    commit: str
-    completed_at: str
+    name: str; returncode: int; passed: bool; commit: str; completed_at: str
 
-def run_verification(
-    worktree: Path,
-    commit: str,
-    name: str,
-    argv: Sequence[str],
-    timeout_seconds: float = 300.0,
-) -> VerificationReceipt: ...
+TIMEOUT_RETURNCODE = 124   # matches coreutils `timeout`
+
+def run_verification(worktree: Path, commit: str, name: str,
+                     argv: Sequence[str], timeout_seconds: float = 300.0) -> VerificationReceipt: ...
+def record_receipt(repo: Repository, task_id: str, receipt: VerificationReceipt) -> Task: ...
 
 # harness/work_flow.py
+STAGES = ("private-active", "private-verified", "portable-active",
+          "portable-verified", "rebased-ready", "integrated", "retired")
+
 @dataclass(frozen=True)
 class GateStatus:
-    task_id: str
-    profile: str
-    phase: str
-    blockers: tuple[str, ...]
-    next_actions: tuple[str, ...]
+    task_id: str; profile: str; stage: str
+    blockers: tuple[str, ...]; next_actions: tuple[str, ...]
 
-def status(directory: Path, task_id: str) -> GateStatus: ...
+# --- derivation and read-only queries -------------------------------------
+def derive_stage(task: Task, worktree: Path, onto: str | None = None) -> str: ...
+def blockers_for(task: Task, worktree: Path, to_stage: str, **opts) -> tuple[str, ...]: ...
+def status(directory: Path, task_id: str, onto: str | None = None) -> GateStatus: ...
+def advance(directory: Path, task_id: str, onto: str | None = None) -> GateStatus: ...
+
+# --- THE chokepoint: the only function that may change state --------------
+def transition(directory: Path, task_id: str, to_stage: str, *,
+               confirm: bool = False, onto: str | None = None,
+               delete_branch: bool = False) -> GateStatus: ...
+
+# --- thin wrappers; each names a target stage and adds no gate logic -------
+def promote(directory, task_id, confirm):            # -> "portable-active"
+def privatize(directory, task_id, confirm):          # -> "private-active"
+def rebase(directory, task_id, onto):                # -> "rebased-ready"
+def prepare_integrate(directory, task_id, confirm):  # -> "integrated"
+def retire(directory, task_id, target, delete_branch=False):  # -> "retired"
+
+# --- evidence and session tools; not transitions --------------------------
 def resume(directory: Path, task_id: str, session_id: str, agent: str = "codex") -> Task: ...
-def promote(directory: Path, task_id: str, confirm: bool) -> Task: ...
-def handoff(directory: Path, task_id: str, confirm: bool) -> Task: ...
-def prepare_integrate(directory: Path, task_id: str, confirm: bool) -> Task: ...
-def privatize(directory: Path, task_id: str, confirm: bool) -> Task: ...
-def rebase(directory: Path, task_id: str, onto: str) -> Task: ...
-def retire(directory: Path, task_id: str, target: str, delete_branch: bool) -> Task: ...
-def advance(directory: Path, task_id: str) -> GateStatus: ...
+def handoff(directory: Path, task_id: str, confirm: bool) -> Task: ...   # refreshes the manifest in place
+def is_published(worktree: Path, manifest_commit: str) -> bool: ...      # D7, offline
 ```
 
-`Task` remains the public model currently imported from `harness.work`; if it
-is moved to `harness.work_state`, `harness.work` must re-export it. Add
-`profile`, `phase`, and verification receipts with defaults/migration so
-existing schema-1 local task files continue to load.
+`transition()` is the single place preconditions are evaluated and the single place
+state is written. Wrappers must contain no `if` that could refuse — a wrapper that
+grows its own gate is the bug this decision exists to prevent.
+
+`handoff` is no longer a gated transition. It refreshes an existing portable manifest
+to match the registry and does not change stage; it simply refuses a private task
+(`wrong-profile`), which is a type error, not a gate.
+
+Blocker vocabulary (exact strings, used by both tests and CLI output):
+`dirty-worktree`, `failing-verification`, `no-verification`, `portable-not-allowed`,
+`wrong-profile`, `manifest-mismatch`, `worktree-missing`, `not-merged`,
+`needs-onto-ref`, `no-own-work`, `already-published`, `needs-confirm`.
 
 ---
 
-### Task 1: Add layered settings and profile validation
-
-**Files:**
-- Create: `harness/work_config.py`
-- Create: `tests/test_work_config.py`
-
-**Interfaces:**
-- Consumes: `config_validation.load_json_object`, `Path.home()`, and the project root passed by `work.py`.
-- Produces: `EffectiveSettings`, `load_settings`, `PROFILE_PRIVATE`, and `PROFILE_PORTABLE` for all later tasks.
-
-- [ ] **Step 1: Write failing settings tests.**
-
-  Add tests proving that an absent machine/project config resolves to
-  `profile == "private"` with `profile_source == "built-in"`; a machine
-  `settings.json` overrides the built-in; an optional project
-  `.agent-harness/work-settings.json` overrides the earlier default; and a
-  CLI `profile_override` wins over both.
-
-  Add rejection tests for schema `2`, an unknown `work` key, a profile other
-  than `private`/`portable`, project-defined verification commands, and a
-  malformed JSON file. Use `monkeypatch.setattr(Path, "home", ...)` so tests
-  never read the real user profile.
-
-- [ ] **Step 2: Run the focused tests and confirm they fail.**
-
-  Run:
-
-  ```text
-  python -m pytest -q tests/test_work_config.py
-  ```
-
-  Expected: collection fails because `harness.work_config` and
-  `EffectiveSettings` do not exist.
-
-- [ ] **Step 3: Implement strict layered resolution.**
-
-  Define `schema == 1`, read only the machine file if it exists, read the
-  project file only if it exists, and validate each object before merging.
-  Permit machine `work.profile`, `work.portable_allowed`,
-  `work.worktree_root`, and `work.verification_profiles`; permit project
-  `work.profile` and `work.portable_allowed` only. Store verification values
-  as tuples of argv strings. Resolve a relative `worktree_root` from the
-  machine config’s parent, and reject empty argv entries, shell strings, and
-  non-string values.
-
-  Apply the override order `built-in → machine → project → CLI`, set
-  `profile_source` to the winning layer, and default `portable_allowed` to
-  `False`. Return a frozen dataclass; do not write a config file from a read.
-
-- [ ] **Step 4: Run the focused tests and confirm they pass.**
-
-  Run:
-
-  ```text
-  python -m pytest -q tests/test_work_config.py
-  ```
-
-  Expected: all settings tests pass.
-
-- [ ] **Step 5: Commit the settings boundary.**
-
-  ```text
-  git add harness/work_config.py tests/test_work_config.py
-  git commit -m "feat: add private-first work profiles"
-  ```
-
-### Task 2: Route private exclusions through `.git/info/exclude`
-
-**Files:**
-- Create: `harness/work_exclude.py`
-- Create: `tests/test_work_exclude.py`
-
-**Interfaces:**
-- Consumes: `Repository.common_git_dir` and `atomicwrite.atomic_sibling`.
-- Produces: idempotent `ensure_local_exclude`/`remove_local_exclude` for private lifecycle code.
-
-- [ ] **Step 1: Write failing exclusion tests.**
-
-  Create a temporary Git repository with a tracked root `.gitignore` and a
-  seeded `.git/info/exclude`. Assert that:
-
-  ```python
-  ensure_local_exclude(common_git_dir, ".agent-harness/private.json")
-  ensure_local_exclude(common_git_dir, ".agent-harness/private.json")
-  ```
-
-  adds exactly one line to `info/exclude`, preserves the seed, leaves the
-  tracked `.gitignore` byte-for-byte unchanged, and causes `git check-ignore`
-  to report `.git/info/exclude` as the source. Test removal deletes only the
-  exact managed line and a missing line is a no-op.
-
-- [ ] **Step 2: Run the exclusion tests and confirm they fail.**
-
-  ```text
-  python -m pytest -q tests/test_work_exclude.py
-  ```
-
-  Expected: import or attribute failures for `harness.work_exclude`.
-
-- [ ] **Step 3: Implement idempotent, atomic local exclusion.**
-
-  Normalize only line endings, require a non-empty repository-relative
-  pattern, preserve all existing bytes except the exact line being managed,
-  and ensure one trailing newline. Use `atomic_sibling` for replacement.
-  Never call an installer helper that edits root `.gitignore`; never remove a
-  line that does not exactly equal the requested pattern.
-
-- [ ] **Step 4: Run the exclusion tests and confirm they pass.**
-
-  ```text
-  python -m pytest -q tests/test_work_exclude.py
-  ```
-
-- [ ] **Step 5: Commit the local-permission boundary.**
-
-  ```text
-  git add harness/work_exclude.py tests/test_work_exclude.py
-  git commit -m "feat: keep private work exclusions local"
-  ```
-
-### Task 3: Version local task state without breaking existing tasks
-
-**Files:**
-- Create: `harness/work_state.py`
-- Modify: `harness/work.py`
-- Modify: `tests/test_work.py`
-
-**Interfaces:**
-- Consumes: the existing `Repository`, `Task`, `_load_tasks`, `_save_tasks`, `_state_lock`, and `repository_for` behavior.
-- Produces: schema-2 task loading with schema-1 migration, profile/phase/receipt fields, and the unchanged `work.WorkError`, `work.Task`, `work.ACTIVE`, `work.DONE`, `work.start`, `work.list_tasks`, `work.find_task`, `work.diff`, and `work.finish` names.
-
-- [ ] **Step 1: Add migration and compatibility tests.**
-
-  Seed `~/.agent-harness/work/.../tasks.json` with the current schema-1
-  payload and assert `_load_tasks` returns a task whose `profile` is
-  `private`, `phase` is `active`, and `verification` is empty. Add a schema-2
-  round-trip test for a portable task with one receipt. Keep all current
-  `tests/test_work.py` assertions unchanged.
-
-- [ ] **Step 2: Run the existing work tests and confirm the new migration test fails.**
-
-  ```text
-  python -m pytest -q tests/test_work.py
-  ```
-
-  Expected: the new migration/field assertions fail while the current suite
-  remains the regression baseline.
-
-- [ ] **Step 3: Implement schema-2 normalization and atomic persistence.**
-
-  Set the local task schema to `2`. Accept schema `1` and normalize missing
-  `profile`, `phase`, and `verification` fields before constructing `Task`;
-  reject all other schema values. Use `atomic_sibling` in `_save_tasks` so a
-  killed process cannot leave a partially replaced registry. Add defaults so
-  existing callers constructing `Task` continue to work. Preserve the current
-  repository ID, lock, path-claim, and rollback behavior.
-
-- [ ] **Step 4: Run the complete work regression file.**
-
-  ```text
-  python -m pytest -q tests/test_work.py
-  ```
-
-  Expected: all existing and migration tests pass.
-
-- [ ] **Step 5: Commit the state contract.**
-
-  ```text
-  git add harness/work.py harness/work_state.py tests/test_work.py
-  git commit -m "refactor: version work task state"
-  ```
-
-### Task 4: Add strict portable handoffs
-
-**Files:**
-- Create: `harness/work_manifest.py`
-- Create: `tests/test_work_manifest.py`
-
-**Interfaces:**
-- Consumes: schema-2 `Task`, `VerificationReceipt`, `config_validation.parse_json_object`, and `atomicwrite.atomic_sibling`.
-- Produces: `PortableHandoff`, `handoff_path`, strict load/write/remove functions for lifecycle transitions.
-
-- [ ] **Step 1: Write failing manifest tests.**
-
-  Test a valid handoff round-trip with these exact safe fields:
-
-  ```python
-  {
-      "schema": 1,
-      "task_id": "work-20260824-a1b2c3d4",
-      "summary": "Update the parser",
-      "paths": ["harness/parser.py", "tests/test_parser.py"],
-      "branch": "codex/work-20260824-a1b2c3d4",
-      "base_sha": "a" * 40,
-      "status": "portable-active",
-      "verification": [],
-      "next_action": "run local verification",
-  }
-  ```
-
-  Add rejection tests for an unknown key, absolute path, `..` path,
-  `session_id`, machine plan path, malformed JSON, wrong schema, empty task
-  ID, and a verification item containing a command argv or output. Assert
-  that `write_handoff` uses an atomic sibling and leaves no temp file when
-  replacement fails.
-
-- [ ] **Step 2: Run manifest tests and confirm they fail.**
-
-  ```text
-  python -m pytest -q tests/test_work_manifest.py
-  ```
-
-- [ ] **Step 3: Implement the allowlisted manifest codec.**
-
-  Use a frozen dataclass and an explicit key set. Reuse
-  `work.normalize_paths` for repository-relative path rules, enforce a
-  40-character lowercase/hex base SHA, require a non-empty next action, and
-  retain verification receipts only as `{name, returncode, passed, commit,
-  completed_at}`. `load_handoff` must reject unknown keys before constructing
-  the dataclass. `write_handoff` must create only the parent handoff
-  directory and atomically replace the JSON file. `remove_handoff` must be
-  explicit and idempotent.
-
-- [ ] **Step 4: Run manifest tests and confirm they pass.**
-
-  ```text
-  python -m pytest -q tests/test_work_manifest.py
-  ```
-
-- [ ] **Step 5: Commit the portable data contract.**
-
-  ```text
-  git add harness/work_manifest.py tests/test_work_manifest.py
-  git commit -m "feat: add strict portable work handoffs"
-  ```
-
-### Task 5: Add local verification receipts
-
-**Files:**
-- Create: `harness/work_verify.py`
-- Create: `tests/test_work_verify.py`
-
-**Interfaces:**
-- Consumes: `EffectiveSettings.verification_profiles`, a task worktree, and the Git commit resolved immediately before execution.
-- Produces: `VerificationReceipt` and `run_verification` for `work verify` and portable handoff gates.
-
-- [ ] **Step 1: Write failing verification tests.**
-
-  Monkeypatch `subprocess.run` and assert the command receives a list argv,
-  `cwd=worktree`, `shell=False`, `check=False`, captured text output, and the
-  configured timeout. Assert a zero exit creates `passed is True`; a nonzero
-  exit creates `passed is False` without raising; and a timeout creates a
-  failed receipt with a deterministic return code. Assert the receipt stores
-  only the profile name, result, commit, and completion timestamp—not stdout,
-  stderr, session ID, or absolute paths.
-
-- [ ] **Step 2: Run verification tests and confirm they fail.**
-
-  ```text
-  python -m pytest -q tests/test_work_verify.py
-  ```
-
-- [ ] **Step 3: Implement argv-only verification.**
-
-  Resolve the named profile from machine settings, reject a missing profile,
-  empty argv, or a project-defined command, and call
-  `subprocess.run(list(argv), cwd=worktree, shell=False, capture_output=True,
-  text=True, check=False, timeout=timeout_seconds)`. Convert timeout to a
-  failed receipt, resolve the current commit before invocation, and return a
-  receipt without persisting command output. Add a state helper that appends
-  the receipt under the repository task lock and writes the registry
-  atomically.
-
-- [ ] **Step 4: Run verification tests and confirm they pass.**
-
-  ```text
-  python -m pytest -q tests/test_work_verify.py
-  ```
-
-- [ ] **Step 5: Commit verification evidence.**
-
-  ```text
-  git add harness/work_verify.py tests/test_work_verify.py
-  git commit -m "feat: record offline work verification"
-  ```
-
-### Task 6: Implement lifecycle gates and explicit transitions
-
-**Files:**
-- Create: `harness/work_flow.py`
-- Modify: `harness/work.py`
-- Modify: `tests/test_work.py`
-
-**Interfaces:**
-- Consumes: `work_config`, `work_exclude`, `work_manifest`, `work_verify`, the existing Git/worktree helpers, and schema-2 task state.
-- Produces: `GateStatus`, `resume`, `status`, `advance`, `promote`, `handoff`, `rebase`, `prepare_integrate`, `privatize`, and `retire`.
-
-- [ ] **Step 1: Write failing gate tests.**
-
-  Add tests for these exact transitions:
-
-  - `status` on a new private task reports `private-active` and says to
-    commit/discard changes before promotion.
-  - `promote(..., confirm=False)` prints/returns a preview without changing
-    Git, and `confirm=True` refuses a dirty worktree.
-  - A clean committed task can be promoted only when portable is allowed;
-    the resulting commit contains only `.agent-harness/handoffs/<id>.json`.
-  - `resume` from a fetched portable branch validates current branch and base
-    SHA, creates local state with the new session ID, and refuses a mismatch.
-  - A failed verification blocks `handoff`, `rebase`, and
-    `prepare_integrate`; a successful receipt permits them.
-  - `rebase` creates `refs/agent-harness/recovery/<id>/<timestamp>` before
-    running Git, never fetches, clears old receipts after success, and leaves
-    the recovery ref/task state intact on conflict.
-  - `prepare_integrate` removes only the handoff manifest in an explicit
-    commit; it refuses private tasks and unverified/dirty tasks.
-  - `privatize` removes future portable updates but cannot erase prior Git
-    history.
-  - `retire` refuses dirty state, an unmerged target, or a missing successful
-    verification; with `delete_branch=False` it removes only the external
-    worktree, and with `delete_branch=True` it deletes the branch only after
-    `merge-base --is-ancestor` succeeds.
-
-- [ ] **Step 2: Run the focused gate tests and confirm they fail.**
-
-  ```text
-  python -m pytest -q tests/test_work.py -k "status or resume or promote or handoff or rebase or integrate or privatize or retire"
-  ```
-
-- [ ] **Step 3: Implement the gate state machine.**
-
-  Use explicit phases `private-active`, `portable-active`,
-  `portable-verified`, `rebased-ready`, and `integrated`. Compute blockers
-  from current branch, worktree cleanliness, receipts, manifest validity,
-  target ancestry, and task profile. `advance` may perform only local state
-  updates and recovery-ref creation; it must return the next action instead of
-  invoking push, merge, rebase, or deletion implicitly.
-
-  Implement promotion and handoff as preview-then-confirm operations. Stage
-  only the manifest path for metadata commits. Implement rebase with the
-  explicit `--onto` ref and a recovery ref first. On a successful rebase,
-  resolve the new base SHA and clear receipts because the tested commit has
-  changed. Implement retire using `git worktree remove` only for a recorded
-  external worktree and use `git branch -d` only after the named target proves
-  the branch is an ancestor.
-
-- [ ] **Step 4: Add CLI parsing and output in `harness/work.py`.**
-
-  Preserve the existing commands and add:
-
-  ```text
-  resume TASK_ID --session SESSION [--agent AGENT]
-  status TASK_ID
-  verify TASK_ID --profile PROFILE
-  promote TASK_ID --portable --confirm
-  handoff TASK_ID --confirm
-  rebase TASK_ID --onto REF
-  prepare-integrate TASK_ID --confirm
-  privatize TASK_ID --confirm
-  advance TASK_ID
-  retire TASK_ID --target REF [--delete-branch]
-  ```
-
-  Render every result with the existing `status`, `summary`, `next_actions`,
-  and `artifacts` keys. A missing confirmation, invalid transition, Git
-  conflict, or failed gate returns exit code `2` with a concrete recovery
-  action; a verification command returns its own pass/fail result without
-  hiding the exit code.
-
-- [ ] **Step 5: Run the complete work test file and confirm it passes.**
-
-  ```text
-  python -m pytest -q tests/test_work.py
-  ```
-
-- [ ] **Step 6: Commit the lifecycle engine.**
-
-  ```text
-  git add harness/work.py harness/work_flow.py tests/test_work.py
-  git commit -m "feat: gate worktree lifecycle transitions"
-  ```
-
-### Task 7: Expose lifecycle actions through MCP and documentation
-
-**Files:**
-- Modify: `harness/mcp_server.py`
-- Modify: `tests/test_work.py`, which already owns `dispatch_work` coverage for work actions.
-- Modify: `README.md` around the existing “Parallel task workspaces” section at lines 537–559.
-
-**Interfaces:**
-- Consumes: the public functions from `harness.work`/`harness.work_flow` and the existing `dispatch_work` response shape.
-- Produces: MCP actions `work_resume`, `work_verify`, `work_promote`, `work_handoff`, `work_rebase`, `work_prepare_integrate`, `work_privatize`, `work_advance`, and `work_retire`; existing four work tools remain available.
-
-- [ ] **Step 1: Write failing MCP tests in `tests/test_work.py`.**
-
-  Exercise `dispatch_work` for a private `work_status` response, a portable
-  promotion preview, a verification receipt, a rebase refusal without an
-  explicit target, and retire refusal before merge. Assert every response
-  contains the current status/summary/next_actions/artifacts fields and never
-  contains a machine plan path in a portable response.
-
-- [ ] **Step 2: Run the MCP tests and confirm the new actions fail.**
-
-  ```text
-  python -m pytest -q tests/test_work.py -k mcp
-  ```
-
-- [ ] **Step 3: Register MCP descriptions and dispatch branches.**
-
-  Add one `WORK_TOOL_DESCRIPTIONS` entry and one typed decorated function per
-  new action. Keep `work_status` backward-compatible when no `task_id` is
-  provided; with a task ID it returns the gate state and next actions. Parse
-  paths and booleans exactly as the existing dispatcher does, and convert
-  `WorkError` to the existing recoverable `status: error` shape.
-
-- [ ] **Step 4: Update README usage and security guidance.**
-
-  Document the machine/project settings locations, private default, local
-  `.git/info/exclude` rule, promotion requirements, two-device resume flow,
-  command sequence, and explicit push/merge/delete boundaries. Keep examples
-  offline and use the concrete task ID `work-20260824-a1b2c3d4` in examples.
-
-- [ ] **Step 5: Run MCP and documentation checks.**
-
-  ```text
-  python -m pytest -q tests/test_work.py -k mcp
-  python -m pytest -q tests/test_work.py
-  git diff --check
-  ```
-
-- [ ] **Step 6: Commit the public surface.**
-
-  ```text
-  git add harness/mcp_server.py tests/test_work.py README.md
-  git commit -m "feat: expose gated work lifecycle actions"
-  ```
-
-### Task 8: Run the full verification matrix and record the handoff
-
-**Files:**
-- Modify: none; fixes exposed by this matrix belong in the task that owns the failing behavior.
-- Test: `tests/test_work_config.py`, `tests/test_work_exclude.py`, `tests/test_work_manifest.py`, `tests/test_work_verify.py`, and `tests/test_work.py`.
-
-**Interfaces:**
-- Consumes: all completed lifecycle modules and the existing test fixtures.
-- Produces: repeatable local evidence that private mode does not alter root `.gitignore`, portable mode round-trips across clones, and existing work behavior remains green.
-
-- [ ] **Step 1: Run the focused lifecycle matrix.**
-
-  ```text
-  python -m pytest -q tests/test_work_config.py tests/test_work_exclude.py tests/test_work_manifest.py tests/test_work_verify.py tests/test_work.py -k work
-  ```
-
-  Expected: all selected tests pass.
-
-- [ ] **Step 2: Run the complete repository suite with the isolated temp root when needed.**
-
-  ```text
-  $env:TEMP='C:\tmp'; $env:TMP='C:\tmp'; python -m pytest -q
-  ```
-
-  Expected: no new failures; report existing platform-specific skips and any
-  command-runner timeout separately from pytest failures.
-
-- [ ] **Step 3: Run static/packaging checks.**
-
-  ```text
-  python -m compileall -q harness
-  python -m build
-  git diff --check
-  git status --short --branch
-  ```
-
-  Expected: compilation/build succeed, whitespace is clean, and only the
-  intended implementation commits are ahead of the rebased main branch.
-
-- [ ] **Step 4: Record the verification result in the portable handoff only when the task is explicitly portable.**
-
-  Private mode records the result only in the machine-local registry. Portable
-  mode may update its sanitized handoff after the user reviews the receipt;
-  no command in this step pushes or merges anything.
-
-## Plan self-review checklist
-
-- Settings, local exclusion, state migration, manifest, verification, gates,
-  MCP, documentation, and regression testing each have an owning task.
-- Private mode never creates a project settings file or root `.gitignore`
-  change; portable mode is explicit and branch-local.
-- No task requires network access or executes repository-supplied commands.
-- Existing `work.py` public names and four MCP actions remain compatible.
-- Rebase recovery, conflict pause, prepare-integrate cleanup, and retire
-  merged-proof gates are covered by tests.
-- No unresolved marker or “implement later” step remains in the plan.
+## Part 4 — Action tasks
+
+### Task 1 — Task record: profile, receipts, schema-2 migration
+
+Files: `harness/work.py`, `tests/test_work.py`
+
+- [ ] Add to `tests/test_work.py`:
+      `test_schema_1_task_state_migrates_to_private_profile_with_no_receipts`
+      (seed `tasks.json` with `{"schema": 1, "tasks": [...]}` using today's field set,
+      assert `_load_tasks` returns `profile == "private"` and `verification == ()`);
+      `test_schema_2_round_trips_a_portable_task_with_one_receipt`;
+      `test_unknown_schema_version_is_refused`;
+      `test_private_lifecycle_leaves_root_gitignore_and_tracked_files_untouched`
+      (per D4). **The existing `repo` fixture creates only `src/app.py` and `README.md`
+      — there is no `.gitignore` to snapshot.** Have this test write and commit a
+      `.gitignore` first, then compare its bytes and `git ls-files` output before and
+      after a full private `start` → `diff` → `finish`, asserting both identical.
+- [ ] Run `python -m pytest -q tests/test_work.py` — the four new tests fail, the eight existing pass.
+- [ ] Set `SCHEMA_VERSION = 2`. In `_load_tasks`, accept `1` or `2`; for `1`, inject
+      `profile=PROFILE_PRIVATE` before constructing `Task`. Reject any other value with the
+      existing "unsupported schema" `WorkError`.
+- [ ] **Coerce `verification` to a tuple in the same comprehension that coerces `paths`.**
+      JSON has no tuple type, so a schema-2 round-trip returns a `list` and the
+      round-trip assertion fails unless the loader normalizes it. One edit covers both the
+      schema-1 default and the schema-2 round-trip:
+
+      ```python
+      Task(**{**item,
+              "paths": tuple(item["paths"]),
+              "verification": tuple(item.get("verification", ()))})
+      ```
+- [ ] Add the two fields from D1 to `Task`, both with defaults.
+- [ ] Replace the hand-rolled temp-and-replace in `_save_tasks` with
+      `with atomic_sibling(path) as tmp: tmp.write_text(...)`. Keep the `uuid` import —
+      `start()` still uses it for task IDs.
+- [ ] Run `python -m pytest -q tests/test_work.py` — all green.
+- [ ] `git add harness/work.py tests/test_work.py && git commit -m "refactor: version work task state"`
+
+### Task 2 — Layered settings
+
+Files: `harness/work_config.py`, `tests/test_work_config.py`
+
+- [ ] Write `tests/test_work_config.py`. Precedence: absent files → `profile == "private"`,
+      `profile_source == "built-in"`; machine `~/.agent-harness/settings.json` beats
+      built-in; project `.agent-harness/work-settings.json` beats machine;
+      `profile_override` beats all with `profile_source == "cli"`. Rejection: `schema: 2`,
+      unknown key under `work`, a profile other than private/portable, a
+      `verification_profiles` key in the **project** file, an argv given as a bare string
+      rather than a list, an empty argv, malformed JSON. Also
+      `test_builtin_tests_profile_is_available_with_no_settings_files` (D3) and
+      `test_machine_settings_override_a_builtin_profile_of_the_same_name`.
+      Do **not** patch `Path.home` — `conftest.isolated_home` already does.
+- [ ] Run `python -m pytest -q tests/test_work_config.py` — collection fails, module absent.
+- [ ] Implement. Read machine then project, each only if present, via `load_json_object`;
+      wrap `ConfigValidationError` as `WorkError`. Machine layer may set `work.profile`,
+      `work.portable_allowed`, `work.worktree_root`, `work.verification_profiles`. Project
+      layer may set `work.profile` and `work.portable_allowed` **only**. Merge
+      `BUILTIN_VERIFICATION_PROFILES` *under* the machine map so a same-named machine entry
+      wins. Store argv as `tuple[str, ...]`; reject non-string or empty members. Resolve a
+      relative `worktree_root` against the machine file's parent. `portable_allowed`
+      defaults to `False`. Return a frozen dataclass; never write a file from a read.
+- [ ] Run `python -m pytest -q tests/test_work_config.py` — green.
+- [ ] `git commit -m "feat: add private-first work profiles"`
+
+### Task 3 — Portable handoff manifest
+
+Files: `harness/work_manifest.py`, `tests/test_work_manifest.py`
+
+- [ ] Write `tests/test_work_manifest.py`. Round-trip this exact payload:
+
+      ```json
+      {"schema": 1, "task_id": "work-20260824-a1b2c3d4", "summary": "Update the parser",
+       "paths": ["harness/parser.py", "tests/test_parser.py"],
+       "branch": "codex/work-20260824-a1b2c3d4", "base_sha": "aaaa...(40 hex)",
+       "status": "portable-active", "verification": [], "next_action": "run local verification"}
+      ```
+
+      Reject: unknown key, absolute path, `..` path, a `session_id` key, a `plan_path` key,
+      malformed JSON, `schema: 2`, empty `task_id`, an uppercase or short `base_sha`, and a
+      receipt carrying `argv`/`stdout`/`stderr`. Add
+      `test_sanitize_drops_session_and_plan_path_from_a_task` and
+      `test_write_handoff_leaves_no_temp_file_when_replacement_fails`.
+- [ ] Run `python -m pytest -q tests/test_work_manifest.py` — fails.
+- [ ] Implement. `load_handoff` checks `set(payload) == HANDOFF_KEYS` **before** constructing
+      the dataclass. Reuse `work.normalize_paths` for path rules. `base_sha` must match
+      `^[0-9a-f]{40}$`. Filter each receipt to `RECEIPT_KEYS` and reject extras.
+      `next_action` must be non-empty. `write_handoff` creates only the parent directory and
+      uses `atomic_sibling`. `remove_handoff` is idempotent.
+- [ ] Run `python -m pytest -q tests/test_work_manifest.py` — green.
+- [ ] `git commit -m "feat: add strict portable work handoffs"`
+
+### Task 4 — Verification receipts
+
+Files: `harness/work_verify.py`, `tests/test_work_verify.py`
+
+- [ ] Write `tests/test_work_verify.py`. Monkeypatch `subprocess.run` and assert it is called
+      with a **list** argv, `cwd=worktree`, `shell=False`, `check=False`,
+      `capture_output=True`, `text=True`, `timeout=timeout_seconds`. Assert exit 0 →
+      `passed is True`; nonzero → `passed is False` without raising; `TimeoutExpired` → a
+      failed receipt with `returncode == TIMEOUT_RETURNCODE`. Assert
+      `test_receipt_stores_no_stdout_stderr_argv_or_absolute_path` — the receipt's field set
+      is exactly `RECEIPT_KEYS`. Assert an unknown profile name raises `WorkError`, and
+      `test_record_receipt_appends_under_the_task_lock_and_persists_atomically`.
+- [ ] Run `python -m pytest -q tests/test_work_verify.py` — fails.
+- [ ] Implement. Resolve the profile from `EffectiveSettings.verification_profiles`; reject a
+      missing profile or empty argv. Resolve the commit with `git rev-parse HEAD` **before**
+      invoking. Never persist output. `record_receipt` takes `work._state_lock`, appends to
+      `task.verification`, and saves atomically.
+- [ ] Run `python -m pytest -q tests/test_work_verify.py` — green.
+- [ ] `git commit -m "feat: record offline work verification"`
+
+### Task 5 — Stage derivation and read-only queries
+
+Files: `harness/work_flow.py`, `tests/test_work_flow.py`
+
+- [ ] Write `tests/test_work_flow.py` covering the D2 table: one test per stage, named
+      `test_derive_stage_returns_<stage_with_underscores>`. Plus
+      `test_dirty_worktree_is_a_blocker_not_a_stage`,
+      `test_receipt_for_an_older_commit_does_not_count_as_verified`,
+      `test_status_without_onto_reports_needs_onto_ref_instead_of_guessing`,
+      `test_a_freshly_started_task_with_onto_is_not_integrated` (the `has_own_work`
+      guard in D2 — a zero-commit branch must report `private-active`, not `integrated`), and
+      `test_advance_creates_only_a_recovery_ref_and_never_commits` (assert `git log` on the
+      branch is unchanged and `git status --porcelain` is empty afterwards).
+- [ ] Run `python -m pytest -q tests/test_work_flow.py` — fails.
+- [ ] Implement `derive_stage`, `blockers_for`, `status`, `advance` exactly per D2 and D5.
+      Ancestry via `git merge-base --is-ancestor` — exit 0/1 *is* the answer, so call
+      `subprocess.run` directly rather than `work._git`, which raises on any nonzero exit.
+      Recovery ref name per D6.
+- [ ] `blockers_for` is pure: `(task, worktree, to_stage, **opts) -> tuple[str, ...]`, no
+      writes, no Git mutation. It is the whole D3 precondition table and the only place
+      those rules exist. Tasks 6 and 7 add rows to it; they add no gate logic anywhere else.
+- [ ] Run `python -m pytest -q tests/test_work_flow.py` — green.
+- [ ] `git commit -m "feat: derive work lifecycle stage from git and receipts"`
+
+### Task 6 — The `transition()` chokepoint, plus promote / privatize / resume / handoff
+
+Files: `harness/work_flow.py`, `tests/test_work_flow.py`
+
+- [ ] Add chokepoint tests first, because they constrain everything after:
+      `test_every_state_changing_wrapper_delegates_to_transition` (monkeypatch
+      `work_flow.transition` to raise, then assert each of `promote`, `privatize`,
+      `rebase`, `prepare_integrate`, `retire` raises — proving none has its own path to
+      state), and `test_transition_refuses_without_writing_when_any_blocker_is_present`
+      (assert `tasks.json` mtime and `git log` are both unchanged after a refusal).
+- [ ] Add `test_retire_does_not_touch_the_worktree_before_the_gate_runs`. Delegation alone
+      is not enough for `retire`: it also removes a worktree, and a test that only checks
+      "the wrapper raised" passes whether removal happens before or after the gate. Patch
+      `transition` to raise, call `retire`, and assert the worktree directory **still
+      exists** — a refused retire must not have already deleted it.
+- [ ] Add transition tests: `promote(confirm=False)` returns a preview and mutates no Git
+      state; `promote(confirm=True)` refuses `dirty-worktree`, `no-own-work`, and
+      `portable-not-allowed`; on success the new commit's changed-file list is exactly
+      `[".agent-harness/handoffs/<id>.json"]`.
+- [ ] Add D7 privatize tests: `test_privatize_unpublished_sets_profile_private_in_the_registry`
+      (assert `tasks.json` really flips **and** the manifest commit lands),
+      `test_privatize_published_makes_no_commit_and_no_registry_write`
+      (seed a `refs/remotes/origin/...` ref containing the manifest commit; assert
+      `already-published`, unchanged `tasks.json`, unchanged `git log`), and
+      `test_is_published_uses_only_local_refs_and_never_fetches`.
+- [ ] Add tool tests: `resume` from a fetched branch validates task ID, branch, and
+      `base_sha`, writes local state with the new session ID, and raises
+      `manifest-mismatch` on disagreement. `handoff` refreshes the manifest without
+      changing stage and refuses a private task with `wrong-profile`.
+- [ ] Run the focused tests — fail.
+- [ ] Implement `transition()` as the sole writer: resolve stage → collect
+      `blockers_for(...)` → refuse with `GateStatus` if any → act → persist atomically. On
+      failure leave the prior task record usable. Stage **only** the manifest path for
+      metadata commits (`git add <manifest>`, never `git add -A`).
+- [ ] Implement `promote` and `privatize` as wrappers naming their target stage, and
+      `is_published` per D7. No wrapper may contain a refusal branch.
+- [ ] Run `python -m pytest -q tests/test_work_flow.py tests/test_work.py` — green.
+- [ ] `git commit -m "feat: route work state changes through one gated transition"`
+
+### Task 7 — History transitions: rebase, prepare-integrate, retire
+
+Files: `harness/work_flow.py`, `tests/test_work_flow.py`
+
+- [ ] Add tests: `rebase` creates the recovery ref **before** running Git, never fetches
+      (monkeypatch the git runner and assert no `fetch` argv), updates `base_sha` on success,
+      and on conflict leaves Git in its normal conflict state with the recovery ref and task
+      record intact. `prepare_integrate` requires a passing receipt (`no-verification`
+      otherwise), refuses a private task, and removes only the manifest. `retire` without
+      `--delete-branch` removes only a recorded **external** worktree and works with no
+      receipt (D3); `retire --delete-branch` requires a passing receipt and refuses with
+      `not-merged` until `git merge-base --is-ancestor <branch> <target>` succeeds, then uses
+      `git branch -d` (never `-D`).
+- [ ] Run the focused tests — fail.
+- [ ] Add the remaining rows to `blockers_for` per the D3 table — `rebased-ready`,
+      `integrated`, `retired`. Implement `rebase`, `prepare_integrate`, `retire` as
+      wrappers over `transition()`; like Task 6's, none may contain a refusal branch.
+      `rebase` uses an explicit `--onto <ref>`.
+- [ ] Run `python -m pytest -q tests/test_work_flow.py tests/test_work.py` — green.
+- [ ] `git commit -m "feat: gate rebase, integration prep, and retirement"`
+
+### Task 8 — CLI surface
+
+Files: `harness/work.py`, `tests/test_work.py`
+
+- [ ] Add tests asserting each new subcommand parses, and that a blocked gate exits `2` with
+      the existing `status:` / `summary:` / `next_actions:` / `artifacts:` shape.
+- [ ] Add subparsers, leaving `start` / `list` / `diff` / `finish` byte-identical:
+      `resume TASK_ID --session S [--agent A]`, `status TASK_ID [--onto REF]`,
+      `verify TASK_ID --profile P`, `promote TASK_ID --portable [--confirm]`,
+      `handoff TASK_ID [--confirm]`, `rebase TASK_ID --onto REF`,
+      `prepare-integrate TASK_ID [--confirm]`, `privatize TASK_ID [--confirm]`,
+      `advance TASK_ID [--onto REF]`, `retire TASK_ID --target REF [--delete-branch]`.
+      Every one takes the existing `--project` argument defaulting to `"."`.
+- [ ] `verify` returns the command's own pass/fail as exit `0`/`1`, kept distinct from the
+      gate-refusal exit `2`.
+- [ ] **The CLI adds no gate logic.** Each subcommand parses arguments and calls one
+      `work_flow` function. Add `test_cli_never_refuses_a_transition_on_its_own`:
+      monkeypatch `work_flow.transition` to return a clean `GateStatus` and assert every
+      state-changing subcommand exits `0` — proving no refusal branch lives in `work.py`.
+- [ ] Run `python -m pytest -q tests/test_work.py` — green.
+- [ ] `git commit -m "feat: add work lifecycle subcommands"`
+
+### Task 9 — MCP surface
+
+Files: `harness/mcp_server.py`, `tests/test_work.py`
+
+- [ ] Add tests to `tests/test_work.py` exercising `dispatch_work` for `work_status` with a
+      task ID, a promotion preview, a verification receipt, a rebase refused without `onto`,
+      and retire refused before merge. Assert every response carries
+      status/summary/next_actions/artifacts, plus
+      `test_portable_mcp_response_never_contains_a_machine_plan_path`. Assert the existing
+      four tools still respond unchanged, including `work_status` with no `task_id`.
+- [ ] **Add the cross-surface consistency test** — this is what keeps the two call
+      surfaces from drifting: `test_cli_and_mcp_report_identical_blockers_for_the_same_task`.
+      Build one task in each blocked condition (`dirty-worktree`, `no-verification`,
+      `not-merged`, `already-published`), then assert the CLI result and the
+      `dispatch_work` result carry the same `blockers` tuple and the same stage. Both
+      surfaces reach state only through `work_flow.transition`, so any divergence here
+      means gate logic leaked into a wrapper.
+- [ ] Run `python -m pytest -q tests/test_work.py -k mcp` — new cases fail.
+- [ ] Add one `WORK_TOOL_DESCRIPTIONS` entry and one typed decorated wrapper per action:
+      `work_resume`, `work_verify`, `work_promote`, `work_handoff`, `work_rebase`,
+      `work_prepare_integrate`, `work_privatize`, `work_advance`, `work_retire`. Extend the
+      `for func in (...)` registration tuple at line 808. Convert `WorkError` to the existing
+      recoverable `status: error` shape. Update the tool count in the module docstring
+      (line 2, currently "20 typed MCP tools") and the `work_*` list at lines 36–39.
+      `tests/test_mcp_server.py:141` hard-codes a tool-name set, but it asserts on
+      `TOOL_TO_COMMAND`, which is graph-only — adding `work_*` entries to the separate
+      `WORK_TOOL_DESCRIPTIONS` map does not touch it, so that file needs no edit.
+- [ ] Run `python -m pytest -q tests/test_work.py tests/test_mcp_server.py` — green.
+- [ ] `git commit -m "feat: expose gated work lifecycle actions"`
+
+### Task 10 — Docs and full verification matrix
+
+Files: `README.md`
+
+- [ ] Rewrite README lines 537–559. Document: machine vs project settings paths, the
+      `private` default, `portable_allowed` defaulting to `False`, the built-in `tests`
+      profile, the two-device fetch-then-`resume` flow, the full command sequence, and the
+      explicit push/merge/delete boundary. Keep every example offline and use the task ID
+      `work-20260824-a1b2c3d4`. Correct the existing sentence "the project `.gitignore` is
+      never modified" to also state that no `.git/info/exclude` entry is written either (D4).
+- [ ] `python -m pytest -q tests/test_work.py tests/test_work_config.py tests/test_work_manifest.py tests/test_work_verify.py tests/test_work_flow.py`
+- [ ] `$env:TEMP='C:\tmp'; $env:TMP='C:\tmp'; python -m pytest -q` — full suite; report
+      pre-existing platform skips separately from failures.
+- [ ] `python -m compileall -q harness && python -m build && git diff --check && git status --short --branch`
+- [ ] `git commit -m "docs: document the gated work lifecycle"`
+
+---
+
+## Acceptance
+
+- `python -m pytest -q` shows no new failures.
+- The eight original tests in `tests/test_work.py` are unmodified and passing.
+- `work_start` / `work_status` / `work_diff` / `work_finish` respond exactly as before.
+- A private task start→finish changes neither root `.gitignore` nor `git ls-files` output.
+- A fresh machine with no `~/.agent-harness/settings.json` can run
+  `work verify <id> --profile tests` and reach `retire`.
+- No module in `harness/` exceeds 800 lines; `pyproject.toml` gains no runtime dependency.
+- No test reaches the network.
+- **`work_flow.transition` is the only function that writes task state or mutates Git.**
+  `grep -n "_save_tasks\|git commit\|git rebase\|git branch -d\|worktree remove" harness/work_flow.py`
+  shows every hit inside `transition()` or a helper it alone calls.
+- **The gate exists once.** Every blocker string is produced by `blockers_for` and by
+  nothing else; no wrapper, CLI subcommand, or MCP action contains a refusal branch.
+- CLI and MCP return identical blockers and stage for the same task in every blocked
+  condition.
+- `privatize` is all-or-nothing: on a published task it writes nothing at all (D7).
