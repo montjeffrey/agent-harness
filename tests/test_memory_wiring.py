@@ -453,6 +453,7 @@ def test_no_general_review_or_accept_tool_is_exposed() -> None:
         "memory_context", "memory_status", "memory_remember",
         "memory_confirm", "memory_task_done", "memory_tasks",
         "memory_claim", "memory_release", "memory_curate",
+        "memory_search",
     }
 
 

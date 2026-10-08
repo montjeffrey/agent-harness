@@ -9,6 +9,7 @@ touches the real `~/.agent-harness/memory/` directory.
 from __future__ import annotations
 
 import json
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -362,3 +363,354 @@ def test_load_registry_tolerates_a_corrupt_registry_file(fake_home: Path) -> Non
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "registry.json").write_text("{ broken", encoding="utf-8")
     assert memory_store.load_registry()["projects"] == {}
+
+
+# --- registry freshness ---------------------------------------------------
+
+LATER = datetime(2026, 9, 11, 9, 30, 0, tzinfo=timezone.utc)
+
+
+def _record(project_id: str) -> dict:
+    return memory_store.load_registry()["projects"][project_id]
+
+
+def test_register_project_stamps_first_and_last_seen(project: Path) -> None:
+    project_id = memory_store.register_project(project, now=NOW)
+    record = _record(project_id)
+    assert record["first_seen"] == record["last_seen"] == memory_store.format_ts(NOW)
+    assert record["path"] == str(project.resolve())
+    assert record["name"] == project.name
+
+
+def test_re_registering_advances_last_seen_and_keeps_first_seen(project: Path) -> None:
+    project_id = memory_store.register_project(project, now=NOW)
+    memory_store.register_project(project, now=LATER)
+
+    record = _record(project_id)
+    assert record["first_seen"] == memory_store.format_ts(NOW)
+    assert record["last_seen"] == memory_store.format_ts(LATER)
+
+
+def test_init_project_refreshes_last_seen_on_a_second_run(project: Path) -> None:
+    result = memory_store.init_project(project, now=NOW)
+    memory_store.init_project(project, now=LATER)
+
+    record = _record(result.project_id)
+    assert record["first_seen"] == memory_store.format_ts(NOW)
+    assert record["last_seen"] == memory_store.format_ts(LATER)
+
+
+def test_touch_project_advances_last_seen_only(project: Path) -> None:
+    project_id = memory_store.register_project(project, now=NOW)
+
+    assert memory_store.touch_project(project, now=LATER) is True
+
+    record = _record(project_id)
+    assert record["first_seen"] == memory_store.format_ts(NOW)
+    assert record["last_seen"] == memory_store.format_ts(LATER)
+
+
+def test_touch_project_does_not_enrol_an_unregistered_project(project: Path) -> None:
+    assert memory_store.touch_project(project, now=NOW) is False
+    assert memory_store.load_registry()["projects"] == {}
+
+
+def test_touch_project_is_a_no_op_within_the_same_second(project: Path) -> None:
+    memory_store.register_project(project, now=NOW)
+    assert memory_store.touch_project(project, now=NOW) is False
+
+
+def test_touch_project_preserves_unknown_fields(project: Path) -> None:
+    project_id = memory_store.register_project(project, now=NOW)
+    registry = memory_store.load_registry()
+    registry["projects"][project_id]["label"] = "keep me"
+    memory_store.save_registry(registry)
+
+    memory_store.touch_project(project, now=LATER)
+
+    assert _record(project_id)["label"] == "keep me"
+
+
+def test_register_project_preserves_unknown_fields(project: Path) -> None:
+    project_id = memory_store.register_project(project, now=NOW)
+    registry = memory_store.load_registry()
+    registry["projects"][project_id]["label"] = "keep me"
+    memory_store.save_registry(registry)
+
+    memory_store.register_project(project, now=LATER)
+
+    assert _record(project_id)["label"] == "keep me"
+
+
+# --- registry pruning -----------------------------------------------------
+
+
+def test_prune_registry_removes_entries_whose_path_is_gone(tmp_path: Path) -> None:
+    alive = tmp_path / "alive"
+    dead = tmp_path / "dead"
+    alive.mkdir()
+    dead.mkdir()
+    alive_id = memory_store.register_project(alive, now=NOW)
+    dead_id = memory_store.register_project(dead, now=NOW)
+    dead.rmdir()
+
+    result = memory_store.prune_registry()
+
+    assert result.changed
+    assert [pid for pid, _, _ in result.removed] == [dead_id]
+    assert result.removed[0][2] == "missing"
+    assert result.kept == (alive_id,)
+    assert set(memory_store.load_registry()["projects"]) == {alive_id}
+
+
+def test_prune_registry_removes_named_ids_even_when_the_path_exists(
+    tmp_path: Path,
+) -> None:
+    keep = tmp_path / "keep"
+    retire = tmp_path / "retire"
+    keep.mkdir()
+    retire.mkdir()
+    keep_id = memory_store.register_project(keep, now=NOW)
+    retire_id = memory_store.register_project(retire, now=NOW)
+
+    result = memory_store.prune_registry([retire_id])
+
+    assert [(pid, reason) for pid, _, reason in result.removed] == [
+        (retire_id, "named")
+    ]
+    assert set(memory_store.load_registry()["projects"]) == {keep_id}
+    assert retire.is_dir(), "prune touches the registry, never the project"
+
+
+def test_prune_registry_dry_run_reports_without_writing(tmp_path: Path) -> None:
+    dead = tmp_path / "dead"
+    dead.mkdir()
+    dead_id = memory_store.register_project(dead, now=NOW)
+    dead.rmdir()
+
+    result = memory_store.prune_registry(dry_run=True)
+
+    assert result.dry_run and result.changed
+    assert [pid for pid, _, _ in result.removed] == [dead_id]
+    assert set(memory_store.load_registry()["projects"]) == {dead_id}
+
+
+def test_prune_registry_reports_nothing_to_do_when_everything_lives(
+    project: Path,
+) -> None:
+    project_id = memory_store.register_project(project, now=NOW)
+    result = memory_store.prune_registry()
+    assert not result.changed
+    assert result.kept == (project_id,)
+
+
+def test_prune_registry_rejects_an_unknown_id_without_writing(project: Path) -> None:
+    project_id = memory_store.register_project(project, now=NOW)
+
+    with pytest.raises(LookupError, match="no-such-project"):
+        memory_store.prune_registry(["no-such-project"])
+
+    assert set(memory_store.load_registry()["projects"]) == {project_id}
+
+
+def test_prune_registry_drops_a_record_with_no_path(project: Path) -> None:
+    project_id = memory_store.register_project(project, now=NOW)
+    registry = memory_store.load_registry()
+    del registry["projects"][project_id]["path"]
+    memory_store.save_registry(registry)
+
+    result = memory_store.prune_registry()
+
+    assert [pid for pid, _, _ in result.removed] == [project_id]
+    assert memory_store.load_registry()["projects"] == {}
+
+
+def test_prune_registry_on_an_empty_registry_is_nothing_to_do() -> None:
+    result = memory_store.prune_registry()
+    assert not result.changed
+    assert result.kept == ()
+
+
+# --- git exclusion (ADR 0004) -------------------------------------------
+#
+# Every repository below is a throwaway `git init` inside tmp_path. Nothing
+# here touches a real checkout: the point of the feature is that memory never
+# reaches anyone's git, and the point of these tests is to prove it without
+# a real project on the line.
+
+
+def _git(cwd: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(cwd), *args],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    return result.stdout.strip()
+
+
+def _repo(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    _git(path, "init", "-q")
+    return path
+
+
+def _exclude_lines(repo: Path) -> list[str]:
+    return (repo / ".git" / "info" / "exclude").read_text(encoding="utf-8").splitlines()
+
+
+def test_exclusion_is_skipped_silently_outside_a_git_repository(project: Path) -> None:
+    result = memory_store.ensure_git_exclude(project)
+    assert result.status == "not-git"
+    assert result.path is None
+    assert not (project / ".git").exists()
+    assert not (project / ".gitignore").exists()
+
+
+def test_exclusion_is_written_to_info_exclude_and_never_to_gitignore(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "repo")
+    memory_store.init_project(repo, now=NOW)
+
+    lines = _exclude_lines(repo)
+    assert memory_store.EXCLUDE_LINE in lines
+    assert not (repo / ".gitignore").exists()
+    # git itself agrees: the memory tree is ignored, and nothing else is.
+    assert _git(repo, "status", "--porcelain", "--untracked-files=all") == ""
+
+
+def test_init_project_reports_the_exclusion_outcome(tmp_path: Path, project: Path) -> None:
+    repo = _repo(tmp_path / "repo")
+    assert memory_store.init_project(repo, now=NOW).exclude.status == "added"
+    assert memory_store.init_project(repo, now=NOW).exclude.status == "present"
+    assert memory_store.init_project(project, now=NOW).exclude.status == "not-git"
+
+
+def test_exclusion_is_idempotent_and_never_duplicates_the_line(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "repo")
+    memory_store.ensure_git_exclude(repo)
+    before = _exclude_lines(repo)
+
+    second = memory_store.ensure_git_exclude(repo)
+
+    assert second.status == "present"
+    assert not second.changed
+    assert _exclude_lines(repo) == before
+    assert before.count(memory_store.EXCLUDE_LINE) == 1
+
+
+@pytest.mark.parametrize("spelling", [".agent-harness/", ".agent-harness", "/.agent-harness/", "  .agent-harness/  "])
+def test_a_line_already_present_in_any_spelling_is_respected(tmp_path: Path, spelling: str) -> None:
+    repo = _repo(tmp_path / "repo")
+    exclude = repo / ".git" / "info" / "exclude"
+    exclude.write_text(f"build/\n{spelling}\n", encoding="utf-8")
+
+    result = memory_store.ensure_git_exclude(repo)
+
+    assert result.status == "present"
+    assert exclude.read_text(encoding="utf-8") == f"build/\n{spelling}\n"
+
+
+def test_a_commented_out_line_does_not_count_as_present(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "repo")
+    exclude = repo / ".git" / "info" / "exclude"
+    exclude.write_text("# .agent-harness/\n", encoding="utf-8")
+
+    assert memory_store.ensure_git_exclude(repo).status == "added"
+    assert memory_store.EXCLUDE_LINE in _exclude_lines(repo)
+
+
+def test_exclusion_starts_on_its_own_line_when_the_file_lacks_a_trailing_newline(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path / "repo")
+    exclude = repo / ".git" / "info" / "exclude"
+    exclude.write_text("build/", encoding="utf-8")
+
+    memory_store.ensure_git_exclude(repo)
+
+    lines = _exclude_lines(repo)
+    assert lines[0] == "build/"
+    assert memory_store.EXCLUDE_LINE in lines
+
+
+def test_exclusion_is_created_when_info_exclude_is_missing(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "repo")
+    exclude = repo / ".git" / "info" / "exclude"
+    exclude.unlink()
+    exclude.parent.rmdir()
+
+    result = memory_store.ensure_git_exclude(repo)
+
+    assert result.status == "added"
+    assert exclude.is_file()
+    assert memory_store.EXCLUDE_LINE in _exclude_lines(repo)
+
+
+def test_exclusion_follows_a_dot_git_file_to_the_common_git_dir(tmp_path: Path) -> None:
+    """In a linked worktree `.git` is a file pointing into the main repository.
+    git reads `info/exclude` from the *common* dir, so that is where the line
+    must land -- writing next to the pointer file would be silently ignored."""
+    main = _repo(tmp_path / "main")
+    _git(main, "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+         "commit", "-q", "--allow-empty", "-m", "init")
+    worktree = tmp_path / "wt"
+    _git(main, "worktree", "add", "-q", str(worktree))
+    assert (worktree / ".git").is_file()
+
+    result = memory_store.init_project(worktree, now=NOW)
+
+    assert result.exclude.status == "added"
+    assert result.exclude.path == (main / ".git" / "info" / "exclude").resolve()
+    assert memory_store.EXCLUDE_LINE in _exclude_lines(main)
+    assert not (worktree / ".gitignore").exists()
+    assert _git(worktree, "status", "--porcelain", "--untracked-files=all") == ""
+
+
+def test_exclusion_follows_a_bare_gitdir_pointer_file(tmp_path: Path) -> None:
+    """The submodule shape: a `.git` file whose gitdir lives elsewhere."""
+    main = _repo(tmp_path / "main")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / ".git").write_text(f"gitdir: {(main / '.git').as_posix()}\n", encoding="utf-8")
+
+    result = memory_store.ensure_git_exclude(proj)
+
+    assert result.status == "added"
+    assert result.path == (main / ".git" / "info" / "exclude").resolve()
+    assert memory_store.EXCLUDE_LINE in _exclude_lines(main)
+
+
+def test_an_unwritable_exclude_file_is_reported_not_raised(tmp_path: Path) -> None:
+    """`info` as a *file* makes `info/exclude` impossible on every platform,
+    which is a more reliable stand-in for a read-only checkout than chmod."""
+    repo = _repo(tmp_path / "repo")
+    info = repo / ".git" / "info"
+    for child in info.iterdir():
+        child.unlink()
+    info.rmdir()
+    info.write_text("not a directory\n", encoding="utf-8")
+
+    result = memory_store.init_project(repo, now=NOW)
+
+    assert result.exclude.status == "failed"
+    assert "could not update" in result.exclude.note
+    # The failure never costs the project its memory.
+    assert (repo / ".agent-harness" / "scope.md").is_file()
+    assert result.project_id in memory_store.load_registry()["projects"]
+
+
+def test_tracked_memory_files_lists_what_git_holds(tmp_path: Path, project: Path) -> None:
+    repo = _repo(tmp_path / "repo")
+    memory_store.init_project(repo, now=NOW)
+    assert memory_store.tracked_memory_files(repo) == ()
+    assert memory_store.tracked_memory_files(project) == ()
+
+    # Force-add past the exclusion, the way a project enrolled before ADR 0004
+    # would already have its memory committed.
+    _git(repo, "add", "-f", ".agent-harness")
+
+    tracked = memory_store.tracked_memory_files(repo)
+    assert ".agent-harness/scope.md" in tracked
+    assert all(p.startswith(".agent-harness/") for p in tracked)

@@ -127,10 +127,15 @@ Each initialized repository contains:
 - `config.json` contains schema version, identity, capture settings, context
   budgets, privacy controls, and optional integrations.
 
-Project memory is committed with the repository by default so it travels with
+> **Superseded on 2026-09-11 by ADR 0004.** Project memory is never committed.
+> It stays on disk beside the project, excluded through the repository's local
+> `.git/info/exclude`, so it never appears in anyone's git work. The original
+> paragraph is kept below for the record.
+
+~~Project memory is committed with the repository by default so it travels with
 the code and can be reviewed through Git. Teams may override that policy in
 configuration, but the harness will report when durable project memory is not
-versioned.
+versioned.~~
 
 ### Machine-owned storage
 

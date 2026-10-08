@@ -57,6 +57,10 @@ class HookSpec:
     event: str
     script: str  # POSIX-style path relative to the harness root
     matcher: str | None
+    # Seconds Claude Code waits before abandoning the hook; None leaves the
+    # client default. The guards that can DENY a tool call set one explicitly:
+    # a hook that hangs would otherwise stall the very edit it adjudicates.
+    timeout: int | None = None
 
 
 # Deliberately a subset of `hooks/claude/settings-fragment.json`, which is the
@@ -66,6 +70,28 @@ class HookSpec:
 HOOK_SPECS: tuple[HookSpec, ...] = (
     HookSpec(event="SessionStart", script="hooks/claude/memory_context_hook.py", matcher=None),
     HookSpec(event="PreToolUse", script="hooks/claude/graph_read_guard.py", matcher="Read"),
+    # Path-claim enforcement. Belongs at user scope precisely because the
+    # sessions it arbitrates between are in different projects and different
+    # clients; a project-local install would only guard the one repository
+    # that happened to be enrolled. It denies only a proven conflict with
+    # another live session and allows everything else, so installing it
+    # everywhere costs nothing where no task is claimed.
+    HookSpec(
+        event="PreToolUse",
+        script="hooks/claude/claim_guard.py",
+        matcher="Edit|MultiEdit|Write|NotebookEdit",
+        timeout=10,
+    ),
+    # Progress capture. Stop fires once per turn, so work survives a crash or
+    # a quota kill mid-session; SessionEnd sweeps up commits made after the
+    # last turn. The same script handles both and is idempotent, so the pair
+    # cannot double-record.
+    HookSpec(
+        event="Stop", script="hooks/claude/progress_capture_hook.py", matcher=None, timeout=15
+    ),
+    HookSpec(
+        event="SessionEnd", script="hooks/claude/progress_capture_hook.py", matcher=None, timeout=15
+    ),
 )
 
 
@@ -98,14 +124,13 @@ def render_hook_command(python_exe: str, script_path: Path) -> str:
 
 
 def render_hook_entry(spec: HookSpec, harness_root: Path, python_exe: str) -> dict:
-    entry: dict = {
-        "hooks": [
-            {
-                "type": "command",
-                "command": render_hook_command(python_exe, harness_root / spec.script),
-            }
-        ]
+    hook: dict = {
+        "type": "command",
+        "command": render_hook_command(python_exe, harness_root / spec.script),
     }
+    if spec.timeout is not None:
+        hook["timeout"] = spec.timeout
+    entry: dict = {"hooks": [hook]}
     if spec.matcher is not None:
         entry["matcher"] = spec.matcher
     return entry

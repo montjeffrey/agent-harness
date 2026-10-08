@@ -17,12 +17,16 @@ Check levels:
 
 from __future__ import annotations
 
+import ast
+import importlib.metadata
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -54,6 +58,409 @@ AGENT_CLIS = (
     ("gemini", "Gemini CLI"),
     ("agy", "Antigravity"),
 )
+
+# The distribution this repository builds. A directory only counts as "the
+# source checkout" if its pyproject.toml claims this name -- otherwise any
+# project that happens to contain a `harness/` directory would be compared
+# against the install and produce a nonsense drift report.
+DISTRIBUTION_NAME = "agent-harness-kit"
+
+PROTOCOL_START_MARKER = "<!-- agent-harness:start -->"
+PROTOCOL_END_MARKER = "<!-- agent-harness:end -->"
+
+# A markdown code span holding a snake_case identifier. The protocol block
+# names every tool it asks an agent to call inside backticks, so this reads
+# the block's code spans rather than its prose; requiring an underscore keeps
+# plain emphasised words (`proposed`, `auto`) out of the result.
+_CODE_SPAN_TOOL = re.compile(r"`([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`")
+
+
+def _reinstall_command(checkout_root: Path) -> str:
+    """The only command that repairs a stale install of this checkout."""
+    return f'python -m pipx install --force "{checkout_root}[mcp,graph,semantic]"'
+
+
+def _is_this_distribution(pyproject: Path) -> bool:
+    try:
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return False
+    project = data.get("project")
+    return isinstance(project, dict) and project.get("name") == DISTRIBUTION_NAME
+
+
+def source_checkout_root(project_dir: Path | None = None) -> Path | None:
+    """Return a directory that is a source checkout of this distribution.
+
+    The signal is a `harness/__init__.py` sitting next to a `pyproject.toml`
+    that names this distribution. The project under inspection may itself BE
+    the checkout, which is the common case when an operator runs the doctor
+    against the repository they develop the harness in.
+    """
+    candidates: list[Path] = []
+    if project_dir is not None:
+        candidates.append(Path(project_dir))
+    candidates.append(HARNESS_ROOT)
+    for root in candidates:
+        try:
+            root = Path(root).resolve()
+        except OSError:  # pragma: no cover -- unresolvable path
+            continue
+        if (root / "harness" / "__init__.py").is_file() and _is_this_distribution(
+            root / "pyproject.toml"
+        ):
+            return root
+    return None
+
+
+def _distribution_harness_dir(dist: importlib.metadata.Distribution) -> Path | None:
+    for entry in dist.files or ():
+        if Path(str(entry)).as_posix().endswith("harness/__init__.py"):
+            try:
+                return Path(dist.locate_file(entry)).resolve().parent
+            except OSError:  # pragma: no cover -- unresolvable metadata path
+                return None
+    return None
+
+
+def installed_harness_dirs() -> list[Path]:
+    """Every `harness` package directory this environment can reach.
+
+    Plural on purpose. A checkout on `sys.path` shadows site-packages, so
+    `harness.__file__` alone would report the checkout and say nothing about
+    the site-packages copy that every *other* project on the machine loads --
+    which is exactly the copy that goes stale unnoticed. Walking the
+    distribution metadata finds both, and an editable install collapses to the
+    single checkout directory with nothing to compare.
+    """
+    found: list[Path] = []
+    try:
+        dists = list(importlib.metadata.distributions())
+    except Exception:  # pragma: no cover -- corrupt metadata must not crash the doctor
+        dists = []
+    for dist in dists:
+        try:
+            name = dist.metadata["Name"] or ""
+        except Exception:  # pragma: no cover -- unreadable METADATA
+            continue
+        if name.replace("_", "-").lower() != DISTRIBUTION_NAME:
+            continue
+        try:
+            directory = _distribution_harness_dir(dist)
+        except Exception:  # pragma: no cover -- unreadable RECORD/SOURCES
+            directory = None
+        if directory is not None and directory not in found:
+            found.append(directory)
+
+    try:
+        spec = importlib.util.find_spec("harness")
+    except (ImportError, ValueError):  # pragma: no cover
+        spec = None
+    if spec is not None and spec.origin:
+        importable = Path(spec.origin).resolve().parent
+        if importable not in found:
+            found.append(importable)
+    return found
+
+
+def _python_files(package_dir: Path) -> dict[str, Path]:
+    """Relative POSIX path -> file, for every module in a package directory."""
+    found: dict[str, Path] = {}
+    for path in package_dir.rglob("*.py"):
+        if "__pycache__" in path.parts:
+            continue
+        found[path.relative_to(package_dir).as_posix()] = path
+    return found
+
+
+def _same_contents(left: Path, right: Path) -> bool:
+    try:
+        # Newlines are normalised so a checkout cloned with autocrlf does not
+        # report every module as drifted.
+        return (
+            left.read_bytes().replace(b"\r\n", b"\n")
+            == right.read_bytes().replace(b"\r\n", b"\n")
+        )
+    except OSError:  # pragma: no cover -- unreadable file counts as different
+        return False
+
+
+def compare_install_to_source(installed_dir: Path, source_dir: Path) -> tuple[list[str], list[str]]:
+    """Return `(missing, differing)` module paths, relative to the package."""
+    source_files = _python_files(source_dir)
+    installed_files = _python_files(installed_dir)
+    missing = sorted(name for name in source_files if name not in installed_files)
+    differing = sorted(
+        name
+        for name, path in source_files.items()
+        if name in installed_files and not _same_contents(path, installed_files[name])
+    )
+    return missing, differing
+
+
+def check_install_drift(project_dir: Path | None = None) -> CheckResult:
+    """Compare the installed `harness` package against a source checkout.
+
+    A stale install is the most expensive failure this harness has: the
+    console scripts all work, the MCP server starts, and the tools added since
+    the install simply are not there. Nothing in the running system disagrees
+    with itself, so the symptom shows up as an agent being told to call a tool
+    that does not exist -- which reads like a model failure, not a packaging
+    one. Hence the noise level: modules missing from the install FAIL.
+
+    When no checkout can be identified there is nothing to compare and this is
+    INFO. A machine with only the wheel installed is a perfectly good state.
+    """
+    source_root = source_checkout_root(project_dir)
+    if source_root is None:
+        return CheckResult(
+            "INFO", "install drift",
+            "no agent-harness source checkout identified; run the doctor against "
+            "the checkout (agent-harness-doctor <checkout>) to compare it with "
+            "the installed package",
+        )
+    source_dir = (source_root / "harness").resolve()
+    installed_dirs = [d for d in installed_harness_dirs() if d != source_dir]
+    if not installed_dirs:
+        return CheckResult(
+            "INFO", "install drift",
+            f"the only harness package reachable here is the checkout itself ({source_dir}); "
+            "no separate install to drift from it",
+        )
+
+    drifted: list[tuple[Path, list[str], list[str]]] = []
+    for installed_dir in installed_dirs:
+        missing, differing = compare_install_to_source(installed_dir, source_dir)
+        if missing or differing:
+            drifted.append((installed_dir, missing, differing))
+    if not drifted:
+        return CheckResult(
+            "PASS", "install drift",
+            f"installed package{'s' if len(installed_dirs) > 1 else ''} at "
+            f"{', '.join(str(d) for d in installed_dirs)} match the checkout at {source_root}",
+        )
+
+    reports: list[str] = []
+    any_missing = False
+    for installed_dir, missing, differing in drifted:
+        parts: list[str] = []
+        if missing:
+            any_missing = True
+            parts.append(
+                f"{len(missing)} module(s) missing from the install: {', '.join(missing)}"
+            )
+        if differing:
+            shown = ", ".join(differing[:8]) + (" ..." if len(differing) > 8 else "")
+            parts.append(f"{len(differing)} module(s) differ: {shown}")
+        reports.append(f"{installed_dir} -- {'; '.join(parts)}")
+    detail = (
+        f"the installed harness package is out of date with the checkout at {source_root}: "
+        f"{' | '.join(reports)}. Every project except the checkout loads the installed "
+        f"copy, so its MCP tools and hooks are the stale ones. "
+        f"Reinstall with: {_reinstall_command(source_root)}"
+    )
+    return CheckResult("FAIL" if any_missing else "WARN", "install drift", detail)
+
+
+def served_tool_names() -> set[str] | None:
+    """Tool names the importable `harness.mcp_server` registers, or None.
+
+    Read from the module's own registration tables rather than by parsing its
+    source: `_build_server` iterates exactly these dicts to register tools, so
+    their keys are the served surface by construction, and a table added for a
+    future tool family is picked up without touching this function. Importing
+    the module is safe without the optional `mcp` SDK -- it is imported lazily
+    inside `main()`.
+    """
+    try:
+        import harness.mcp_server as mcp_server
+    except ImportError:  # pragma: no cover -- mcp_server always ships
+        return None
+
+    names: set[str] = set()
+    for attribute, value in vars(mcp_server).items():
+        if not isinstance(value, dict):
+            continue
+        if attribute == "TOOL_TO_COMMAND" or attribute.endswith("TOOL_DESCRIPTIONS"):
+            names.update(key for key in value if isinstance(key, str))
+    return names
+
+
+def _tool_names_from_source(mcp_server_path: Path) -> set[str] | None:
+    """Read a *non-imported* `mcp_server.py`'s registration tables.
+
+    Needed for the copy of the harness the doctor is not itself running from:
+    when the doctor runs inside the checkout, the site-packages server that
+    every other project actually talks to cannot be imported into this
+    process. The tables are located through the syntax tree -- the same
+    `TOOL_TO_COMMAND` / `*TOOL_DESCRIPTIONS` dicts `_build_server` iterates --
+    rather than by matching text, and nothing in the other install is
+    executed.
+    """
+    try:
+        tree = ast.parse(mcp_server_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, SyntaxError, ValueError):
+        return None
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            targets = [node.target.id]
+        elif isinstance(node, ast.Assign):
+            targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        else:
+            continue
+        if not any(t == "TOOL_TO_COMMAND" or t.endswith("TOOL_DESCRIPTIONS") for t in targets):
+            continue
+        if isinstance(node.value, ast.Dict):
+            names.update(
+                key.value
+                for key in node.value.keys
+                if isinstance(key, ast.Constant) and isinstance(key.value, str)
+            )
+    return names
+
+
+def served_tool_surfaces(project_dir: Path | None = None) -> list[tuple[str, set[str]]]:
+    """Return `(label, tool names)` for every harness copy that could serve MCP.
+
+    More than one can exist on a machine, and which one a client talks to is
+    decided by that client's registration -- not by whatever the doctor
+    imported. Reporting them separately is what makes a gap attributable to a
+    specific install rather than to the machine in general.
+    """
+    surfaces: list[tuple[str, set[str]]] = []
+    seen: set[Path] = set()
+
+    importable = served_tool_names()
+    if importable is not None:
+        try:
+            import harness.mcp_server as mcp_server
+
+            location = Path(mcp_server.__file__).resolve().parent
+        except Exception:  # pragma: no cover
+            location = None
+        if location is not None:
+            seen.add(location)
+        surfaces.append((str(location) if location else "importable harness.mcp_server", importable))
+
+    for package_dir in installed_harness_dirs():
+        if package_dir in seen:
+            continue
+        seen.add(package_dir)
+        names = _tool_names_from_source(package_dir / "mcp_server.py")
+        if names:
+            surfaces.append((str(package_dir), names))
+    return surfaces
+
+
+def protocol_block(text: str) -> str | None:
+    """Return the harness-owned region of an instruction file, if present."""
+    start = text.find(PROTOCOL_START_MARKER)
+    end = text.find(PROTOCOL_END_MARKER, start + 1)
+    if start == -1 or end == -1:
+        return None
+    return text[start + len(PROTOCOL_START_MARKER):end]
+
+
+def referenced_tool_names(block: str) -> set[str]:
+    """Tool names an instruction block tells an agent to call.
+
+    The protocol template names every tool inside a markdown code span, so
+    this reads code spans instead of matching words in prose: a sentence that
+    merely mentions memory or work in passing contributes nothing, and a tool
+    added to the template is picked up with no change here.
+    """
+    return set(_CODE_SPAN_TOOL.findall(block))
+
+
+def _protocol_sources(home: Path | None, project_dir: Path | None) -> list[tuple[str, str]]:
+    """Return `(label, block)` for each instruction block we can read."""
+    sources: list[tuple[str, str]] = []
+
+    installed_rules = (home or Path.home()) / ".claude" / "CLAUDE.md"
+    if installed_rules.is_file():
+        try:
+            block = protocol_block(installed_rules.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            block = None
+        if block is not None:
+            sources.append((str(installed_rules), block))
+
+    template_text: str | None = None
+    source_root = source_checkout_root(project_dir)
+    if source_root is not None:
+        template = source_root / "templates" / "MEMORY.protocol.md"
+        if template.is_file():
+            try:
+                template_text = template.read_text(encoding="utf-8")
+                sources.append((str(template), template_text))
+            except (OSError, UnicodeDecodeError):  # pragma: no cover
+                template_text = None
+    if template_text is None:
+        try:
+            import importlib.resources as res
+
+            packaged = (res.files("templates") / "MEMORY.protocol.md").read_text(encoding="utf-8")
+        except (ModuleNotFoundError, FileNotFoundError, OSError):  # pragma: no cover
+            packaged = None
+        if packaged is not None:
+            sources.append(("templates/MEMORY.protocol.md", packaged))
+    return sources
+
+
+def check_instruction_contract(
+    project_dir: Path | None = None, home: Path | None = None
+) -> CheckResult:
+    """Verify the instructions agents are given match the tools actually served.
+
+    The user-scope protocol block is loaded by every session on the machine,
+    while the MCP server that answers those sessions is whichever copy of
+    `harness.mcp_server` is registered. Nothing else compares the two, so an
+    install that predates a tool leaves agents under standing orders to call
+    something that is not there -- the failure mode this check exists for.
+    """
+    surfaces = served_tool_surfaces(project_dir)
+    if not surfaces:  # pragma: no cover -- mcp_server always ships
+        return CheckResult(
+            "INFO", "instruction contract", "no harness.mcp_server could be inspected"
+        )
+
+    sources = _protocol_sources(home, project_dir)
+    if not sources:
+        return CheckResult(
+            "INFO", "instruction contract",
+            "no agent-harness instruction block found; run agent-harness-setup to install one",
+        )
+
+    problems: list[str] = []
+    for instruction_label, block in sources:
+        referenced = referenced_tool_names(block)
+        for server_label, served in surfaces:
+            missing = sorted(referenced - served)
+            if missing:
+                problems.append(
+                    f"{instruction_label} tells agents to call "
+                    f"{', '.join(missing)}, which the server at {server_label} "
+                    f"({len(served)} tools) does not expose"
+                )
+    if problems:
+        source_root = source_checkout_root(project_dir)
+        remedy = (
+            _reinstall_command(source_root)
+            if source_root is not None
+            else "reinstall the harness from its checkout with pipx"
+        )
+        return CheckResult(
+            "FAIL", "instruction contract",
+            f"{'; '.join(problems)} -- those calls fail at runtime while the "
+            f"instructions keep telling every agent on this machine to make them. "
+            f"Reinstall with: {remedy}, then rerun agent-harness-setup",
+        )
+    return CheckResult(
+        "PASS", "instruction contract",
+        f"every tool named in {len(sources)} instruction block(s) is exposed by all "
+        f"{len(surfaces)} harness MCP server(s) found",
+    )
 
 
 @dataclass(frozen=True)
@@ -519,9 +926,11 @@ def run_checks(project_dir: Path | None = None) -> list[CheckResult]:
     results = [
         check_python(),
         check_harness_files(),
+        check_install_drift(project_dir),
         check_git(),
         check_graphify(),
         check_mcp(),
+        check_instruction_contract(project_dir),
         check_backend_key(),
         check_semantic(),
         check_graph_semantic(project_dir),

@@ -155,7 +155,13 @@ def git_head(repo_root: Path) -> str | None:
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
-            cwd=repo_root, capture_output=True, text=True, timeout=10, check=False,
+            # stdin=DEVNULL is load-bearing, not hygiene. Inside the stdio MCP
+            # server the process stdin is the live JSON-RPC pipe; a git child
+            # that inherits it blocks before git even starts (GIT_TRACE emits
+            # nothing) until this timeout fires, turning a 0.03 s call into a
+            # 10 s one. See git_is_dirty for the same reason.
+            cwd=repo_root, stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, timeout=10, check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -168,7 +174,12 @@ def git_is_dirty(repo_root: Path) -> bool | None:
     try:
         result = subprocess.run(
             ["git", "status", "--porcelain"],
-            cwd=repo_root, capture_output=True, text=True, timeout=10, check=False,
+            # stdin=DEVNULL: never let git inherit the caller's stdin. Under
+            # the stdio MCP server that stdin is the JSON-RPC pipe, and a git
+            # child holding it hangs at startup until the timeout below --
+            # 10 s per call, 20 s per memory_context.
+            cwd=repo_root, stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, timeout=10, check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None

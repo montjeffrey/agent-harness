@@ -112,7 +112,8 @@ def test_hooks_merge_is_idempotent(tmp_path: Path) -> None:
     settings_path = project / ".claude" / "settings.json"
     settings = json.loads(settings_path.read_text(encoding="utf-8"))
     pre_tool_use = settings["hooks"]["PreToolUse"]
-    assert len(pre_tool_use) == 1
+    # Two PreToolUse guards: the graph-read redirect and the path-claim guard.
+    assert len(pre_tool_use) == 2
 
     second_action = install.install_hooks(project, install.HARNESS_ROOT)
     assert second_action == "unchanged"

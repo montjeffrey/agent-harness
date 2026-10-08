@@ -189,3 +189,206 @@ def test_multiple_workspaces_are_pathsep_joined() -> None:
 
     merged, _ = agent_setup.merge_workspace_env({}, [Path("/a"), Path("/b")])
     assert os.pathsep in merged["env"][agent_setup.WORKSPACE_ENV]
+
+
+# --- one registration, every client ---------------------------------------
+#
+# The bug these guard against is not a crash either: each client's config
+# looks correct on its own, and only the comparison between them shows that
+# Claude Code was pointed at site-packages while Codex was pointed at a
+# checkout. Whichever one an agent happened to be talking to decided which
+# tools existed.
+
+
+def test_every_client_registers_the_identical_server_entry(tmp_path: Path) -> None:
+    from harness import bootstrap_register
+
+    root = tmp_path / "checkout"
+    (root / "hooks" / "antigravity").mkdir(parents=True)
+    entry = agent_setup.mcp_registration(root, sys.executable)
+
+    claude = bootstrap_register.render_mcp_entry(root.resolve(), sys.executable)
+    antigravity = json.loads(
+        agent_setup.render_antigravity_plugin(root, sys.executable)["mcp_config.json"]
+    )["mcpServers"]["agent-harness"]
+    codex = agent_setup._codex_command(root, sys.executable)
+
+    assert claude == entry
+    assert antigravity == entry
+    # Codex takes the same thing through its CLI's flag surface.
+    assert codex[:4] == ["codex", "mcp", "add", "agent-harness"]
+    assert codex[-(len(entry["args"]) + 1):] == [entry["command"], *entry["args"]]
+    for key, value in entry["env"].items():
+        assert f"{key}={value}" in codex
+
+
+def test_codex_and_claude_agree_on_the_pythonpath_string(tmp_path: Path) -> None:
+    """Same root, same spelling -- not one checkout and one site-packages."""
+    root = tmp_path / "a checkout with spaces"
+    root.mkdir()
+    entry = agent_setup.mcp_registration(root, sys.executable)
+    codex = agent_setup._codex_command(root, sys.executable)
+
+    env_flags = [codex[i + 1] for i, part in enumerate(codex) if part == "--env"]
+
+    assert env_flags == [f"PYTHONPATH={entry['env']['PYTHONPATH']}"]
+    assert str(root.resolve()).replace("\\", "/") == entry["env"]["PYTHONPATH"]
+
+
+def test_a_relative_harness_root_resolves_once_for_all_adapters(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--harness-root .` must not mean different things to different clients."""
+    monkeypatch.chdir(tmp_path)
+    seen: dict[str, Path] = {}
+
+    def _record(name):
+        def _installer(harness_root, python_exe, *, dry_run, **kwargs):
+            seen[name] = Path(harness_root)
+            return [f"{name}: ok"]
+
+        return _installer
+
+    for name in ("claude", "codex", "antigravity"):
+        monkeypatch.setattr(agent_setup, f"install_{name}", _record(name))
+
+    assert agent_setup.main(["--agents", "claude,codex,antigravity", "--harness-root", ".", "--dry-run"]) == 0
+    assert set(seen) == {"claude", "codex", "antigravity"}
+    assert len(set(seen.values())) == 1
+    assert next(iter(seen.values())) == tmp_path.resolve()
+
+
+class _FakeCompleted:
+    def __init__(self, returncode: int) -> None:
+        self.returncode = returncode
+        self.stdout = ""
+        self.stderr = ""
+
+
+def test_codex_dry_run_shows_the_registration_without_running_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+
+    def _fake_run(command, **kwargs):
+        calls.append(list(command))
+        return _FakeCompleted(1)  # `codex mcp get` -> not registered
+
+    monkeypatch.setattr(agent_setup.shutil, "which", lambda _: "codex")
+    monkeypatch.setattr(agent_setup.subprocess, "run", _fake_run)
+
+    actions = agent_setup.install_codex(tmp_path, sys.executable, dry_run=True)
+
+    assert [c[:3] for c in calls] == [["codex", "mcp", "get"]]  # nothing was added
+    assert len(actions) == 1 and "would run" in actions[0]
+    entry = agent_setup.mcp_registration(tmp_path, sys.executable)
+    assert entry["env"]["PYTHONPATH"] in actions[0]
+
+
+def test_codex_leaves_an_existing_registration_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Setup will not replace configuration it cannot prove it owns."""
+    calls: list[list[str]] = []
+
+    def _fake_run(command, **kwargs):
+        calls.append(list(command))
+        return _FakeCompleted(0)  # already registered
+
+    monkeypatch.setattr(agent_setup.shutil, "which", lambda _: "codex")
+    monkeypatch.setattr(agent_setup.subprocess, "run", _fake_run)
+
+    actions = agent_setup.install_codex(tmp_path, sys.executable, dry_run=False)
+
+    assert [c[:3] for c in calls] == [["codex", "mcp", "get"]]
+    assert actions == ["codex/mcp/agent-harness: already registered (left unchanged)"]
+
+
+def test_codex_registers_the_shared_entry_when_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+
+    def _fake_run(command, **kwargs):
+        calls.append(list(command))
+        return _FakeCompleted(1 if command[:3] == ["codex", "mcp", "get"] else 0)
+
+    monkeypatch.setattr(agent_setup.shutil, "which", lambda _: "codex")
+    monkeypatch.setattr(agent_setup.subprocess, "run", _fake_run)
+
+    actions = agent_setup.install_codex(tmp_path, sys.executable, dry_run=False)
+
+    assert calls[-1] == agent_setup._codex_command(tmp_path, sys.executable)
+    assert actions == ["codex/mcp/agent-harness: registered"]
+
+
+def test_main_announces_the_root_every_client_is_pointed_at(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The root is the one fact that decides which harness copy answers; say it."""
+    for name in ("claude", "codex", "antigravity"):
+        monkeypatch.setattr(agent_setup, f"install_{name}", lambda *a, **k: [])
+
+    assert agent_setup.main(["--harness-root", str(tmp_path), "--dry-run"]) == 0
+
+    out = capsys.readouterr().out
+    assert f"registering harness root {tmp_path.resolve()}" in out
+    assert "claude, codex, antigravity" in out
+
+
+def _fake_codex(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    """Put a Codex CLI on PATH that has nothing registered; record its calls."""
+    calls: list[list[str]] = []
+
+    def _fake_run(command, **kwargs):
+        calls.append(list(command))
+        return _FakeCompleted(1 if command[:3] == ["codex", "mcp", "get"] else 0)
+
+    monkeypatch.setattr(agent_setup.shutil, "which", lambda _: "codex")
+    monkeypatch.setattr(agent_setup.subprocess, "run", _fake_run)
+    return calls
+
+
+def test_main_dry_run_writes_nothing_for_any_client(
+    tmp_path: Path, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    calls = _fake_codex(monkeypatch)
+
+    assert agent_setup.main(["--harness-root", str(checkout), "--dry-run"]) == 0
+
+    assert list(isolated_home.rglob("*")) == []
+    assert all(c[:3] == ["codex", "mcp", "get"] for c in calls)
+
+
+def test_one_setup_run_lands_the_same_root_in_every_client_config(
+    tmp_path: Path, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Read back what each client was actually given, not what was rendered.
+
+    This is the end state the whole adapter layer exists for: after one run,
+    `~/.claude.json`, the Antigravity plugin and the Codex CLI all name the
+    same interpreter and the same `PYTHONPATH`. The machine this was written
+    on had Claude Code pointed at site-packages and Codex at a checkout.
+    """
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    calls = _fake_codex(monkeypatch)
+
+    assert agent_setup.main(["--harness-root", str(checkout), "--python", sys.executable]) == 0
+
+    expected = agent_setup.mcp_registration(checkout, sys.executable)
+    claude = json.loads((isolated_home / ".claude.json").read_text(encoding="utf-8"))
+    antigravity = json.loads(
+        (agent_setup.antigravity_plugin_dir(isolated_home) / "mcp_config.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    codex_add = next(c for c in calls if c[:3] == ["codex", "mcp", "add"])
+
+    assert claude["mcpServers"]["agent-harness"] == expected
+    assert antigravity["mcpServers"]["agent-harness"] == expected
+    assert codex_add == agent_setup._codex_command(checkout, sys.executable)
+    assert f"PYTHONPATH={expected['env']['PYTHONPATH']}" in codex_add
+    assert expected["env"]["PYTHONPATH"] == str(checkout.resolve()).replace("\\", "/")

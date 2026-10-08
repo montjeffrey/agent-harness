@@ -107,7 +107,13 @@ of the inbox, so moving it would delete it from the packet and the index.
 `active.md` is rewritten within entry and character budgets with unit-atomic,
 counted omission. Writes are ordered archive -> durable -> active -> inbox, so
 a crash loses only derived work; the inbox splice is line-level, preserving
-lines this schema version cannot parse. A project lockfile excludes concurrent
+lines this schema version cannot parse. Within a duplicate group the survivor
+is the best-supported entry rather than the earliest, and the support its
+dropped twins carried is folded into it -- gaps only, with identity, claim
+and `confidence` never moving -- so the pass cannot make the store poorer
+than the sum of what it was told. Near-duplicates, where one summary's
+wording contains another's, are reported and never removed: containment is
+not equivalence. A project lockfile excludes concurrent
 compactions and self-heals when stale or corrupt. Because `update_index` only
 drops departed ids when re-run, compaction reports when the semantic index
 needs rebuilding -- without that, compaction would freshen the files while
@@ -119,6 +125,19 @@ relationship proposals (step 9), contradiction detection (step 5, which exists
 nowhere yet), and the optional AI summarization pass. Design step 4 (reconcile
 task and blocker states) needed no work -- `memory_review` and `memory_tasks`
 already enforce those transitions at write time.
+
+Also shipped: **compaction pressure** (`memory_compact.pressure`, surfaced by
+the context packet). `compact` shipped and then never ran -- nothing invoked
+it, and nothing said it was worth invoking. The packet now counts what a
+compaction pass would actually remove and what nobody has reviewed, once per
+scope, and prints a line only when the count is non-zero. It measures the
+condition rather than elapsed time, so it stays quiet the week nothing closes
+and speaks the day something does; it reuses `is_terminal` and
+`find_duplicates` rather than restating them, so the nudge cannot come to
+advertise more than the command delivers. Machine pressure emits the review
+line only, since `compact` cannot act on that directory. Nothing invokes
+`compact` automatically -- the governing design forbids hook-driven removal
+from the store of record and permits only reporting staleness.
 
 Open:
 
@@ -221,9 +240,10 @@ Open:
 
 - **Codex has no read path.** It is named as a target agent but has neither a
   session hook nor a verified MCP registration.
-- **Machine-scope sync.** Project scope travels by git. Machine scope travels
-  by nothing -- which is correct by design, but means a second machine starts
-  blank with no documented way to seed it.
+- **Cross-machine sync.** Neither scope travels. Project memory is
+  machine-local and excluded from git by design (ADR 0004), and machine scope
+  travels by nothing -- correct, but it means a second machine starts blank
+  for both scopes with no documented way to seed it.
 - **Concurrent writes.** Advisory locking was designed and never built. Two
   agents appending to one inbox is an ordinary case in this setup, not an edge
   case.

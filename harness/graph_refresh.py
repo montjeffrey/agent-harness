@@ -82,6 +82,15 @@ def detect_graphify() -> GraphifyStatus:
     to change to match.
     """
     try:
+        # NOTE: unlike the git calls in harness/graph_location.py and
+        # harness/work.py, this probe deliberately does NOT pass
+        # stdin=subprocess.DEVNULL. It is CLI-only -- reachable from
+        # harness/doctor.py and harness/enroll.py, never from the stdio MCP
+        # server -- so it never inherits a JSON-RPC pipe and cannot hit the
+        # blocked-at-startup hang those call sites guard against. Add the
+        # kwarg here the moment anything in mcp_server can reach it (the
+        # subprocess fakes in tests/test_graph_refresh_lifecycle.py pin this
+        # exact signature and must be widened in the same change).
         result = subprocess.run(
             [sys.executable, "-m", "graphify", "--version"],
             capture_output=True, text=True, timeout=30, check=False,

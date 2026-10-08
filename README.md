@@ -85,6 +85,13 @@ files** — no AGENTS.md, no CLAUDE.md, no project-local settings. Memory is
 set up first and independently, so a project without a graph still gets
 working memory.
 
+Memory **never enters git.** Enroll lists `.agent-harness/` in the
+repository's private `.git/info/exclude` — not in `.gitignore`, which would
+itself show up as a diff in other people's work. Re-running enroll adds the
+exclusion to a project enrolled before this rule existed. If git already
+tracks the directory, enroll prints the `git rm -r --cached .agent-harness`
+command and leaves that history change to you (ADR 0004).
+
 **Or never run it at all.** Set these two once and any project under your
 workspace gets its memory created the first time you open a session in it:
 
@@ -519,7 +526,9 @@ agent-harness-memory eval --strategy deterministic --strategy semantic --save
 python -m harness.memory init
 ```
 
-Project storage is created in the repo so memory travels with the code:
+Project storage is created beside the code, on this machine only. It is kept
+out of git through `.git/info/exclude` and never appears in anyone's status,
+diff, or commit (ADR 0004):
 
 ```text
 .agent-harness/
@@ -531,8 +540,9 @@ Project storage is created in the repo so memory travels with the code:
 ```
 
 Machine-scope memory (`~/.agent-harness/memory/`) holds the project registry
-and reusable cross-project knowledge. It is local by default and is never
-committed into a project.
+and reusable cross-project knowledge. It is local and is never committed into
+a project. The registry, not git, is what links projects to each other; a
+second machine starts with blank memory for both scopes.
 
 ### Parallel task workspaces
 
@@ -751,7 +761,10 @@ Compaction is the only operation that removes entries, so its rules are narrow:
   Promotion is idempotent by entry id.
 - **`active.md` is rewritten** with open work and recent decisions, bounded by
   entry and character budgets. Omission is unit-atomic and counted, matching
-  the context packet's own rule.
+  the context packet's own rule. The two budgets are deliberately independent
+  -- compaction's is the larger -- because the packet re-splits the file one
+  entry per unit when it reads it back. A file that overruns the packet's
+  smaller allowance loses its last few entries, never the whole section.
 - **The inbox is spliced last** -- archive, then durable, then active, then
   inbox. The inbox is the store of record and everything else derives from it,
   so a crash partway through loses only derived work the next run redoes.
@@ -773,6 +786,34 @@ run `agent-harness-memory index` to drop them from retrieval.
 the store still grows without bound. It needs its own rules rather than these
 pointed at another directory -- machine memory has no repository to be
 reviewed in and no per-project week to archive against.
+
+#### Nothing runs `compact` for you
+
+Compaction is explicit: no hook and no scheduler invokes it, because removing
+entries from the store of record without a human in the loop would mean
+discovering the removal by reading an archive rather than by deciding. What
+the context packet does instead is tell you when running it would be worth
+something:
+
+```text
+[memory] 12 closed, 3 duplicate proposals -- run `agent-harness-memory compact`
+[memory] 6 proposals unreviewed, oldest 23d -- run `agent-harness-memory review`
+```
+
+Both lines are derived from the entries themselves -- the first counts exactly
+what a compaction pass would remove, the second what nobody has looked at --
+so a clean store prints neither. That silence is the point: a nudge that fires
+on a store with nothing to clear teaches you to ignore it.
+
+They stay two sentences because they ask for different things, and only one is
+mechanical. Compaction cannot remove a proposal, so a merged line reading
+"6 entries, run compact" would send you to a command that clears nothing. For
+the same reason machine pressure only ever produces the review line, and names
+the scope the flag does not default to:
+
+```text
+[memory] 6 machine proposals unreviewed, oldest 23d -- run `agent-harness-memory review --scope machine`
+```
 
 Also not yet included, each tracked separately in `ROADMAP.md`: scope-drift
 detection, cross-project relationship proposals, contradiction detection, and

@@ -490,9 +490,17 @@ def resolve_selector(
     client_factory: ClientFactory | None = None,
     query: str | None = None,
     entry_count: int | None = None,
+    scopes: Sequence[str] = ("project", "machine"),
 ) -> tuple[Any, str, list[str]]:
     """Pick the selector for `strategy`, returning it with the strategy name
     actually used and any notes explaining a fallback.
+
+    `scopes` limits which indexes the selector routes on. The default is
+    both, as a context packet needs; a cross-project search resolves one
+    selector per source and passes `("project",)` for another project's
+    inbox or `("machine",)` for the shared machine store, so a note about the
+    *other* scope's missing index is never attached to a source it does not
+    concern.
 
     `adaptive` decides per call whether semantic ranking could change this
     particular packet, using `query` and `entry_count` alone, and only then
@@ -538,7 +546,16 @@ def resolve_selector(
         # place rather than being restated here.
         strategy = "auto"
 
-    dirs = index_dirs_for(project_id)
+    dirs = {
+        scope: path
+        for scope, path in index_dirs_for(project_id).items()
+        if scope in scopes
+    }
+    if not dirs:
+        raise ValueError(
+            f"unknown scopes: {tuple(scopes)!r} (expected a subset of "
+            f"{tuple(index_dirs_for(project_id))})"
+        )
     built = {scope: path for scope, path in dirs.items() if path.exists()}
 
     problem: str | None = None
@@ -552,7 +569,7 @@ def resolve_selector(
         )
     elif not built:
         problem = (
-            f"no semantic index at {dirs['project']} -- run "
+            f"no semantic index at {next(iter(dirs.values()))} -- run "
             f"`agent-harness-memory index` to build one"
         )
     else:

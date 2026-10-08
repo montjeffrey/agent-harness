@@ -34,7 +34,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from harness import config_validation, pathsafe
+from harness import atomicwrite, config_validation, pathsafe
 
 log = logging.getLogger(__name__)
 
@@ -142,9 +142,15 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
-        os.replace(tmp_path, path)
+        atomicwrite.replace_with_retry(tmp_path, path)
     except BaseException:
-        tmp_path.unlink(missing_ok=True)
+        # Cleanup must not mask the failure that brought us here: the same
+        # contention that can deny the replace can deny this unlink, and an
+        # exception raised here would replace the real one.
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
         raise
 
 

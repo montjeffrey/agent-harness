@@ -514,3 +514,423 @@ def test_memory_store_check_is_wired_into_run_checks(tmp_path: Path) -> None:
     names = [r.name for r in doctor.run_checks(tmp_path)]
 
     assert "memory store" in names
+
+
+# --- installed-vs-source drift --------------------------------------------
+#
+# The failure this group guards against is not a crash: it is an install that
+# works perfectly while missing modules the checkout has. Every test here
+# builds both sides in tmp_path and pins `installed_harness_dirs`, so results
+# never depend on what happens to be installed on the machine running the
+# suite.
+
+
+def _make_checkout(
+    root: Path, modules: dict[str, str], *, distribution: str = "agent-harness-kit"
+) -> Path:
+    package = root / "harness"
+    package.mkdir(parents=True, exist_ok=True)
+    (root / "pyproject.toml").write_text(
+        f'[project]\nname = "{distribution}"\nversion = "0.1.0"\n', encoding="utf-8"
+    )
+    for name, text in modules.items():
+        (package / name).write_text(text, encoding="utf-8")
+    return package
+
+
+def _make_install(root: Path, modules: dict[str, str]) -> Path:
+    package = root / "site-packages" / "harness"
+    package.mkdir(parents=True, exist_ok=True)
+    for name, text in modules.items():
+        (package / name).write_text(text, encoding="utf-8")
+    return package
+
+
+def test_source_checkout_root_requires_this_distribution(tmp_path: Path, monkeypatch) -> None:
+    """Any project may contain a `harness/` directory; only ours counts."""
+    monkeypatch.setattr(doctor, "HARNESS_ROOT", tmp_path / "nowhere")
+
+    _make_checkout(tmp_path, {"__init__.py": ""}, distribution="somebody-elses-kit")
+    assert doctor.source_checkout_root(tmp_path) is None
+
+    _make_checkout(tmp_path, {"__init__.py": ""})
+    assert doctor.source_checkout_root(tmp_path) == tmp_path.resolve()
+
+
+def test_install_drift_is_info_when_no_checkout_can_be_identified(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A machine with only the wheel installed is a perfectly good state."""
+    monkeypatch.setattr(doctor, "HARNESS_ROOT", tmp_path / "nowhere")
+
+    result = doctor.check_install_drift(tmp_path)
+
+    assert result.level == "INFO"
+    assert "no agent-harness source checkout" in result.detail
+
+
+def test_install_drift_fails_when_the_install_is_missing_modules(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The exact shape of the multi-hour misdiagnosis: tools that aren't there."""
+    _make_checkout(tmp_path, {"__init__.py": "", "work.py": "WORK\n", "memory.py": "M\n"})
+    installed = _make_install(tmp_path, {"__init__.py": "", "memory.py": "M\n"})
+    monkeypatch.setattr(doctor, "installed_harness_dirs", lambda: [installed])
+
+    result = doctor.check_install_drift(tmp_path)
+
+    assert result.level == "FAIL"
+    assert "work.py" in result.detail
+    assert str(installed) in result.detail
+    assert "pipx install --force" in result.detail
+    assert str(tmp_path.resolve()) in result.detail
+
+
+def test_install_drift_warns_when_only_contents_differ(tmp_path: Path, monkeypatch) -> None:
+    _make_checkout(tmp_path, {"__init__.py": "", "memory.py": "new behaviour\n"})
+    installed = _make_install(tmp_path, {"__init__.py": "", "memory.py": "old behaviour\n"})
+    monkeypatch.setattr(doctor, "installed_harness_dirs", lambda: [installed])
+
+    result = doctor.check_install_drift(tmp_path)
+
+    assert result.level == "WARN"
+    assert "memory.py" in result.detail
+    assert "pipx install --force" in result.detail
+
+
+def test_install_drift_passes_and_ignores_line_endings(tmp_path: Path, monkeypatch) -> None:
+    """A checkout cloned with autocrlf must not report every module as drifted."""
+    source = _make_checkout(tmp_path, {"__init__.py": "", "memory.py": ""})
+    installed = _make_install(tmp_path, {"__init__.py": "", "memory.py": ""})
+    # Written as bytes: text mode would translate the newlines back again.
+    (source / "memory.py").write_bytes(b"line one\r\nline two\r\n")
+    (installed / "memory.py").write_bytes(b"line one\nline two\n")
+    monkeypatch.setattr(doctor, "installed_harness_dirs", lambda: [installed])
+
+    assert doctor.check_install_drift(tmp_path).level == "PASS"
+
+
+def test_install_drift_is_info_for_an_editable_install(tmp_path: Path, monkeypatch) -> None:
+    """Checkout and install are the same directory; there is nothing to drift."""
+    package = _make_checkout(tmp_path, {"__init__.py": ""})
+    monkeypatch.setattr(doctor, "installed_harness_dirs", lambda: [package.resolve()])
+
+    result = doctor.check_install_drift(tmp_path)
+
+    assert result.level == "INFO"
+    assert "checkout itself" in result.detail
+
+
+def test_install_drift_ignores_pycache(tmp_path: Path, monkeypatch) -> None:
+    _make_checkout(tmp_path, {"__init__.py": ""})
+    cache = tmp_path / "harness" / "__pycache__"
+    cache.mkdir()
+    (cache / "stale.py").write_text("junk\n", encoding="utf-8")
+    installed = _make_install(tmp_path, {"__init__.py": ""})
+    monkeypatch.setattr(doctor, "installed_harness_dirs", lambda: [installed])
+
+    assert doctor.check_install_drift(tmp_path).level == "PASS"
+
+
+def test_installed_harness_dirs_finds_the_running_package() -> None:
+    """Whatever else it finds, the copy this process imported must be in it."""
+    assert Path(doctor.__file__).resolve().parent in doctor.installed_harness_dirs()
+
+
+def test_install_drift_is_wired_into_run_checks(tmp_path: Path) -> None:
+    assert "install drift" in {r.name for r in doctor.run_checks(tmp_path)}
+
+
+# --- instructions vs the served tool surface ------------------------------
+#
+# The user-scope protocol block is loaded by every session on the machine; the
+# server answering those sessions is whichever copy of harness is registered.
+# Nothing else in the harness compares the two.
+
+
+def test_served_tool_names_come_from_the_registration_tables() -> None:
+    """Read the server's own tables, never a list copied into the doctor."""
+    from harness import mcp_server
+
+    expected = (
+        set(mcp_server.TOOL_TO_COMMAND)
+        | set(mcp_server.MEMORY_TOOL_DESCRIPTIONS)
+        | set(mcp_server.WORK_TOOL_DESCRIPTIONS)
+    )
+
+    assert doctor.served_tool_names() == expected
+    assert "work_start" in expected
+
+
+def test_tool_names_from_source_reads_a_foreign_install_without_running_it(
+    tmp_path: Path,
+) -> None:
+    """The other install cannot be imported into this process, and must not be."""
+    module = tmp_path / "mcp_server.py"
+    module.write_text(
+        "import a_module_that_does_not_exist\n"
+        "raise RuntimeError('this file must never be executed')\n"
+        'TOOL_TO_COMMAND: dict[str, str] = {"graph_find": "find"}\n'
+        'WORK_TOOL_DESCRIPTIONS = {"work_start": "...", "work_finish": "..."}\n',
+        encoding="utf-8",
+    )
+
+    assert doctor._tool_names_from_source(module) == {
+        "graph_find",
+        "work_start",
+        "work_finish",
+    }
+
+
+def test_tool_names_from_source_returns_none_for_an_absent_file(tmp_path: Path) -> None:
+    assert doctor._tool_names_from_source(tmp_path / "missing.py") is None
+
+
+def test_referenced_tool_names_reads_code_spans_not_prose() -> None:
+    block = (
+        "Call `work_start` before editing, and `memory_context` once.\n"
+        "Do the work and start it properly; entries stay `proposed`.\n"
+        "The `agent-harness` server is registered already.\n"
+    )
+
+    assert doctor.referenced_tool_names(block) == {"work_start", "memory_context"}
+
+
+def test_protocol_block_extracts_only_the_marked_region() -> None:
+    text = (
+        "# My own rules\nAlways use tabs.\n"
+        f"{doctor.PROTOCOL_START_MARKER}\ncall `work_start`\n{doctor.PROTOCOL_END_MARKER}\n"
+        "More of my own rules.\n"
+    )
+
+    block = doctor.protocol_block(text)
+
+    assert block is not None
+    assert "work_start" in block
+    assert "Always use tabs" not in block
+    assert doctor.protocol_block("no markers here") is None
+
+
+def test_protocol_sources_include_the_installed_user_scope_block(tmp_path: Path) -> None:
+    """The block in ~/.claude/CLAUDE.md is what every session actually loads."""
+    rules = tmp_path / ".claude" / "CLAUDE.md"
+    rules.parent.mkdir(parents=True)
+    rules.write_text(
+        f"{doctor.PROTOCOL_START_MARKER}\ncall `work_start`\n{doctor.PROTOCOL_END_MARKER}\n",
+        encoding="utf-8",
+    )
+
+    sources = dict(doctor._protocol_sources(tmp_path, None))
+
+    assert "work_start" in sources[str(rules)]
+
+
+def test_instruction_contract_fails_when_a_server_lacks_a_named_tool(monkeypatch) -> None:
+    """The check that would have caught the work_start gap."""
+    monkeypatch.setattr(
+        doctor,
+        "served_tool_surfaces",
+        lambda project_dir=None: [("stale-install", {"memory_context"})],
+    )
+    monkeypatch.setattr(
+        doctor,
+        "_protocol_sources",
+        lambda home, project_dir: [
+            ("~/.claude/CLAUDE.md", "call `work_start` then `memory_context`")
+        ],
+    )
+
+    result = doctor.check_instruction_contract()
+
+    assert result.level == "FAIL"
+    assert "work_start" in result.detail
+    assert "stale-install" in result.detail
+    assert "pipx install --force" in result.detail
+
+
+def test_instruction_contract_checks_every_server_not_just_the_imported_one(
+    monkeypatch,
+) -> None:
+    """A current checkout plus a stale install is still a broken machine."""
+    monkeypatch.setattr(
+        doctor,
+        "served_tool_surfaces",
+        lambda project_dir=None: [
+            ("checkout", {"work_start", "memory_context"}),
+            ("stale-install", {"memory_context"}),
+        ],
+    )
+    monkeypatch.setattr(
+        doctor, "_protocol_sources", lambda home, project_dir: [("template", "`work_start`")]
+    )
+
+    result = doctor.check_instruction_contract()
+
+    assert result.level == "FAIL"
+    assert "stale-install" in result.detail
+
+
+def test_instruction_contract_passes_when_every_named_tool_is_served(monkeypatch) -> None:
+    monkeypatch.setattr(
+        doctor,
+        "served_tool_surfaces",
+        lambda project_dir=None: [
+            ("a", {"work_start", "memory_context"}),
+            ("b", {"work_start", "memory_context"}),
+        ],
+    )
+    monkeypatch.setattr(
+        doctor,
+        "_protocol_sources",
+        lambda home, project_dir: [("template", "`work_start` `memory_context`")],
+    )
+
+    assert doctor.check_instruction_contract().level == "PASS"
+
+
+def test_instruction_contract_is_info_without_any_instruction_block(monkeypatch) -> None:
+    monkeypatch.setattr(doctor, "_protocol_sources", lambda home, project_dir: [])
+
+    result = doctor.check_instruction_contract()
+
+    assert result.level == "INFO"
+    assert "agent-harness-setup" in result.detail
+
+
+def test_the_shipped_protocol_only_names_tools_the_shipped_server_registers() -> None:
+    """The contract this repository is itself responsible for keeping true."""
+    import importlib.resources as resources
+
+    template = (resources.files("templates") / "MEMORY.protocol.md").read_text(
+        encoding="utf-8"
+    )
+    block = doctor.protocol_block(template) or template
+
+    assert doctor.referenced_tool_names(block) <= (doctor.served_tool_names() or set())
+
+
+def test_instruction_contract_is_wired_into_run_checks(tmp_path: Path) -> None:
+    assert "instruction contract" in {r.name for r in doctor.run_checks(tmp_path)}
+
+
+def test_served_tool_surfaces_reports_the_imported_server_and_each_foreign_install(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """One surface per harness copy, the imported one first and never twice."""
+    from harness import mcp_server
+
+    imported_dir = Path(mcp_server.__file__).resolve().parent
+    stale = _make_install(tmp_path, {"__init__.py": ""})
+    (stale / "mcp_server.py").write_text(
+        'TOOL_TO_COMMAND = {"graph_find": "find"}\n'
+        'MEMORY_TOOL_DESCRIPTIONS = {"memory_context": "..."}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(doctor, "installed_harness_dirs", lambda: [imported_dir, stale])
+
+    surfaces = doctor.served_tool_surfaces()
+
+    assert [label for label, _ in surfaces] == [str(imported_dir), str(stale)]
+    assert surfaces[0][1] == doctor.served_tool_names()
+    assert surfaces[1][1] == {"graph_find", "memory_context"}
+
+
+def test_protocol_sources_include_the_checkout_template(tmp_path: Path, monkeypatch) -> None:
+    """The template is the block setup will install next; check it too."""
+    monkeypatch.setattr(doctor, "HARNESS_ROOT", tmp_path / "nowhere")
+    checkout = tmp_path / "checkout"
+    _make_checkout(checkout, {"__init__.py": ""})
+    template = checkout / "templates" / "MEMORY.protocol.md"
+    template.parent.mkdir()
+    template.write_text(
+        f"{doctor.PROTOCOL_START_MARKER}\ncall `work_start`\n{doctor.PROTOCOL_END_MARKER}\n",
+        encoding="utf-8",
+    )
+    home = tmp_path / "home"
+    home.mkdir()
+
+    sources = dict(doctor._protocol_sources(home, checkout))
+
+    assert set(sources) == {str(template)}
+    assert "work_start" in sources[str(template)]
+
+
+def test_instruction_contract_end_to_end_against_a_stale_install_on_disk(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """No pinned surfaces or sources: real files on both sides of the compare.
+
+    The installed user-scope block only names a tool the stale server has,
+    so it must not be blamed; the checkout template names `work_start`, which
+    the stale install lacks, and that is the failure reported -- attributed
+    to the install's path, with the reinstall command for this checkout.
+    """
+    monkeypatch.setattr(doctor, "HARNESS_ROOT", tmp_path / "nowhere")
+    checkout = tmp_path / "checkout"
+    _make_checkout(checkout, {"__init__.py": ""})
+    template = checkout / "templates" / "MEMORY.protocol.md"
+    template.parent.mkdir()
+    template.write_text("call `memory_context` then `work_start`\n", encoding="utf-8")
+
+    stale = _make_install(tmp_path, {"__init__.py": ""})
+    (stale / "mcp_server.py").write_text(
+        'MEMORY_TOOL_DESCRIPTIONS = {"memory_context": "..."}\n', encoding="utf-8"
+    )
+    monkeypatch.setattr(doctor, "installed_harness_dirs", lambda: [stale])
+
+    home = tmp_path / "home"
+    rules = home / ".claude" / "CLAUDE.md"
+    rules.parent.mkdir(parents=True)
+    rules.write_text(
+        f"{doctor.PROTOCOL_START_MARKER}\ncall `memory_context`\n{doctor.PROTOCOL_END_MARKER}\n",
+        encoding="utf-8",
+    )
+
+    result = doctor.check_instruction_contract(checkout, home)
+
+    assert result.level == "FAIL"
+    assert "work_start" in result.detail
+    assert str(stale) in result.detail
+    assert str(template) in result.detail
+    assert str(rules) not in result.detail
+    assert doctor._reinstall_command(checkout.resolve()) in result.detail
+
+
+class _FakeDistribution:
+    """Just enough of importlib.metadata.Distribution for `installed_harness_dirs`."""
+
+    def __init__(self, name: str, root: Path, files: list[str]) -> None:
+        self.metadata = {"Name": name}
+        self._root = root
+        self.files = files
+
+    def locate_file(self, entry: str) -> Path:
+        return self._root / entry
+
+
+def test_installed_harness_dirs_walks_distribution_metadata(tmp_path: Path, monkeypatch) -> None:
+    """The site-packages copy is found through RECORD, not through `harness.__file__`.
+
+    A checkout on `sys.path` shadows the install, so the imported package says
+    nothing about the copy every other project loads. Only our distribution
+    counts; a stranger's package that also ships `harness/__init__.py` does not.
+    """
+    import importlib.metadata
+
+    ours = tmp_path / "venv-a"
+    theirs = tmp_path / "venv-b"
+    for root in (ours, theirs):
+        (root / "harness").mkdir(parents=True)
+        (root / "harness" / "__init__.py").write_text("", encoding="utf-8")
+    fakes = [
+        _FakeDistribution("agent_harness_kit", ours, ["harness/__init__.py", "harness/doctor.py"]),
+        _FakeDistribution("somebody-elses-kit", theirs, ["harness/__init__.py"]),
+    ]
+    monkeypatch.setattr(importlib.metadata, "distributions", lambda: fakes)
+
+    found = doctor.installed_harness_dirs()
+
+    assert (ours / "harness").resolve() in found
+    assert (theirs / "harness").resolve() not in found
+    # The package this process imported is still reported alongside.
+    assert Path(doctor.__file__).resolve().parent in found

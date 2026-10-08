@@ -5,6 +5,7 @@ repo-bound discovery and fresh/stale/dirty/invalid health reporting.
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -262,3 +263,76 @@ def test_load_graph_metadata_parses_valid_graph(tmp_path: Path) -> None:
     metadata = graph_location.load_graph_metadata(path)
     assert metadata is not None
     assert metadata["built_at_commit"] == "abc123"
+
+
+# --- git subprocesses must never inherit the caller's stdin ---------------
+#
+# Regression guard for a real 20 s-per-call hang: inside the stdio MCP server
+# the process stdin is the live JSON-RPC pipe, and a git child that inherits
+# it blocks before git even starts (GIT_TRACE emits nothing) until the 10 s
+# timeout fires. `memory_context` reaches both calls below via
+# `memory_graph.build_annotator` -> `report_health`, so the two of them cost a
+# flat 20 s. Closing stdin brings each call back to ~0.03 s.
+#
+# This can only be reproduced end-to-end through a running server (see
+# tests/test_mcp_stdio.py); these assertions are the cheap deterministic
+# guard that must never be allowed to regress.
+
+
+class _RecordingRun:
+    """Stand-in for `subprocess.run` that records kwargs and returns success."""
+
+    def __init__(self, stdout: str = "") -> None:
+        self.calls: list[tuple[tuple, dict]] = []
+        self._stdout = stdout
+        # Optional per-subcommand stdout, so one recorder can answer both
+        # `git status --porcelain` and `git rev-parse HEAD` distinctly.
+        self.stdout_by_subcommand: dict[str, str] = {}
+
+    def __call__(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        stdout = self._stdout
+        for token in args[0]:
+            if token in self.stdout_by_subcommand:
+                stdout = self.stdout_by_subcommand[token]
+                break
+        return subprocess.CompletedProcess(args[0], 0, stdout, "")
+
+
+def test_git_head_closes_stdin(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    recorder = _RecordingRun("abc123\n")
+    monkeypatch.setattr(graph_location.subprocess, "run", recorder)
+
+    assert graph_location.git_head(tmp_path) == "abc123"
+
+    (_args, kwargs) = recorder.calls[0]
+    assert kwargs["stdin"] is subprocess.DEVNULL
+
+
+def test_git_is_dirty_closes_stdin(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    recorder = _RecordingRun("")
+    monkeypatch.setattr(graph_location.subprocess, "run", recorder)
+
+    assert graph_location.git_is_dirty(tmp_path) is False
+
+    (_args, kwargs) = recorder.calls[0]
+    assert kwargs["stdin"] is subprocess.DEVNULL
+
+
+def test_report_health_closes_stdin_on_every_git_call(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Whole-path guard: no git call report_health makes may inherit stdin."""
+    _make_git_marker(tmp_path)
+    graph = _write_graph(tmp_path, built_at="abc123")
+    # Clean tree ("" from `status --porcelain`) so report_health goes on to
+    # call `rev-parse HEAD` as well -- a dirty tree short-circuits after one
+    # call and would leave the second site unguarded.
+    recorder = _RecordingRun()
+    recorder.stdout_by_subcommand = {"status": "", "rev-parse": "abc123\n"}
+    monkeypatch.setattr(graph_location.subprocess, "run", recorder)
+
+    assert graph_location.report_health(graph, tmp_path) == GraphHealth.FRESH
+    assert len(recorder.calls) == 2, "report_health should make two git calls"
+    for _args, kwargs in recorder.calls:
+        assert kwargs["stdin"] is subprocess.DEVNULL

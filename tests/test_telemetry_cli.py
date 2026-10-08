@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import sys
 import types
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -97,6 +99,88 @@ def test_collect_all_agents_still_exits_zero_when_all_fail(monkeypatch: pytest.M
     records = list(telemetry_store.iter_events())
     assert len(records) == 3
     assert all(r["event"] == "collector_error" for r in records)
+
+
+# --- the watermark file survives a crash mid-save --------------------------
+#
+# `_save_collect_state` used a bare `write_text`, which truncates before it
+# writes, and `_load_collect_state` reads a tolerant `{}` from anything it
+# cannot parse. Together those turn a process killed mid-save into the silent
+# loss of *every* agent's watermark, not just the one being updated -- and the
+# next `collect` re-ingests all history from the beginning.
+
+
+@contextmanager
+def _a_write_that_dies_halfway_through_its_payload() -> Iterator[None]:
+    """Make `write_text` land half its data and then fail, for this block only.
+
+    Under the old bare `write_text` the half lands on the state file itself,
+    leaving JSON that `_load_collect_state` can only read as "no watermarks
+    yet". Under temp-then-replace it lands on a scratch sibling that never
+    reaches the destination.
+
+    Scoped to its own `MonkeyPatch` rather than taking the test's: `undo()` on
+    the shared one also reverts the autouse `fake_home`, and the rest of the
+    test would then run against the developer's real telemetry directory.
+    """
+    real_write_text = Path.write_text
+
+    def dies_halfway(self: Path, data: str, **kwargs: object) -> int:
+        real_write_text(self, data[: len(data) // 2], **kwargs)  # type: ignore[arg-type]
+        raise OSError(28, "No space left on device")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(Path, "write_text", dies_halfway)
+        yield
+
+
+def test_a_crash_mid_save_costs_the_update_not_the_watermarks(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    all_events = [
+        {"agent": "codex", "event": "usage", "ts": "2026-08-01T00:00:00Z", "input_tokens": 1},
+        {"agent": "codex", "event": "usage", "ts": "2026-08-02T00:00:00Z", "input_tokens": 2},
+    ]
+
+    def fake_collect(since):
+        if since is None:
+            return list(all_events)
+        return [r for r in all_events if telemetry_store.parse_ts(r["ts"]) >= since]
+
+    _install_fake_collector(monkeypatch, "codex", fake_collect)
+
+    assert telemetry.main(["collect", "--agent", "codex"]) == 0
+    capsys.readouterr()
+    saved = telemetry._load_collect_state()
+    assert saved, "precondition: the first run must have persisted a watermark"
+
+    with _a_write_that_dies_halfway_through_its_payload():
+        with pytest.raises(OSError):
+            telemetry._save_collect_state({"codex": "2026-09-09T00:00:00Z"})
+
+    assert telemetry._load_collect_state() == saved, "the failed update ate the file"
+
+    # The consequence that matters: no re-ingestion of history already stored.
+    assert telemetry.main(["collect", "--agent", "codex"]) == 0
+    assert "total written: 0" in capsys.readouterr().out
+    assert len(list(telemetry_store.iter_events())) == 2
+
+
+def test_a_crash_mid_save_strands_no_temp_file() -> None:
+    """Unique temp names cannot self-heal by being overwritten next run.
+
+    Forward protection rather than proof of the fix: against the bare
+    `write_text` this passed too, because that wrote no temp at all. It fails
+    the day someone reaches for a scratch file without a cleanup path.
+    """
+    telemetry._save_collect_state({"codex": "2026-08-01T00:00:00Z"})
+    directory = telemetry._collect_state_path().parent
+
+    with _a_write_that_dies_halfway_through_its_payload():
+        with pytest.raises(OSError):
+            telemetry._save_collect_state({"codex": "2026-09-09T00:00:00Z"})
+
+    assert not [p for p in directory.iterdir() if p.name.endswith(".tmp")]
 
 
 # --- tail ----------------------------------------------------------------

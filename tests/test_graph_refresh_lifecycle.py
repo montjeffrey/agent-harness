@@ -57,6 +57,9 @@ def test_fast_refresh_invokes_update_then_label_only(monkeypatch, tmp_path: Path
 
     monkeypatch.setattr(graph_refresh, "detect_graphify", lambda: graph_refresh.GraphifyStatus(True, "1.0"))
     monkeypatch.setattr(graph_refresh.subprocess, "run", fake_run)
+    # Any backend key in the operator's environment enables the label pass.
+    for env_var in graph_refresh.BACKEND_ENV_VARS.values():
+        monkeypatch.delenv(env_var, raising=False)
 
     graph_refresh.refresh(tmp_path, "auto", full=False)
 
