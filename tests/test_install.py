@@ -21,7 +21,7 @@ def test_first_install_writes_expected_files(tmp_path: Path) -> None:
     assert (project / "docs" / "vault" / "blueprints" / ".gitkeep").exists()
     assert (project / "docs" / "vault" / "templates" / "feature-blueprint.md").exists()
     assert (project / "docs" / "vault" / "README.md").exists()
-    assert (project / ".gitignore").read_text(encoding="utf-8").strip() == "graphify-out/"
+    assert not (project / ".gitignore").exists()
 
     agents_md = (project / "AGENTS.md").read_text(encoding="utf-8")
     assert install.MARKER_START in agents_md
@@ -85,21 +85,74 @@ def test_upsert_marker_block_preserves_surrounding_content(tmp_path: Path) -> No
     assert "harness content v2" in second
 
 
-def test_gitignore_append_once(tmp_path: Path) -> None:
+def _git(cwd: Path, *args: str) -> str:
+    import subprocess
+
+    result = subprocess.run(
+        ["git", "-C", str(cwd), "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+         *args],
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, check=True, timeout=30,
+    )
+    return result.stdout.strip()
+
+
+def test_graph_output_is_excluded_via_info_exclude_never_gitignore(tmp_path: Path) -> None:
+    """ADR 0004's rule applied to the graph: the exclusion lives in the
+    repository's private `.git/info/exclude`, and a project's `.gitignore`
+    is left byte-for-byte alone."""
     project = tmp_path / "myproject"
     project.mkdir()
+    _git(project, "init", "-q")
     gitignore = project / ".gitignore"
     gitignore.write_text("node_modules/\n.env\n", encoding="utf-8")
+    exclude = project / ".git" / "info" / "exclude"
 
-    first_action = install.ensure_gitignore_entry(project)
-    assert first_action == "updated"
-    content_after_first = gitignore.read_text(encoding="utf-8")
-    assert content_after_first.count("graphify-out/") == 1
+    summary = install.run_install(project, ["claude"], install_hooks_flag=False)
 
-    second_action = install.ensure_gitignore_entry(project)
-    assert second_action == "unchanged"
-    content_after_second = gitignore.read_text(encoding="utf-8")
-    assert content_after_second == content_after_first
+    assert gitignore.read_text(encoding="utf-8") == "node_modules/\n.env\n"
+    assert exclude.read_text(encoding="utf-8").splitlines().count("graphify-out/") == 1
+    assert ".git/info/exclude: added graphify-out/" in summary
+    (project / "graphify-out").mkdir()
+    (project / "graphify-out" / "graph.json").write_text("{}", encoding="utf-8")
+    assert "graphify-out" not in _git(project, "status", "--porcelain", "--untracked-files=all")
+
+    summary_second = install.run_install(project, ["claude"], install_hooks_flag=False)
+    assert exclude.read_text(encoding="utf-8").splitlines().count("graphify-out/") == 1
+    assert ".git/info/exclude: unchanged" in summary_second
+
+
+def test_install_leaves_a_committed_graph_out_of_the_exclusion(tmp_path: Path) -> None:
+    project = tmp_path / "myproject"
+    (project / "graphify-out").mkdir(parents=True)
+    _git(project, "init", "-q")
+    (project / "graphify-out" / "graph.json").write_text("{}", encoding="utf-8")
+    _git(project, "add", "graphify-out")
+    _git(project, "commit", "-q", "-m", "commit the graph")
+
+    summary = install.run_install(project, ["claude"], install_hooks_flag=False)
+
+    exclude = (project / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+    assert "graphify-out/" not in exclude.splitlines()
+    assert any("git tracks graphify-out/" in line for line in summary)
+
+
+def test_failed_install_never_writes_the_graph_exclusion(tmp_path: Path, monkeypatch) -> None:
+    """The exclusion is written outside the rollback transaction, so it must
+    come after every step that can fail."""
+    project = tmp_path / "myproject"
+    project.mkdir()
+    _git(project, "init", "-q")
+    exclude = project / ".git" / "info" / "exclude"
+    before = exclude.read_text(encoding="utf-8")
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("simulated failure mid-install")
+
+    monkeypatch.setattr(install_cli, "install_hooks", _boom)
+    with pytest.raises(RuntimeError, match="simulated failure mid-install"):
+        install.run_install(project, ["claude"], install_hooks_flag=True)
+
+    assert exclude.read_text(encoding="utf-8") == before
 
 
 def test_hooks_merge_is_idempotent(tmp_path: Path) -> None:

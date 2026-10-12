@@ -1,8 +1,9 @@
 """Smoke tests for `agent-harness-enroll`'s four-step flow.
 
-Graph and index are skipped with `--no-graph --no-index` throughout: this
-file is about ordering and wiring between enroll and `memory_ingest`, not
-about graphify or chromadb, which have their own test suites.
+Graph and index are mostly skipped with `--no-graph --no-index`: this file
+is about ordering and wiring between enroll and `memory_ingest`, not about
+graphify or chromadb, which have their own test suites. The graph tests
+replace graphify with a fake build and check only what enroll does around it.
 """
 
 from __future__ import annotations
@@ -222,6 +223,92 @@ def test_enroll_reports_an_unwritable_exclude_as_a_note_and_still_sets_up_memory
     assert "could not update" in captured.err
     assert (repo / ".agent-harness" / "scope.md").is_file()
     assert "[1/4] memory" in captured.out
+
+
+# --- graph output and git (step 3) ----------------------------------------
+
+
+def _committed_repo(path: Path) -> str:
+    repo = _repo(path)
+    (repo / "app.py").write_text("print('hi')\n", encoding="utf-8")
+    _git(repo, "add", "app.py")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+         "commit", "-q", "-m", "init")
+    return _git(repo, "rev-parse", "HEAD")
+
+
+def _fake_graph_build(monkeypatch, head: str) -> None:
+    """Stand in for graphify: write what a real build leaves in graphify-out/."""
+    import json
+
+    def build(argv: list[str]) -> int:
+        out = Path(argv[0]) / "graphify-out"
+        (out / "cache").mkdir(parents=True, exist_ok=True)
+        (out / "graph.json").write_text(
+            json.dumps({"nodes": [], "links": [], "built_at_commit": head}),
+            encoding="utf-8",
+        )
+        (out / "GRAPH_REPORT.md").write_text("# report\n", encoding="utf-8")
+        (out / "cache" / "x.json").write_text("{}", encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(enroll.graph_refresh, "main", build)
+
+
+def test_a_freshly_enrolled_repo_reports_its_new_graph_fresh(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """Regression: enroll built graphify-out/ but left it untracked, so the
+    graph read DIRTY the moment it existed and memory evidence switched off
+    (observed on a fresh clone, 2026-10-12)."""
+    from harness import graph_location
+    from harness.graph_location import GraphHealth
+
+    repo = tmp_path / "repo"
+    head = _committed_repo(repo)
+    _fake_graph_build(monkeypatch, head)
+    exclude = repo / ".git" / "info" / "exclude"
+
+    code = enroll.main([str(repo), "--no-index", "--no-docs"])
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "[3/4] graph      built" in out
+    assert f"excluded {enroll.GRAPH_EXCLUDE_LINE} via" in out
+    assert enroll.GRAPH_EXCLUDE_LINE in exclude.read_text(encoding="utf-8").splitlines()
+    assert not (repo / ".gitignore").exists()
+    assert _git(repo, "status", "--porcelain", "--untracked-files=all") == ""
+    graph = repo / "graphify-out" / "graph.json"
+    assert graph_location.report_health(graph, repo) == GraphHealth.FRESH
+
+    # Re-enrolling an already-built project is quiet and still fresh.
+    assert enroll.main([str(repo), "--no-index", "--no-docs"]) == 0
+    assert "excluded graphify-out/" not in capsys.readouterr().out
+    lines = exclude.read_text(encoding="utf-8").splitlines()
+    assert lines.count(enroll.GRAPH_EXCLUDE_LINE) == 1
+    assert graph_location.report_health(graph, repo) == GraphHealth.FRESH
+
+
+def test_enroll_leaves_a_committed_graph_out_of_the_exclusion(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """A project that commits its graph keeps doing so: no exclude line that
+    would hide new outputs from its reviewers."""
+    repo = tmp_path / "repo"
+    head = _committed_repo(repo)
+    _fake_graph_build(monkeypatch, head)
+    enroll.graph_refresh.main([str(repo)])
+    _git(repo, "add", "graphify-out")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+         "commit", "-q", "-m", "commit the graph")
+
+    code = enroll.main([str(repo), "--no-index", "--no-docs"])
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "git tracks graphify-out/; not excluding it" in out
+    exclude = (repo / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+    assert enroll.GRAPH_EXCLUDE_LINE not in exclude.splitlines()
 
 
 # --- semantic index (step 4) --------------------------------------------

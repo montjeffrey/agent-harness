@@ -202,7 +202,8 @@ The install writes/updates, inside the target project:
 
 - `docs/vault/blueprints/` and `docs/vault/templates/feature-blueprint.md`
 - `docs/vault/README.md`
-- `.gitignore` (adds `graphify-out/` once)
+- `.git/info/exclude` (adds `graphify-out/` once, in a git repository;
+  `.gitignore` is never touched)
 - `AGENTS.md` (full harness instruction block, marker-delimited)
 - `CLAUDE.md` / `GEMINI.md` (3-line pointer to the AGENTS.md block, if selected)
 - `.claude/settings.json` (PreToolUse hook, only with `--hooks`)
@@ -257,7 +258,7 @@ python harness/graph_query.py search "sends a welcome email"
 Notes:
 
 - The index lives at `graphify-out/semantic-index/`, a sibling of
-  `graph.json` inside the directory the harness already gitignores.
+  `graph.json` inside the directory enroll and install exclude from git.
 - `search` never builds the index implicitly. If it's missing, the error
   message points you at `graph_refresh.py`; a normal graph refresh keeps the
   semantic index in sync as a best-effort last step (it never fails the

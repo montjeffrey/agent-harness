@@ -30,6 +30,12 @@ exclusion to a project enrolled before this rule existed. If the directory
 is *already tracked* by git the exclusion cannot hide it; enroll then prints
 the `git rm -r --cached` command and leaves that history change to you.
 
+The graph step does the same for `graphify-out/`, for the same reason: the
+graph and its caches are rebuilt per machine, and an untracked build output
+would otherwise sit in `git status` forever. A project that deliberately
+commits its graph keeps doing so -- the line is only added while git tracks
+nothing under `graphify-out/`.
+
 Every step is idempotent, so this is also the right command to re-run later.
 
 Exit codes:
@@ -99,6 +105,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 UNTRACK_COMMAND = "git rm -r --cached .agent-harness"
 
+GRAPH_EXCLUDE_LINE = memory_store.GRAPH_EXCLUDE_LINE
+
 
 def _report_git_exclusion(root: Path, exclude: memory_store.ExcludeResult) -> bool:
     """Print what happened to the git exclusion; True when it needs attention.
@@ -137,6 +145,29 @@ def _report_git_exclusion(root: Path, exclude: memory_store.ExcludeResult) -> bo
             file=sys.stderr,
         )
     return attention
+
+
+def _exclude_graph_output(root: Path) -> bool:
+    """List `graphify-out/` in `.git/info/exclude`; True when that failed.
+
+    Runs whether or not the build succeeded, so a partial build stays out of
+    `git status` too. See `memory_store.ensure_graph_git_exclude` for why a
+    committed graph is left alone.
+    """
+    exclude = memory_store.ensure_graph_git_exclude(root)
+    if exclude.status == "tracked":
+        print(f"                 git tracks {GRAPH_EXCLUDE_LINE}; not excluding it")
+    elif exclude.status == "added":
+        print(f"                 excluded {GRAPH_EXCLUDE_LINE} via {exclude.path}")
+    elif exclude.status == "failed":
+        print(
+            f"                 note: {exclude.note}; git will list "
+            f"{GRAPH_EXCLUDE_LINE} as untracked until the line is added",
+            file=sys.stderr,
+        )
+        return True
+    # "present" and "not-git": nothing worth saying.
+    return False
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -209,6 +240,7 @@ def main(argv: list[str] | None = None) -> int:
                         "--semantic-graph needs a configured backend; memory works without it",
                         file=sys.stderr,
                     )
+        degraded |= _exclude_graph_output(root)
 
     # 4. Semantic index. This is the one place enrolment touches chromadb,
     # and it is the right place: enrolment is an explicit, one-off operator

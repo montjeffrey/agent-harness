@@ -26,7 +26,7 @@ def test_run_install_writes_expected_files_via_install_cli_directly(tmp_path: Pa
     assert (project / "docs" / "vault" / "blueprints" / ".gitkeep").exists()
     assert (project / "docs" / "vault" / "templates" / "feature-blueprint.md").exists()
     assert (project / "docs" / "vault" / "README.md").exists()
-    assert (project / ".gitignore").read_text(encoding="utf-8").strip() == "graphify-out/"
+    assert not (project / ".gitignore").exists()
 
     agents_md = (project / "AGENTS.md").read_text(encoding="utf-8")
     assert install_cli.MARKER_START in agents_md
@@ -66,7 +66,6 @@ def test_second_run_install_via_install_cli_is_idempotent(tmp_path: Path) -> Non
 _SHIM_PUBLIC_NAMES = (
     "CLAUDE_POINTER",
     "GEMINI_POINTER",
-    "GITIGNORE_ENTRY",
     "HARNESS_ROOT",
     "HOOK_FRAGMENT_PATH",
     "MARKER_END",
@@ -77,7 +76,6 @@ _SHIM_PUBLIC_NAMES = (
     "_json_string_escape",
     "_shell_quote",
     "deep_merge_hooks",
-    "ensure_gitignore_entry",
     "install_hooks",
     "install_vault_files",
     "main",

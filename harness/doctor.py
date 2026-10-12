@@ -855,7 +855,7 @@ def check_project(project_dir: Path) -> list[CheckResult]:
     else:
         results.append(CheckResult(
             "INFO", "project git",
-            "not a git repository -- .gitignore entry will still be written",
+            "not a git repository -- graphify-out/ will not be excluded from git",
         ))
 
     settings_path = project_dir / ".claude" / "settings.json"

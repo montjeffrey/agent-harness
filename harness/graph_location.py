@@ -20,7 +20,9 @@ duplicated (and subtly inconsistent) across `graph_query.py` and
 
 2. **Health** -- given a graph.json path, classify it as `fresh`, `stale`,
    `dirty`, `unknown`, `invalid`, or `missing`. Corrupt/truncated JSON is
-   always `invalid`; an uncommitted working tree is always `dirty`; and if
+   always `invalid`; an uncommitted working tree is always `dirty` (changes
+   under the harness's own output directories, `HARNESS_OUTPUT_DIRS`, do
+   not count -- they are not source the graph describes); and if
    git's clean/dirty state or HEAD commit cannot be determined at all (git
    not installed, not a repo, PATH issue, etc.) the result is `unknown` --
    never silently `fresh`. `fresh` is only ever returned when the working
@@ -31,6 +33,7 @@ graph_refresh.py, and the Wave 3 Query Contract Agent):
 
     GRAPH_RELATIVE_PATH            -- Path("graphify-out") / "graph.json"
     INDEX_RELATIVE_PATH            -- Path("graphify-out") / "semantic-index"
+    HARNESS_OUTPUT_DIRS            -- ("graphify-out", ".agent-harness")
     GraphHealth                    -- str Enum: FRESH/STALE/DIRTY/UNKNOWN/INVALID/MISSING
     find_repo_root(start)          -> Path | None
     find_graph_in_repo(start=None) -> Path | None   (never raises)
@@ -49,12 +52,20 @@ from pathlib import Path
 
 GRAPH_RELATIVE_PATH = Path("graphify-out") / "graph.json"
 
-# Sibling of GRAPH_RELATIVE_PATH, inside the same (already-gitignored)
-# graphify-out/ directory. This is the single source of truth for where the
-# optional [semantic] extra's ChromaDB-backed index lives -- harness.graph_index
+# Sibling of GRAPH_RELATIVE_PATH, inside the same graphify-out/ directory
+# (kept out of git by enroll's `.git/info/exclude` line). This is the single
+# source of truth for where the optional [semantic] extra's ChromaDB-backed
+# index lives -- harness.graph_index
 # and harness.doctor both derive from this constant rather than duplicating
 # the literal "semantic-index" path fragment.
 INDEX_RELATIVE_PATH = Path("graphify-out") / "semantic-index"
+
+# Directories the harness itself writes beside a project: the graph build's
+# output and project memory. Changes under them are never source changes, so
+# `git_is_dirty` ignores them. Without this a graph is DIRTY the moment it is
+# built: an untracked graphify-out/ shows up in `git status` and the graph
+# condemns itself (observed on a freshly enrolled clone, 2026-10-12).
+HARNESS_OUTPUT_DIRS = (GRAPH_RELATIVE_PATH.parent.as_posix(), ".agent-harness")
 
 
 class GraphHealth(str, Enum):
@@ -170,10 +181,17 @@ def git_head(repo_root: Path) -> str | None:
 
 def git_is_dirty(repo_root: Path) -> bool | None:
     """True if the working tree has uncommitted changes, False if clean,
-    None if git status could not be determined (e.g. not a git repo)."""
+    None if git status could not be determined (e.g. not a git repo).
+
+    The whole repository is checked (`:/`), except the harness's own output
+    directories directly under `repo_root` (`HARNESS_OUTPUT_DIRS`): the graph
+    describes source, and its own build products are not source. This holds
+    whether those directories are untracked, excluded, or committed.
+    """
+    pathspec = [":/", *(f":(exclude){name}" for name in HARNESS_OUTPUT_DIRS)]
     try:
         result = subprocess.run(
-            ["git", "status", "--porcelain"],
+            ["git", "status", "--porcelain", "--", *pathspec],
             # stdin=DEVNULL: never let git inherit the caller's stdin. Under
             # the stdio MCP server that stdin is the JSON-RPC pipe, and a git
             # child holding it hangs at startup until the timeout below --
