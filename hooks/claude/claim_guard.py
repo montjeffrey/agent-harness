@@ -51,12 +51,13 @@ ALLOW = Verdict(allow=True)
 
 
 def _import_work():
-    try:
-        from harness import work
-    except ImportError:
-        # Source checkout: <repo>/hooks/claude/ -> package root two levels up.
-        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-        from harness import work
+    # The harness beside this file (<root>/hooks/claude/ -> <root>), never a
+    # stale install found first on sys.path; see memory_context_hook._harness.
+    root = str(Path(__file__).resolve().parents[2])
+    if sys.path[:1] != [root]:
+        sys.path.insert(0, root)
+    from harness import work
+
     return work
 
 

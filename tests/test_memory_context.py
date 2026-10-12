@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from harness import memory, memory_context, memory_store
+from harness import memory, memory_compact, memory_context, memory_store
 
 NOW = datetime(2026, 8, 7, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -491,6 +491,242 @@ def test_context_cli_accepts_no_graph(scoped: Path, capsys) -> None:
     assert "# Project context:" in capsys.readouterr().out
 
 
+# --- compaction pressure notes -------------------------------------------
+
+
+def _machine_add(summary: str, now: datetime = NOW, **overrides) -> None:
+    memory_store.append_entries(
+        [{
+            "type": "discovery",
+            "scope": "machine",
+            "status": "proposed",
+            "confidence": "inferred",
+            "summary": summary,
+            **overrides,
+        }],
+        directory=memory_store.machine_memory_dir(),
+        now=now,
+    )
+
+
+def _notes(packet) -> str:
+    return "\n".join(packet.notes)
+
+
+def test_a_clean_store_adds_no_pressure_note(scoped: Path) -> None:
+    _add(scoped, "Live knowledge.")
+    packet = memory_context.build_packet(scoped, now=NOW)
+    assert not any("[memory]" in n for n in packet.notes)
+
+
+def test_closed_project_work_asks_for_compaction(scoped: Path) -> None:
+    _add(scoped, "Shipped.", type="task", status="resolved")
+    packet = memory_context.build_packet(scoped, now=NOW)
+    assert any("run `agent-harness-memory compact`" in n for n in packet.notes)
+
+
+def test_pressure_counts_terminal_entries_the_packet_itself_filters_out(
+    scoped: Path,
+) -> None:
+    """The durable sections drop closed entries through `_is_live`, so pressure
+    has to be computed over the raw pool. Reading it off the selected records
+    would report zero on exactly the store that needs compacting most."""
+    for n in range(3):
+        _add(scoped, f"Shipped {n}.", type="task", status="resolved")
+    packet = memory_context.build_packet(scoped, now=NOW)
+    assert any("3 closed" in n for n in packet.notes)
+
+
+def test_machine_and_project_pressure_are_measured_separately(scoped: Path) -> None:
+    """A combined count could not tell the operator which store to act on, and
+    only one of the two has a working `compact`."""
+    _add(scoped, "Shipped.", type="task", status="resolved")
+    for n in range(6):
+        _machine_add(f"Machine observation {n}.", now=NOW - timedelta(days=23))
+
+    packet = memory_context.build_packet(scoped, now=NOW)
+    text = _notes(packet)
+
+    assert "run `agent-harness-memory compact`" in text
+    assert "6 machine proposals unreviewed" in text
+    assert "run `agent-harness-memory review --scope machine`" in text
+
+
+def test_caller_supplied_notes_survive_alongside_pressure_notes(scoped: Path) -> None:
+    _add(scoped, "Shipped.", type="task", status="resolved")
+    packet = memory_context.build_packet(scoped, now=NOW, notes=["semantic index unavailable"])
+    assert "semantic index unavailable" in packet.notes
+    assert any("[memory]" in n for n in packet.notes)
+
+
+def test_the_pressure_note_survives_into_both_renderers(scoped: Path) -> None:
+    """The CLI reads Markdown, the MCP tool reads JSON, and the session-start
+    hook reads whichever it was configured for. A note that only made it into
+    one of them would be invisible to the other two consumers."""
+    _add(scoped, "Shipped.", type="task", status="resolved")
+    packet = memory_context.build_packet(scoped, now=NOW)
+
+    assert "run `agent-harness-memory compact`" in memory_context.render_markdown(packet)
+
+    payload = json.loads(memory_context.render_json(packet))
+    assert any("run `agent-harness-memory compact`" in n for n in payload["notes"])
+
+
+# --- active.md degrades per entry ----------------------------------------
+#
+# `compact` fills active.md up to ACTIVE_MAX_CHARS (4000) while the packet
+# gives the active section DEFAULT_BUDGETS["active"] (2000). While the whole
+# bullet list parsed as one atomic unit, anything compaction wrote between
+# those two numbers was dropped whole and the section read empty. The budgets
+# are allowed to disagree; the list just has to give way one entry at a time.
+
+
+def _active_section(project: Path):
+    return _section(memory_context.build_packet(project, now=NOW), "active")
+
+
+def test_a_compacted_active_file_degrades_entry_by_entry(project: Path) -> None:
+    """The regression: a real compaction must not blank the active section."""
+    for i in range(20):
+        _add(project, f"Decision {i:02d}: " + "budgeted retrieval detail " * 6)
+    memory_compact.compact(project, now=NOW)
+
+    rendered = (memory_store.project_memory_dir(project) / "active.md").read_text(
+        encoding="utf-8"
+    )
+    assert len(rendered) > memory_context.DEFAULT_BUDGETS["active"], (
+        "fixture too small to reproduce the bug"
+    )
+
+    section = _active_section(project)
+    assert section.units, "the whole active list vanished instead of degrading"
+    assert section.omitted, "nothing dropped, so the budget was not the binding constraint"
+    assert section.chars <= memory_context.DEFAULT_BUDGETS["active"]
+
+
+def test_each_entry_in_active_becomes_its_own_unit(project: Path) -> None:
+    _add(project, "First accepted decision.")
+    _add(project, "Second accepted decision.")
+    memory_compact.compact(project, now=NOW)
+
+    units = _active_section(project).units
+    assert sum(u.lstrip().startswith("- ") for u in units) == 2
+    assert sum("First accepted decision." in u for u in units) == 1
+    assert sum("Second accepted decision." in u for u in units) == 1
+
+
+def test_a_bullet_unit_carries_its_own_id_so_it_survives_alone(project: Path) -> None:
+    """Units are dropped independently, so each must still identify itself."""
+    _add(project, "Standalone decision.")
+    memory_compact.compact(project, now=NOW)
+
+    unit = next(u for u in _active_section(project).units if "Standalone" in u)
+    assert unit.lstrip().startswith("- ")
+    assert "mem-" in unit
+
+
+def test_scope_prose_still_forms_one_unit_per_heading(scoped: Path) -> None:
+    """scope.md has no bullet lists, so per-entry splitting must not touch it."""
+    units = _section(memory_context.build_packet(scoped, now=NOW), "scope").units
+    assert len(units) == 5
+    assert all(u.startswith("**") for u in units)
+
+
+def test_the_active_objective_still_joins_prose_across_lines(project: Path) -> None:
+    """Splitting the parser's body must not shred a multi-line objective."""
+    (project / ".agent-harness" / "scope.md").write_text(
+        "# Project scope\n\n## Active objective\n\nImprove retrieval\nacross two lines.\n",
+        encoding="utf-8",
+    )
+    assert memory_context.active_objective(project) == "Improve retrieval across two lines."
+
+
+def test_active_units_and_records_stay_parallel(project: Path) -> None:
+    """`build_packet` slices records by `len(kept)`, so order must match 1:1."""
+    for i in range(6):
+        _add(project, f"Parallel decision {i}.")
+    memory_compact.compact(project, now=NOW)
+
+    section = _active_section(project)
+    assert len(section.units) >= 6, "too few units to detect a misalignment"
+    assert len(section.units) == len(section.records)
+    for unit, record in zip(section.units, section.records):
+        assert record["body"] in unit
+
+
+# --- open work comes from the inbox, not the snapshot ---------------------
+#
+# `compact` writes an `## Open work` list into active.md and `build_packet`
+# also derives open work from the live entries, so every task and blocker
+# reached the active section twice. The inbox is the store of record; the
+# snapshot is as old as the last compaction, so the snapshot copy is the one
+# that goes.
+
+
+def test_open_work_reaches_the_active_section_exactly_once(project: Path) -> None:
+    _add(project, "UNIQUEBLOCKER needs a decision.", type="blocker")
+    memory_compact.compact(project, now=NOW)
+
+    units = _active_section(project).units
+    assert sum("UNIQUEBLOCKER" in u for u in units) == 1
+
+
+def test_the_surviving_copy_is_the_entry_not_the_snapshot(project: Path) -> None:
+    """The entry rendering carries status and blast radius; the bullet does not."""
+    _add(project, "UNIQUEBLOCKER needs a decision.", type="blocker")
+    memory_compact.compact(project, now=NOW)
+
+    unit = next(u for u in _active_section(project).units if "UNIQUEBLOCKER" in u)
+    assert "[blocker]" in unit, "kept compaction's snapshot instead of the live entry"
+
+
+def test_a_task_resolved_since_the_last_compaction_is_not_shown_as_open(
+    project: Path,
+) -> None:
+    """The case that rules out deduplicating by id.
+
+    A resolved task still sits in the snapshot but is no longer open work, so
+    an id-based dedupe would find nothing to match it against and leave the
+    stale bullet in -- reporting finished work as outstanding.
+    """
+    _add(project, "STALETASK was finished last week.", type="task", status="resolved")
+    active = memory_store.project_memory_dir(project) / "active.md"
+    active.write_text(
+        "# Active memory\n\n## Open work\n\n"
+        "- `mem-2026-08-07-001` task: STALETASK was finished last week.\n",
+        encoding="utf-8",
+    )
+
+    packet = memory_context.build_packet(project, now=NOW)
+    assert "STALETASK" not in memory_context.render_markdown(packet)
+
+
+def test_recent_decisions_still_reach_the_packet(project: Path) -> None:
+    """Only `## Open work` is dropped -- this fix must not widen past it."""
+    _add(project, "KEPTDECISION was settled.")
+    memory_compact.compact(project, now=NOW)
+
+    units = _active_section(project).units
+    assert any("KEPTDECISION" in u for u in units)
+
+
+def test_open_work_leads_the_active_section(project: Path) -> None:
+    """Trimming keeps a prefix, so the tail is evicted first.
+
+    Open work is the design's second priority tier and must not be the first
+    thing budget pressure discards.
+    """
+    for i in range(4):
+        _add(project, f"Ordinary decision {i}.")
+    _add(project, "LEADINGBLOCKER outranks the decisions.", type="blocker")
+    memory_compact.compact(project, now=NOW)
+
+    units = _active_section(project).units
+    # The entry form, not compaction's snapshot: the snapshot's own `## Open
+    # work` also happens to sort first, so asserting on the text alone would
+    # pass without the ordering ever being fixed.
+    assert "LEADINGBLOCKER" in units[0]
+    assert "[blocker]" in units[0]
 # --- filters: narrowing happens before ranking ----------------------------
 
 

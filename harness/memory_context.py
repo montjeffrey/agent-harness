@@ -45,7 +45,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from harness import memory_store
+from harness import memory_compact, memory_store
 
 # Per-section character budgets. They deliberately sum to more than
 # DEFAULT_MAX_CHARS: a section may use its full allowance when earlier
@@ -229,8 +229,13 @@ def deterministic_selector(
 # --- markdown source files ------------------------------------------------
 
 
-def _parse_markdown_sections(path: Path) -> list[tuple[str, str]]:
-    """Return `(heading, body)` pairs from a `##`-structured Markdown file.
+def _parse_markdown_sections(path: Path) -> list[tuple[str, list[str]]]:
+    """Return `(heading, body_lines)` pairs from a `##`-structured Markdown file.
+
+    Body lines are kept separate rather than pre-joined so each caller can
+    decide what an atomic unit is. `scope.md` is prose that only means
+    anything whole; `active.md` is a list whose entries have to be droppable
+    one at a time. Joining here would take that choice away from both.
 
     Blockquote guidance lines and untouched template placeholders (`_like
     this._`) are dropped -- they are instructions to the human, and spending
@@ -258,23 +263,61 @@ def _parse_markdown_sections(path: Path) -> list[tuple[str, str]]:
             continue
         sections[-1][1].append(stripped)
 
-    return [(head, " ".join(body)) for head, body in sections if body]
+    return [(head, body) for head, body in sections if body]
 
 
-def _prose_units(path: Path) -> tuple[list[str], list[dict]]:
-    pairs = _parse_markdown_sections(path)
-    units = [f"**{head}:** {body}" for head, body in pairs]
-    records = [{"heading": head, "body": body} for head, body in pairs]
+def _prose_units(
+    path: Path, skip_headings: frozenset[str] = frozenset()
+) -> tuple[list[str], list[dict]]:
+    """Markdown sections as packet units, one per bullet where there are any.
+
+    `skip_headings` (matched case-insensitively) drops a whole section. It
+    exists for headings the packet already sources from the inbox directly,
+    where keeping the file's copy would duplicate the entry at best and
+    contradict it at worst.
+
+    `compact` fills `active.md` up to its own `ACTIVE_MAX_CHARS` while this
+    packet gives the active section a smaller budget, and the two are allowed
+    to disagree. What is not allowed is the disagreement costing the whole
+    section: while the bullet list was a single atomic unit, a file over
+    budget was dropped entire and the section read empty rather than short.
+    Splitting per bullet lets it give way one entry at a time.
+
+    Bullets are not prefixed with their heading. `_entry_line` already writes
+    the id, type, and summary into every line, so each one stands alone
+    without it, and repeating a heading across twenty units would spend a
+    quarter of the section's budget restating what the line already says. The
+    heading is kept on the record instead, which goes to `render_json` where
+    there is no budget to spend.
+    """
+    units: list[str] = []
+    records: list[dict] = []
+    for head, lines in _parse_markdown_sections(path):
+        if head.strip().lower() in skip_headings:
+            continue
+        prose = [line for line in lines if not line.startswith("- ")]
+        if prose:
+            body = " ".join(prose)
+            units.append(f"**{head}:** {body}")
+            records.append({"heading": head, "body": body})
+        for bullet in (line for line in lines if line.startswith("- ")):
+            units.append(bullet)
+            records.append({"heading": head, "body": bullet})
+    # Appended in lockstep on purpose: `build_packet` trims records with a
+    # prefix slice of `len(kept)`, so any drift in order or length would pair
+    # a surviving unit with another entry's heading.
     return units, records
 
 
 def active_objective(project_root: Path) -> str | None:
     """The scope file's active objective, used as the default context query."""
-    for heading, body in _parse_markdown_sections(
+    for heading, lines in _parse_markdown_sections(
         Path(project_root) / ".agent-harness" / "scope.md"
     ):
         if heading.strip().lower() == "active objective":
-            return body
+            # Joined, not split: this is one query string, and an objective
+            # wrapped across source lines must not become several.
+            return " ".join(lines)
     return None
 
 
@@ -643,16 +686,25 @@ def build_packet(
 
     # 1. scope, 2. active -- prose, always first, never selector-ranked.
     scope_units, scope_records = _prose_units(root / ".agent-harness" / "scope.md")
+    # `## Open work` is skipped because open work is derived from the entries
+    # below. Keeping both duplicated every task and blocker, and the file's
+    # copy is only as current as the last compaction: work resolved since then
+    # still sits in the snapshot, which would report finished work as
+    # outstanding. The inbox is the store of record, so it wins.
     active_units, active_records = _prose_units(
-        memory_store.project_memory_dir(root) / "active.md"
+        memory_store.project_memory_dir(root) / "active.md",
+        skip_headings=frozenset({"open work"}),
     )
 
     # Unresolved work leads the rest of the active section: it is the design's
     # second priority tier and outranks anything a selector would surface.
+    # Leads it literally -- trimming keeps a prefix, so whatever sits at the
+    # tail is evicted first, and a blocker must not lose its place to a
+    # month-old decision.
     open_work = _open_work(project_entries)
     open_units, open_records = _entry_units(open_work, annotator)
-    active_units = active_units + open_units
-    active_records = active_records + open_records
+    active_units = open_units + active_units
+    active_records = open_records + active_records
 
     pools = durable_pools(project_entries, machine_entries)
     selected = {key: select(pool) for key, pool in pools.items()}
@@ -726,6 +778,22 @@ def build_packet(
     filter_note = loaded.note()
     if filter_note:
         all_notes.append(filter_note)
+
+    # Compaction pressure, measured once per pool and never over the two
+    # combined: a merged count could not tell the operator which store to act
+    # on, and only project memory has a working `compact`. Computed over the
+    # raw pools rather than the selected records because `_is_live` strips
+    # exactly the terminal entries `closed_in_inbox` exists to count -- reading
+    # it off the sections would report zero on the store needing it most.
+    all_notes = [
+        *all_notes,
+        *memory_compact.pressure_notes(
+            memory_compact.pressure(project_entries, now), scope="project"
+        ),
+        *memory_compact.pressure_notes(
+            memory_compact.pressure(machine_entries, now), scope="machine"
+        ),
+    ]
 
     return ContextPacket(
         project_id=memory_store.project_id_for(root),

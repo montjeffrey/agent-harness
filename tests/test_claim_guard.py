@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -99,6 +100,10 @@ def test_notebook_edit_uses_notebook_path(repo: Path) -> None:
     assert claim_guard.decide(payload).allow is False
 
 
+@pytest.mark.skipif(
+    os.name != "nt",
+    reason="Claude Code sends backslash paths only on Windows; on POSIX a backslash is a filename character",
+)
 def test_backslash_paths_match_posix_claims(repo: Path) -> None:
     work.start(repo, "Change the app", OWNER, ["src/app.py"], now=NOW)
     windows_style = str(repo / "src" / "app.py").replace("/", "\\")
