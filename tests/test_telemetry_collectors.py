@@ -134,6 +134,77 @@ def test_claude_code_collect_tolerates_truncated_file(fake_home: Path) -> None:
     assert claude_code.collect(since=None) == []
 
 
+def _assistant_line(msg_id: str | None, ts: str, block: str, output_tokens: int = 50) -> dict:
+    message: dict = {
+        "model": "claude-sonnet-5-5",
+        "content": [{"type": block}],
+        "usage": {
+            "input_tokens": 2,
+            "cache_creation_input_tokens": 100,
+            "cache_read_input_tokens": 1000,
+            "output_tokens": output_tokens,
+        },
+    }
+    if msg_id is not None:
+        message["id"] = msg_id
+    return {"type": "assistant", "sessionId": "sess-1", "cwd": "C:\\fake\\project",
+            "timestamp": ts, "message": message}
+
+
+def _write_session(fake_home: Path, lines: list[dict]) -> None:
+    project_dir = fake_home / ".claude" / "projects" / "C--fake-project"
+    project_dir.mkdir(parents=True)
+    (project_dir / "session-1.jsonl").write_text(
+        "\n".join(json.dumps(x) for x in lines), encoding="utf-8")
+
+
+def _usage(records: list[dict]) -> list[dict]:
+    return [r for r in records if r["event"] == "usage"]
+
+
+def test_claude_code_counts_a_message_split_across_lines_once(fake_home: Path) -> None:
+    # Claude Code writes one API response as one JSONL line per content block
+    # (thinking, then tool_use), and every line repeats the message's full usage.
+    from harness.collectors import claude_code
+
+    _write_session(fake_home, [
+        _assistant_line("msg_1", "2026-10-12T13:00:00.000Z", "thinking"),
+        _assistant_line("msg_1", "2026-10-12T13:00:00.100Z", "tool_use"),
+        _assistant_line("msg_2", "2026-10-12T13:00:05.000Z", "text", output_tokens=7),
+    ])
+
+    usage = _usage(claude_code.collect(since=None))
+    assert len(usage) == 2
+    assert sum(r["input_tokens"] for r in usage) == 2 * 1102
+    assert sum(r["output_tokens"] for r in usage) == 50 + 7
+
+
+def test_claude_code_since_does_not_recount_a_message_seen_before_it(fake_home: Path) -> None:
+    # A collect that ran between a message's two lines already counted it; the
+    # later line must not be counted again on the next, watermarked collect.
+    from harness.collectors import claude_code
+
+    _write_session(fake_home, [
+        _assistant_line("msg_1", "2026-10-12T13:00:00.000Z", "thinking"),
+        _assistant_line("msg_1", "2026-10-12T13:00:02.000Z", "tool_use"),
+    ])
+
+    since = telemetry_store.parse_ts("2026-10-12T13:00:01Z")
+    assert _usage(claude_code.collect(since=since)) == []
+
+
+def test_claude_code_lines_without_message_id_are_each_counted(fake_home: Path) -> None:
+    # Nothing to deduplicate on: keep the pre-existing one-record-per-line behaviour.
+    from harness.collectors import claude_code
+
+    _write_session(fake_home, [
+        _assistant_line(None, "2026-10-12T13:00:00.000Z", "text"),
+        _assistant_line(None, "2026-10-12T13:00:01.000Z", "text"),
+    ])
+
+    assert len(_usage(claude_code.collect(since=None))) == 2
+
+
 # --- codex collector: fixture-based -----------------------------------------
 
 

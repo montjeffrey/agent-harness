@@ -48,8 +48,14 @@ Each line is a JSON object. The two shapes this collector cares about:
   These don't carry a timestamp or cwd reliably, so this collector treats
   the first line in a file that *does* have both a timestamp and a
   `sessionId` as the anchor for a single `session_start` record per file,
-  and every `assistant` line with a `message.usage` block as a `usage`
-  record. `input_tokens` on the emitted record is the sum of
+  and each `assistant` message with a `message.usage` block as one `usage`
+  record. Claude Code writes a single API message as one line per content
+  block (e.g. a `thinking` line then a `tool_use` line), and every one of
+  those lines repeats the message's full `usage` under the same
+  `message.id`, so usage is counted once per `message.id` -- counting lines
+  over-reported tokens by roughly 1.8x input / 2.4x output (2026-10-12
+  benchmark, docs/benchmarks/). Lines without an id are counted each.
+  `input_tokens` on the emitted record is the sum of
   `input_tokens` + `cache_creation_input_tokens` + `cache_read_input_tokens`
   from the source (all three represent tokens consumed as input for that
   turn under Claude's prompt-caching model) -- this is a deliberate
@@ -116,6 +122,7 @@ def _collect_from_file(session_file: Path, since: datetime | None) -> list[dict]
 
     out: list[dict] = []
     session_start_emitted = False
+    seen_message_ids: set[str] = set()
 
     for line in text.splitlines():
         obj = _parse_line(line)
@@ -146,6 +153,15 @@ def _collect_from_file(session_file: Path, since: datetime | None) -> list[dict]
         usage = message.get("usage")
         if not isinstance(usage, dict):
             continue
+        # One API message is written as one line per content block, each
+        # repeating the full usage; count it once. Marked seen before the
+        # `since` check so a message an earlier collect already counted is not
+        # counted again from a later line.
+        message_id = message.get("id")
+        if isinstance(message_id, str):
+            if message_id in seen_message_ids:
+                continue
+            seen_message_ids.add(message_id)
         if not isinstance(ts, str) or not _after_since(ts, since):
             continue
 
