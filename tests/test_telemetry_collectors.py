@@ -205,6 +205,90 @@ def test_claude_code_lines_without_message_id_are_each_counted(fake_home: Path) 
     assert len(_usage(claude_code.collect(since=None))) == 2
 
 
+def _write_subagent(fake_home: Path, rel: str, lines: list[dict]) -> None:
+    path = fake_home / ".claude" / "projects" / "C--fake-project" / "session-1" / "subagents" / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(json.dumps(x) for x in lines), encoding="utf-8")
+
+
+def _sub_line(msg_id: str, ts: str, agent_id: str) -> dict:
+    line = _assistant_line(msg_id, ts, "text", output_tokens=11)
+    line["agentId"] = agent_id
+    line["isSidechain"] = True
+    return line
+
+
+def test_claude_code_counts_subagent_transcripts(fake_home: Path) -> None:
+    # Subagent transcripts live beside the session, under
+    # <session-id>/subagents/ (and subagents/workflows/<run>/), and carry the
+    # parent's sessionId. Their usage is real spend for that session.
+    from harness.collectors import claude_code
+
+    _write_session(fake_home, [_assistant_line("msg_1", "2026-10-12T13:00:00.000Z", "text")])
+    _write_subagent(fake_home, "agent-a1.jsonl", [_sub_line("msg_s1", "2026-10-12T13:00:01.000Z", "a1")])
+    _write_subagent(fake_home, "workflows/wf_1/agent-b2.jsonl",
+                    [_sub_line("msg_s2", "2026-10-12T13:00:02.000Z", "b2")])
+    _write_subagent(fake_home, "agent-a1.meta.json", [{"not": "a transcript"}])
+    _write_subagent(fake_home, "workflows/wf_1/journal.jsonl",
+                    [_sub_line("msg_journal", "2026-10-12T13:00:03.000Z", "j")])
+
+    records = claude_code.collect(since=None)
+    usage = _usage(records)
+    assert sorted(r.get("subagent_id", "") for r in usage) == ["", "a1", "b2"]
+    assert sum(r["output_tokens"] for r in usage) == 50 + 11 + 11
+    assert all(r["session_id"] == "sess-1" for r in usage)
+    # A subagent is part of its parent's session, not a session of its own.
+    assert [r["event"] for r in records].count("session_start") == 1
+
+
+def test_claude_code_message_in_parent_and_subagent_counted_once(fake_home: Path) -> None:
+    from harness.collectors import claude_code
+
+    _write_session(fake_home, [_assistant_line("msg_shared", "2026-10-12T13:00:00.000Z", "text")])
+    _write_subagent(fake_home, "agent-a1.jsonl", [_sub_line("msg_shared", "2026-10-12T13:00:00.000Z", "a1")])
+
+    assert len(_usage(claude_code.collect(since=None))) == 1
+
+
+def test_claude_code_subagents_without_parent_file_are_still_counted(fake_home: Path) -> None:
+    from harness.collectors import claude_code
+
+    _write_subagent(fake_home, "agent-a1.jsonl", [_sub_line("msg_s1", "2026-10-12T13:00:01.000Z", "a1")])
+
+    records = claude_code.collect(since=None)
+    assert [r.get("subagent_id") for r in _usage(records)] == ["a1"]
+    assert [r["event"] for r in records].count("session_start") == 0
+
+
+def test_claude_code_line_with_unicode_line_separator_is_not_split(fake_home: Path) -> None:
+    # JSON.stringify leaves U+2028 unescaped inside strings; JSONL records are
+    # separated by "\n" only, so the line must survive intact.
+    from harness.collectors import claude_code
+
+    line = _assistant_line("msg_1", "2026-10-12T13:00:00.000Z", "text")
+    line["message"]["content"] = [{"type": "text", "text": "before after"}]
+    project_dir = fake_home / ".claude" / "projects" / "C--fake-project"
+    project_dir.mkdir(parents=True)
+    (project_dir / "session-1.jsonl").write_text(
+        json.dumps(line, ensure_ascii=False) + "\r\n", encoding="utf-8")
+
+    assert len(_usage(claude_code.collect(since=None))) == 1
+
+
+def test_claude_code_long_windows_paths_get_the_extended_prefix() -> None:
+    # Deep cwd names push subagent transcripts past MAX_PATH (260); without
+    # long-path support enabled, a plain open raises and the file was skipped.
+    from harness.collectors import claude_code
+
+    long_path = Path("C:\\") / ("x" * 250) / "agent-a1.jsonl"
+    short_path = Path("C:\\short\\agent-a1.jsonl")
+    if claude_code.os.name == "nt":
+        assert claude_code._io_path(long_path).startswith("\\\\?\\")
+    else:
+        assert claude_code._io_path(long_path) == str(long_path)
+    assert claude_code._io_path(short_path) == str(short_path)
+
+
 # --- codex collector: fixture-based -----------------------------------------
 
 

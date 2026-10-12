@@ -61,6 +61,18 @@ Each line is a JSON object. The two shapes this collector cares about:
   turn under Claude's prompt-caching model) -- this is a deliberate
   aggregation choice, not a field Claude Code writes directly.
 
+* Subagent transcripts (Task/Agent tool runs, workflow agents) are separate
+  files beside the session::
+
+      <sanitized-cwd>/<session-uuid>/subagents/agent-<id>.jsonl
+      <sanitized-cwd>/<session-uuid>/subagents/workflows/<run>/agent-<id>.jsonl
+
+  Their lines have the same shape, carry the *parent's* `sessionId`, and add
+  `agentId` / `isSidechain`. They are real spend for that session, so their
+  usage is collected too, tagged with `subagent_id`; they never emit a
+  `session_start`. A message id is counted once across the session file and
+  all of its subagent transcripts.
+
 Nothing here reads prompt/response text (`message.content`) into a
 telemetry record -- only token counts, model name, session id, project
 path, and timestamps.
@@ -69,21 +81,54 @@ path, and timestamps.
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 
 from harness import telemetry_store
 
 
+MAX_PATH = 260
+
+
 def _claude_projects_dir() -> Path:
     return Path.home() / ".claude" / "projects"
 
 
-def _iter_session_files(root: Path):
+def _iter_sessions(root: Path):
+    """Yield `(session_file, subagent_files)` per session id.
+
+    `session_file` is `<project>/<id>.jsonl`, or None when only the
+    subagent directory survives. `subagent_files` are the transcripts under
+    `<project>/<id>/subagents/` at any depth (workflow runs nest one level
+    further), matched as `agent-*.jsonl` so sibling `.meta.json` files and
+    workflow `journal.jsonl` files are not mistaken for transcripts.
+    """
     if not root.is_dir():
         return
     for project_dir in sorted(p for p in root.iterdir() if p.is_dir()):
-        yield from sorted(project_dir.glob("*.jsonl"))
+        sessions = {p.stem: p for p in project_dir.glob("*.jsonl")}
+        with_subagents = {p.name for p in project_dir.iterdir() if (p / "subagents").is_dir()}
+        for session_id in sorted(set(sessions) | with_subagents):
+            subagents = (
+                sorted((project_dir / session_id / "subagents").rglob("agent-*.jsonl"))
+                if session_id in with_subagents else []
+            )
+            yield sessions.get(session_id), subagents
+
+
+def _io_path(path: Path) -> str:
+    """The path to open, with the extended-length prefix where Windows needs it.
+
+    A deep project cwd plus `<id>/subagents/workflows/<run>/agent-<id>.jsonl`
+    passes MAX_PATH, and without the LongPathsEnabled policy a plain open of
+    such a path raises -- which this collector would silently treat as an
+    unreadable file. Listing those directories still works; only opening fails.
+    """
+    text = str(path)
+    if os.name == "nt" and len(text) >= MAX_PATH and not text.startswith("\\\\?\\"):
+        return "\\\\?\\" + str(path.absolute())
+    return text
 
 
 def _parse_line(line: str) -> dict | None:
@@ -107,24 +152,41 @@ def collect(since: datetime | None = None) -> list[dict]:
     records: list[dict] = []
     try:
         root = _claude_projects_dir()
-        for session_file in _iter_session_files(root):
-            records.extend(_collect_from_file(session_file, since))
+        for session_file, subagent_files in _iter_sessions(root):
+            # One seen-set per session: a message id can appear both in the
+            # session file and in one of its subagent transcripts.
+            seen_message_ids: set[str] = set()
+            if session_file is not None:
+                records.extend(_collect_from_file(session_file, since, seen_message_ids))
+            for subagent_file in subagent_files:
+                records.extend(_collect_from_file(
+                    subagent_file, since, seen_message_ids, subagent=True))
     except OSError:
         return []
     return records
 
 
-def _collect_from_file(session_file: Path, since: datetime | None) -> list[dict]:
+def _collect_from_file(
+    session_file: Path,
+    since: datetime | None,
+    seen_message_ids: set[str],
+    subagent: bool = False,
+) -> list[dict]:
     try:
-        text = session_file.read_text(encoding="utf-8", errors="replace")
+        with open(_io_path(session_file), encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
     except OSError:
         return []
 
     out: list[dict] = []
-    session_start_emitted = False
-    seen_message_ids: set[str] = set()
+    # A subagent transcript carries its parent's sessionId; it is part of
+    # that session, not a new one, so it never emits session_start.
+    session_start_emitted = subagent
 
-    for line in text.splitlines():
+    # Split on "\n" only: str.splitlines() also breaks on U+2028, \x1c and
+    # friends, which JSON.stringify leaves unescaped inside strings -- that cut
+    # real records in two and silently dropped them. _parse_line strips "\r".
+    for line in text.split("\n"):
         obj = _parse_line(line)
         if obj is None:
             continue
@@ -189,6 +251,12 @@ def _collect_from_file(session_file: Path, since: datetime | None) -> list[dict]
         model = message.get("model")
         if isinstance(model, str):
             record["model"] = model
+        if subagent:
+            agent_id = obj.get("agentId")
+            record["subagent_id"] = (
+                agent_id if isinstance(agent_id, str)
+                else session_file.stem.removeprefix("agent-")
+            )
         out.append(record)
 
     return out
