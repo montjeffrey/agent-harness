@@ -1,0 +1,941 @@
+{
+ "n_runs": 48,
+ "tasks": {
+  "B1-derive-bug": {
+   "nA": 3,
+   "nB": 3,
+   "total_tokens_A": 130071,
+   "total_tokens_B": 151039,
+   "total_tokens_A_all": [
+    129877,
+    130071,
+    362997
+   ],
+   "total_tokens_B_all": [
+    148864,
+    151039,
+    357160
+   ],
+   "cost_usd_A": 0.0822332,
+   "cost_usd_B": 0.08717860000000001,
+   "cost_usd_A_all": [
+    0.0819018,
+    0.0822332,
+    0.196072
+   ],
+   "cost_usd_B_all": [
+    0.08511980000000001,
+    0.08717860000000001,
+    0.16540820000000003
+   ],
+   "output_tokens_A": 1069,
+   "output_tokens_B": 1226,
+   "output_tokens_A_all": [
+    1069,
+    1069,
+    1818
+   ],
+   "output_tokens_B_all": [
+    1180,
+    1226,
+    2538
+   ],
+   "cache_creation_tokens_A": 11855,
+   "cache_creation_tokens_B": 11647,
+   "cache_creation_tokens_A_all": [
+    11778,
+    11855,
+    27616
+   ],
+   "cache_creation_tokens_B_all": [
+    11337,
+    11647,
+    17996
+   ],
+   "cache_read_tokens_A": 116186,
+   "cache_read_tokens_B": 137203,
+   "cache_read_tokens_A_all": [
+    116069,
+    116186,
+    332590
+   ],
+   "cache_read_tokens_B_all": [
+    135384,
+    137203,
+    335651
+   ],
+   "input_tokens_A": 961,
+   "input_tokens_B": 963,
+   "input_tokens_A_all": [
+    961,
+    961,
+    973
+   ],
+   "input_tokens_B_all": [
+    963,
+    963,
+    975
+   ],
+   "num_turns_A": 6,
+   "num_turns_B": 7,
+   "num_turns_A_all": [
+    6,
+    6,
+    12
+   ],
+   "num_turns_B_all": [
+    7,
+    7,
+    14
+   ],
+   "wall_s_A": 278.9,
+   "wall_s_B": 300.5,
+   "wall_s_A_all": [
+    278.9,
+    296.4,
+    152.0
+   ],
+   "wall_s_B_all": [
+    285.4,
+    300.5,
+    349.1
+   ],
+   "pass_A": 3,
+   "pass_B": 3,
+   "ratio_tokens": 0.8611749283297692,
+   "ratio_cost": 0.9432727756582464
+  },
+  "B2-severity-bug": {
+   "nA": 3,
+   "nB": 3,
+   "total_tokens_A": 236092,
+   "total_tokens_B": 195410,
+   "total_tokens_A_all": [
+    348744,
+    236092,
+    173283
+   ],
+   "total_tokens_B_all": [
+    219407,
+    157989,
+    195410
+   ],
+   "cost_usd_A": 0.132048,
+   "cost_usd_B": 0.1158012,
+   "cost_usd_A_all": [
+    0.16565240000000003,
+    0.132048,
+    0.11420400000000001
+   ],
+   "cost_usd_B_all": [
+    0.11849440000000003,
+    0.0974966,
+    0.1158012
+   ],
+   "output_tokens_A": 1916,
+   "output_tokens_B": 1620,
+   "output_tokens_A_all": [
+    2922,
+    1916,
+    1401
+   ],
+   "output_tokens_B_all": [
+    1900,
+    1303,
+    1620
+   ],
+   "cache_creation_tokens_A": 17197,
+   "cache_creation_tokens_B": 14551,
+   "cache_creation_tokens_A_all": [
+    17513,
+    17197,
+    17137
+   ],
+   "cache_creation_tokens_B_all": [
+    14551,
+    13798,
+    15827
+   ],
+   "cache_read_tokens_A": 216000,
+   "cache_read_tokens_B": 176986,
+   "cache_read_tokens_A_all": [
+    327322,
+    216000,
+    153770
+   ],
+   "cache_read_tokens_B_all": [
+    201977,
+    141913,
+    176986
+   ],
+   "input_tokens_A": 979,
+   "input_tokens_B": 977,
+   "input_tokens_A_all": [
+    987,
+    979,
+    975
+   ],
+   "input_tokens_B_all": [
+    979,
+    975,
+    977
+   ],
+   "num_turns_A": 10,
+   "num_turns_B": 9,
+   "num_turns_A_all": [
+    16,
+    10,
+    7
+   ],
+   "num_turns_B_all": [
+    10,
+    7,
+    9
+   ],
+   "wall_s_A": 243.1,
+   "wall_s_B": 290.5,
+   "wall_s_A_all": [
+    308.2,
+    243.1,
+    140.6
+   ],
+   "wall_s_B_all": [
+    290.5,
+    142.2,
+    308.9
+   ],
+   "pass_A": 3,
+   "pass_B": 3,
+   "ratio_tokens": 1.2081879125940331,
+   "ratio_cost": 1.1402990642584014
+  },
+  "F1-nothing-to-merge": {
+   "nA": 3,
+   "nB": 3,
+   "total_tokens_A": 103873,
+   "total_tokens_B": 119650,
+   "total_tokens_A_all": [
+    103798,
+    103873,
+    103984
+   ],
+   "total_tokens_B_all": [
+    119650,
+    97390,
+    123840
+   ],
+   "cost_usd_A": 0.083095,
+   "cost_usd_B": 0.0783452,
+   "cost_usd_A_all": [
+    0.08286540000000002,
+    0.083095,
+    0.084417
+   ],
+   "cost_usd_B_all": [
+    0.0783452,
+    0.075917,
+    0.0806036
+   ],
+   "output_tokens_A": 1376,
+   "output_tokens_B": 1403,
+   "output_tokens_A_all": [
+    1362,
+    1376,
+    1493
+   ],
+   "output_tokens_B_all": [
+    1527,
+    1403,
+    1385
+   ],
+   "cache_creation_tokens_A": 12668,
+   "cache_creation_tokens_B": 10936,
+   "cache_creation_tokens_A_all": [
+    12645,
+    12668,
+    12707
+   ],
+   "cache_creation_tokens_B_all": [
+    10196,
+    11048,
+    10936
+   ],
+   "cache_read_tokens_A": 88817,
+   "cache_read_tokens_B": 106951,
+   "cache_read_tokens_A_all": [
+    88817,
+    88855,
+    88810
+   ],
+   "cache_read_tokens_B_all": [
+    106951,
+    83965,
+    110543
+   ],
+   "input_tokens_A": 974,
+   "input_tokens_B": 976,
+   "input_tokens_A_all": [
+    974,
+    974,
+    974
+   ],
+   "input_tokens_B_all": [
+    976,
+    974,
+    976
+   ],
+   "num_turns_A": 7,
+   "num_turns_B": 7,
+   "num_turns_A_all": [
+    7,
+    7,
+    7
+   ],
+   "num_turns_B_all": [
+    8,
+    7,
+    7
+   ],
+   "wall_s_A": 23.5,
+   "wall_s_B": 21.1,
+   "wall_s_A_all": [
+    29.9,
+    23.5,
+    22.0
+   ],
+   "wall_s_B_all": [
+    23.4,
+    21.1,
+    19.8
+   ],
+   "pass_A": 3,
+   "pass_B": 3,
+   "ratio_tokens": 0.8681404095277894,
+   "ratio_cost": 1.0606265604019136
+  },
+  "F2-only-flag": {
+   "nA": 3,
+   "nB": 3,
+   "total_tokens_A": 215640,
+   "total_tokens_B": 201546,
+   "total_tokens_A_all": [
+    218660,
+    215640,
+    212696
+   ],
+   "total_tokens_B_all": [
+    325974,
+    177864,
+    201546
+   ],
+   "cost_usd_A": 0.1544138,
+   "cost_usd_B": 0.1432122,
+   "cost_usd_A_all": [
+    0.1565522,
+    0.1544138,
+    0.142234
+   ],
+   "cost_usd_B_all": [
+    0.1715592,
+    0.1432122,
+    0.1317682
+   ],
+   "output_tokens_A": 3958,
+   "output_tokens_B": 3826,
+   "output_tokens_A_all": [
+    3958,
+    3967,
+    3148
+   ],
+   "output_tokens_B_all": [
+    4265,
+    3826,
+    2787
+   ],
+   "cache_creation_tokens_A": 18856,
+   "cache_creation_tokens_B": 16782,
+   "cache_creation_tokens_A_all": [
+    19283,
+    18856,
+    17910
+   ],
+   "cache_creation_tokens_B_all": [
+    16782,
+    18261,
+    16675
+   ],
+   "cache_read_tokens_A": 191764,
+   "cache_read_tokens_B": 181031,
+   "cache_read_tokens_A_all": [
+    194366,
+    191764,
+    190585
+   ],
+   "cache_read_tokens_B_all": [
+    303866,
+    154726,
+    181031
+   ],
+   "input_tokens_A": 1053,
+   "input_tokens_B": 1053,
+   "input_tokens_A_all": [
+    1053,
+    1053,
+    1053
+   ],
+   "input_tokens_B_all": [
+    1061,
+    1051,
+    1053
+   ],
+   "num_turns_A": 12,
+   "num_turns_B": 13,
+   "num_turns_A_all": [
+    12,
+    14,
+    12
+   ],
+   "num_turns_B_all": [
+    13,
+    13,
+    11
+   ],
+   "wall_s_A": 39.6,
+   "wall_s_B": 52.3,
+   "wall_s_A_all": [
+    161.0,
+    38.8,
+    39.6
+   ],
+   "wall_s_B_all": [
+    167.7,
+    52.3,
+    34.4
+   ],
+   "pass_A": 3,
+   "pass_B": 3,
+   "ratio_tokens": 1.0699294453871573,
+   "ratio_cost": 1.078216799965366
+  },
+  "Q1-try-callers": {
+   "nA": 3,
+   "nB": 3,
+   "total_tokens_A": 81032,
+   "total_tokens_B": 98859,
+   "total_tokens_A_all": [
+    131829,
+    80251,
+    81032
+   ],
+   "total_tokens_B_all": [
+    97800,
+    124171,
+    98859
+   ],
+   "cost_usd_A": 0.08665919999999999,
+   "cost_usd_B": 0.0886938,
+   "cost_usd_A_all": [
+    0.0947698,
+    0.0823794,
+    0.08665919999999999
+   ],
+   "cost_usd_B_all": [
+    0.07589560000000001,
+    0.0886938,
+    0.0944014
+   ],
+   "output_tokens_A": 1201,
+   "output_tokens_B": 1209,
+   "output_tokens_A_all": [
+    1590,
+    1013,
+    1201
+   ],
+   "output_tokens_B_all": [
+    1209,
+    1577,
+    1085
+   ],
+   "cache_creation_tokens_A": 14651,
+   "cache_creation_tokens_B": 12546,
+   "cache_creation_tokens_A_all": [
+    13711,
+    14651,
+    15250
+   ],
+   "cache_creation_tokens_B_all": [
+    11516,
+    12546,
+    16650
+   ],
+   "cache_read_tokens_A": 63597,
+   "cache_read_tokens_B": 84083,
+   "cache_read_tokens_A_all": [
+    115534,
+    63597,
+    63591
+   ],
+   "cache_read_tokens_B_all": [
+    84083,
+    109054,
+    80132
+   ],
+   "input_tokens_A": 990,
+   "input_tokens_B": 992,
+   "input_tokens_A_all": [
+    994,
+    990,
+    990
+   ],
+   "input_tokens_B_all": [
+    992,
+    994,
+    992
+   ],
+   "num_turns_A": 3,
+   "num_turns_B": 4,
+   "num_turns_A_all": [
+    5,
+    3,
+    3
+   ],
+   "num_turns_B_all": [
+    4,
+    5,
+    4
+   ],
+   "wall_s_A": 12.6,
+   "wall_s_B": 15.2,
+   "wall_s_A_all": [
+    28.7,
+    11.3,
+    12.6
+   ],
+   "wall_s_B_all": [
+    12.7,
+    15.4,
+    15.2
+   ],
+   "pass_A": 3,
+   "pass_B": 3,
+   "ratio_tokens": 0.8196724628005543,
+   "ratio_cost": 0.9770604033201868
+  },
+  "Q2-noprobe-conflicts": {
+   "nA": 3,
+   "nB": 3,
+   "total_tokens_A": 75088,
+   "total_tokens_B": 70404,
+   "total_tokens_A_all": [
+    75088,
+    129989,
+    74926
+   ],
+   "total_tokens_B_all": [
+    70310,
+    70404,
+    97931
+   ],
+   "cost_usd_A": 0.0631598,
+   "cost_usd_B": 0.057142,
+   "cost_usd_A_all": [
+    0.0631598,
+    0.08412920000000002,
+    0.06249700000000001
+   ],
+   "cost_usd_B_all": [
+    0.056647199999999995,
+    0.057142,
+    0.0744118
+   ],
+   "output_tokens_A": 671,
+   "output_tokens_B": 737,
+   "output_tokens_A_all": [
+    671,
+    1167,
+    662
+   ],
+   "output_tokens_B_all": [
+    698,
+    737,
+    1121
+   ],
+   "cache_creation_tokens_A": 10752,
+   "cache_creation_tokens_B": 9246,
+   "cache_creation_tokens_A_all": [
+    10752,
+    12101,
+    10608
+   ],
+   "cache_creation_tokens_B_all": [
+    9220,
+    9246,
+    11348
+   ],
+   "cache_read_tokens_A": 62674,
+   "cache_read_tokens_B": 59430,
+   "cache_read_tokens_A_all": [
+    62674,
+    115726,
+    62665
+   ],
+   "cache_read_tokens_B_all": [
+    59401,
+    59430,
+    84469
+   ],
+   "input_tokens_A": 991,
+   "input_tokens_B": 991,
+   "input_tokens_A_all": [
+    991,
+    995,
+    991
+   ],
+   "input_tokens_B_all": [
+    991,
+    991,
+    993
+   ],
+   "num_turns_A": 4,
+   "num_turns_B": 4,
+   "num_turns_A_all": [
+    4,
+    6,
+    4
+   ],
+   "num_turns_B_all": [
+    4,
+    4,
+    6
+   ],
+   "wall_s_A": 11.1,
+   "wall_s_B": 9.7,
+   "wall_s_A_all": [
+    10.3,
+    18.6,
+    11.1
+   ],
+   "wall_s_B_all": [
+    9.7,
+    9.0,
+    10.0
+   ],
+   "pass_A": 3,
+   "pass_B": 3,
+   "ratio_tokens": 1.0665303107777968,
+   "ratio_cost": 1.1053130796961954
+  },
+  "R1-rename-lines": {
+   "nA": 3,
+   "nB": 3,
+   "total_tokens_A": 72497,
+   "total_tokens_B": 67545,
+   "total_tokens_A_all": [
+    72836,
+    72432,
+    72497
+   ],
+   "total_tokens_B_all": [
+    67545,
+    67671,
+    67411
+   ],
+   "cost_usd_A": 0.0555934,
+   "cost_usd_B": 0.046673599999999996,
+   "cost_usd_A_all": [
+    0.0555934,
+    0.0539014,
+    0.08310100000000001
+   ],
+   "cost_usd_B_all": [
+    0.046673599999999996,
+    0.0471036,
+    0.045687599999999995
+   ],
+   "output_tokens_A": 625,
+   "output_tokens_B": 598,
+   "output_tokens_A_all": [
+    625,
+    614,
+    667
+   ],
+   "output_tokens_B_all": [
+    612,
+    598,
+    537
+   ],
+   "cache_creation_tokens_A": 9002,
+   "cache_creation_tokens_B": 6968,
+   "cache_creation_tokens_A_all": [
+    9002,
+    8609,
+    16153
+   ],
+   "cache_creation_tokens_B_all": [
+    6968,
+    7108,
+    6909
+   ],
+   "cache_read_tokens_A": 62262,
+   "cache_read_tokens_B": 59018,
+   "cache_read_tokens_A_all": [
+    62262,
+    62262,
+    54730
+   ],
+   "cache_read_tokens_B_all": [
+    59018,
+    59018,
+    59018
+   ],
+   "input_tokens_A": 947,
+   "input_tokens_B": 947,
+   "input_tokens_A_all": [
+    947,
+    947,
+    947
+   ],
+   "input_tokens_B_all": [
+    947,
+    947,
+    947
+   ],
+   "num_turns_A": 3,
+   "num_turns_B": 3,
+   "num_turns_A_all": [
+    3,
+    3,
+    3
+   ],
+   "num_turns_B_all": [
+    3,
+    3,
+    3
+   ],
+   "wall_s_A": 18.8,
+   "wall_s_B": 19.5,
+   "wall_s_A_all": [
+    18.8,
+    17.5,
+    20.4
+   ],
+   "wall_s_B_all": [
+    20.9,
+    19.5,
+    17.6
+   ],
+   "pass_A": 3,
+   "pass_B": 3,
+   "ratio_tokens": 1.0733140869050264,
+   "ratio_cost": 1.191110177916424
+  },
+  "R2-isstale-now": {
+   "nA": 3,
+   "nB": 3,
+   "total_tokens_A": 126752,
+   "total_tokens_B": 121208,
+   "total_tokens_A_all": [
+    126752,
+    131639,
+    104425
+   ],
+   "total_tokens_B_all": [
+    122152,
+    121208,
+    119114
+   ],
+   "cost_usd_A": 0.092606,
+   "cost_usd_B": 0.08219900000000001,
+   "cost_usd_A_all": [
+    0.0857956,
+    0.09439600000000001,
+    0.092606
+   ],
+   "cost_usd_B_all": [
+    0.08674939999999999,
+    0.08219900000000001,
+    0.081678
+   ],
+   "output_tokens_A": 2108,
+   "output_tokens_B": 2081,
+   "output_tokens_A_all": [
+    1908,
+    2108,
+    2417
+   ],
+   "output_tokens_B_all": [
+    2282,
+    1949,
+    2081
+   ],
+   "cache_creation_tokens_A": 12286,
+   "cache_creation_tokens_B": 10034,
+   "cache_creation_tokens_A_all": [
+    10801,
+    12286,
+    12450
+   ],
+   "cache_creation_tokens_B_all": [
+    10323,
+    10034,
+    9668
+   ],
+   "cache_read_tokens_A": 113058,
+   "cache_read_tokens_B": 108240,
+   "cache_read_tokens_A_all": [
+    113058,
+    116260,
+    88575
+   ],
+   "cache_read_tokens_B_all": [
+    108562,
+    108240,
+    106380
+   ],
+   "input_tokens_A": 985,
+   "input_tokens_B": 985,
+   "input_tokens_A_all": [
+    985,
+    985,
+    983
+   ],
+   "input_tokens_B_all": [
+    985,
+    985,
+    985
+   ],
+   "num_turns_A": 9,
+   "num_turns_B": 9,
+   "num_turns_A_all": [
+    9,
+    9,
+    9
+   ],
+   "num_turns_B_all": [
+    9,
+    9,
+    9
+   ],
+   "wall_s_A": 23.8,
+   "wall_s_B": 20.9,
+   "wall_s_A_all": [
+    20.4,
+    24.3,
+    23.8
+   ],
+   "wall_s_B_all": [
+    21.0,
+    19.5,
+    20.9
+   ],
+   "pass_A": 3,
+   "pass_B": 3,
+   "ratio_tokens": 1.045739555144875,
+   "ratio_cost": 1.1266073796518203
+  }
+ },
+ "overall": {
+  "total_tokens": {
+   "geo_mean_ratio": 0.9933833145281964,
+   "ci95": [
+    0.8331433059660298,
+    1.2343396679771916
+   ],
+   "median_task_ratio": 1.0561349329613359,
+   "task_ratio_min": 0.8196724628005543,
+   "task_ratio_max": 1.2081879125940331
+  },
+  "cost_usd": {
+   "geo_mean_ratio": 1.074934468058654,
+   "ci95": [
+    0.9608851183140517,
+    1.2803109964843054
+   ],
+   "median_task_ratio": 1.0917649398307807,
+   "task_ratio_min": 0.9432727756582464,
+   "task_ratio_max": 1.191110177916424
+  },
+  "output_tokens": {
+   "geo_mean_ratio": 1.0002327064078527,
+   "ci95": [
+    0.8524770235254947,
+    1.1864671417516672
+   ],
+   "median_task_ratio": 1.0031787463000745,
+   "task_ratio_min": 0.8719412724306689,
+   "task_ratio_max": 1.182716049382716
+  },
+  "cache_creation_tokens": {
+   "geo_mean_ratio": 1.1637130953448327,
+   "ci95": [
+    1.0567775515655515,
+    1.380646109464005
+   ],
+   "median_task_ratio": 1.1653319030613676,
+   "task_ratio_min": 1.0178586760539194,
+   "task_ratio_max": 1.291905855338691
+  },
+  "cache_read_tokens": {
+   "geo_mean_ratio": 0.9723532658766618,
+   "ci95": [
+    0.8071553326437572,
+    1.2242355508419875
+   ],
+   "median_task_ratio": 1.049548710719313,
+   "task_ratio_min": 0.7563597873529727,
+   "task_ratio_max": 1.220435514673477
+  },
+  "num_turns": {
+   "geo_mean_ratio": 0.9492677623740203,
+   "ci95": [
+    0.8295984476927609,
+    1.1508390235833765
+   ],
+   "median_task_ratio": 1.0,
+   "task_ratio_min": 0.75,
+   "task_ratio_max": 1.1111111111111112
+  },
+  "wall_s": {
+   "geo_mean_ratio": 0.9533047002922472,
+   "ci95": [
+    0.7708857093331133,
+    1.329226055917429
+   ],
+   "median_task_ratio": 0.9461111822176713,
+   "task_ratio_min": 0.7571701720841301,
+   "task_ratio_max": 1.1443298969072166
+  },
+  "pass_A": [
+   24,
+   24
+  ],
+  "pass_B": [
+   24,
+   24
+  ],
+  "harness_tool_use": {
+   "runs_using": 0,
+   "runs": 24,
+   "calls": {}
+  },
+  "tool_calls_A": {
+   "Grep": 47,
+   "Read": 35,
+   "Edit": 34,
+   "Bash": 28,
+   "Glob": 3,
+   "Write": 5,
+   "Monitor": 1
+  },
+  "tool_calls_B": {
+   "Grep": 35,
+   "Read": 42,
+   "Edit": 30,
+   "Bash": 40,
+   "Glob": 1,
+   "Write": 3,
+   "Monitor": 1
+  },
+  "benchmark_cost_usd_all_runs_incl_pilot": 4.7019072
+ }
+}
