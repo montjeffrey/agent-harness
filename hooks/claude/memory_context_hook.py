@@ -363,14 +363,18 @@ def render_toc(packet: Any, max_chars: int, session_id: str | None = None) -> st
 
 
 def _harness():
-    try:
-        from harness import memory_context, memory_curation, memory_index, memory_store
-    except ImportError:
-        # Source checkout: this file is <repo>/hooks/claude/, so the package
-        # root is two levels up. An installed (pipx/wheel) harness takes the
-        # branch above and never reaches here.
-        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-        from harness import memory_context, memory_curation, memory_index, memory_store
+    # Import the harness that ships beside this file (<root>/hooks/claude/ ->
+    # <root>), never whichever copy the interpreter finds first. Hooks are
+    # registered by checkout path but run under the pipx interpreter, so a
+    # stale pipx snapshot used to win the import: modules it had came from
+    # the snapshot, one it lacked raised ImportError, and this hook swallowed
+    # the error and went silent. For a wheel install <root> is site-packages,
+    # so this resolves to the same package either way.
+    root = str(Path(__file__).resolve().parents[2])
+    if sys.path[:1] != [root]:
+        sys.path.insert(0, root)
+    from harness import memory_context, memory_curation, memory_index, memory_store
+
     return memory_context, memory_curation, memory_index, memory_store
 
 

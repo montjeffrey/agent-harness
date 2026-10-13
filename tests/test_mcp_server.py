@@ -14,6 +14,7 @@ import json
 import os
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -705,6 +706,9 @@ def test_main_warms_imports_before_serving(monkeypatch):
             order.append("run")
 
     monkeypatch.setattr(mcp_server, "_build_server", lambda: FakeServer())
+    # main() refuses to start without the optional SDK; the server is faked,
+    # so a stand-in module keeps this test about ordering, not about extras.
+    monkeypatch.setitem(sys.modules, "mcp", types.ModuleType("mcp"))
     assert mcp_server.main([]) == 0
     assert order == ["warm", "run"]
 

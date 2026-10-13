@@ -762,7 +762,10 @@ Compaction is the only operation that removes entries, so its rules are narrow:
   Promotion is idempotent by entry id.
 - **`active.md` is rewritten** with open work and recent decisions, bounded by
   entry and character budgets. Omission is unit-atomic and counted, matching
-  the context packet's own rule.
+  the context packet's own rule. The two budgets are deliberately independent
+  -- compaction's is the larger -- because the packet re-splits the file one
+  entry per unit when it reads it back. A file that overruns the packet's
+  smaller allowance loses its last few entries, never the whole section.
 - **The inbox is spliced last** -- archive, then durable, then active, then
   inbox. The inbox is the store of record and everything else derives from it,
   so a crash partway through loses only derived work the next run redoes.
@@ -784,6 +787,34 @@ run `agent-harness-memory index` to drop them from retrieval.
 the store still grows without bound. It needs its own rules rather than these
 pointed at another directory -- machine memory has no repository to be
 reviewed in and no per-project week to archive against.
+
+#### Nothing runs `compact` for you
+
+Compaction is explicit: no hook and no scheduler invokes it, because removing
+entries from the store of record without a human in the loop would mean
+discovering the removal by reading an archive rather than by deciding. What
+the context packet does instead is tell you when running it would be worth
+something:
+
+```text
+[memory] 12 closed, 3 duplicate proposals -- run `agent-harness-memory compact`
+[memory] 6 proposals unreviewed, oldest 23d -- run `agent-harness-memory review`
+```
+
+Both lines are derived from the entries themselves -- the first counts exactly
+what a compaction pass would remove, the second what nobody has looked at --
+so a clean store prints neither. That silence is the point: a nudge that fires
+on a store with nothing to clear teaches you to ignore it.
+
+They stay two sentences because they ask for different things, and only one is
+mechanical. Compaction cannot remove a proposal, so a merged line reading
+"6 entries, run compact" would send you to a command that clears nothing. For
+the same reason machine pressure only ever produces the review line, and names
+the scope the flag does not default to:
+
+```text
+[memory] 6 machine proposals unreviewed, oldest 23d -- run `agent-harness-memory review --scope machine`
+```
 
 Also not yet included, each tracked separately in `ROADMAP.md`: scope-drift
 detection, cross-project relationship proposals, contradiction detection, and

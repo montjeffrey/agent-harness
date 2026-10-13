@@ -23,11 +23,11 @@ from pathlib import Path
 HARNESS_ROOT = Path(__file__).resolve().parent.parent
 
 try:
-    from harness import telemetry_store
+    from harness import atomicwrite, telemetry_store
     from harness.collectors import run_collector
 except ImportError:  # running as `python harness/telemetry.py`, not `-m harness.telemetry`
     sys.path.insert(0, str(HARNESS_ROOT))
-    from harness import telemetry_store
+    from harness import atomicwrite, telemetry_store
     from harness.collectors import run_collector
 
 
@@ -87,9 +87,19 @@ def _load_collect_state() -> dict[str, str]:
 
 
 def _save_collect_state(state: dict[str, str]) -> None:
+    """Replace the watermark map atomically.
+
+    A plain `write_text` truncates before it writes, and `_load_collect_state`
+    reads a tolerant `{}` from anything it cannot parse -- so a process killed
+    mid-write does not lose one watermark, it loses all of them silently, and
+    the next `collect` re-ingests every agent's history from the beginning.
+    Temp-then-replace makes the failure cost the update instead of the file,
+    and picks up the contention retry the other writers already have.
+    """
     path = _collect_state_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
+    with atomicwrite.atomic_sibling(path) as tmp:
+        tmp.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def _record_ts(rec: dict) -> datetime | None:

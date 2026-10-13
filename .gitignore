@@ -17,6 +17,3 @@ private-plans/
 .worktrees/
 .claude/worktrees/
 
-# Nested Obsidian vault state -- the memory design keeps Obsidian optional
-# and explicitly out of version control.
-/agent-harness/

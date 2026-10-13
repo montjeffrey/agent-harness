@@ -55,11 +55,13 @@ PROGRESS_TAG = "progress"
 
 
 def _import_harness():
-    try:
-        from harness import memory_store, work
-    except ImportError:
-        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-        from harness import memory_store, work
+    # The harness beside this file (<root>/hooks/claude/ -> <root>), never a
+    # stale install found first on sys.path; see memory_context_hook._harness.
+    root = str(Path(__file__).resolve().parents[2])
+    if sys.path[:1] != [root]:
+        sys.path.insert(0, root)
+    from harness import memory_store, work
+
     return memory_store, work
 
 

@@ -17,6 +17,27 @@ discarded, because compaction is automated maintenance and the decision to
 throw away an observation belongs to a human. Everything removed is written
 to the week's archive first, so a removal is always recoverable.
 
+Near-duplicates -- one summary's wording contained in another's -- are
+*reported* and never removed. Containment is not equivalence: the longer
+entry states a strictly more specific claim, so collapsing the pair would
+destroy a claim rather than a repetition. `find_near_duplicates` feeds the
+pressure signal only, and points the operator at `review`.
+
+Within a duplicate group the survivor is the entry carrying the most support
+-- evidence first, then tags, unknown fields, and wording -- not the one
+recorded first. See `find_duplicates`: because the group key *is* the
+normalized summary, twins differ only in their support, and keeping the
+earliest kept the barest.
+
+Whatever the dropped twins held that the survivor lacked is then folded into
+it, so ranking chooses the base record rather than deciding what is lost.
+This is the one place compaction edits an entry that stays, and it is
+deliberately narrow: only gaps are filled, never existing values; `id`, `ts`,
+`type`, `scope`, `status`, `summary` and `confidence` never move; the splice
+stays line-level with the rewritten survivors named explicitly, so every
+other line -- including one this schema version cannot parse -- is still
+copied across untouched. The count is reported as `CompactResult.merged`.
+
 **Promotion is a copy, not a move.** Accepted knowledge is written into
 `durable.md` for human and Git review, but stays in the inbox. `memory_context`
 reads durable knowledge *out of the inbox* -- it treats only `scope.md` and
@@ -64,7 +85,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Iterator, Mapping, Sequence
 
-from harness import memory_store
+from harness import atomicwrite, memory_store
 
 
 # Budgets for the rewritten `active.md`. Module constants rather than config:
@@ -82,6 +103,30 @@ WORK_TYPES: frozenset[str] = frozenset({"task", "blocker"})
 LOCK_NAME = ".compact.lock"
 LOCK_STALE_SECONDS = 900
 
+# When a backlog of unreviewed proposals is worth mentioning. Named constants
+# beside the predicates rather than configuration: there is no evidence yet
+# about what the right numbers are, and a config surface for two untuned
+# integers would be speculative. A proposal recorded this morning is the system
+# working; one sitting a fortnight is the failure these thresholds name. Age is
+# the sharper trigger; the count catches a sudden pile-up.
+UNREVIEWED_COUNT_THRESHOLD = 5
+UNREVIEWED_AGE_DAYS = 7
+
+# Shortest summary that may be reported as contained in another. Containment
+# over two or three words is coincidence -- "fix it" sits inside a great many
+# sentences -- and a signal that fires on coincidence is one the operator
+# learns to scroll past.
+NEAR_DUPLICATE_MIN_TOKENS = 4
+
+# Fields a dropped duplicate never lends its survivor. Identity and timestamp
+# are what make the entry that entry; type, scope and summary are the claim,
+# which grouping already proved identical. `confidence` is the load-bearing
+# one -- see `merge_duplicate_detail`.
+MERGE_PROTECTED_FIELDS: frozenset[str] = frozenset(
+    {"schema", "id", "ts", "type", "scope", "status", "summary", "confidence"}
+)
+
+_TS_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 # How often a project is due for compaction. Weekly is the design's cadence
 # (the archive is filed by ISO week); the override exists so an operator can
 # tighten it on a busy store or set it to 0 to make `maintain` compact on
@@ -110,6 +155,9 @@ class CompactResult:
     week: str
     archived: int = 0
     duplicates: int = 0
+    # Survivors rewritten to carry a dropped twin's support. Reported because
+    # it is the one case where compaction edits an entry that stays.
+    merged: int = 0
     promoted: int = 0
     carried: int = 0
     omitted: int = 0
@@ -119,6 +167,29 @@ class CompactResult:
     @property
     def changed(self) -> bool:
         return bool(self.archived or self.promoted)
+
+
+@dataclass(frozen=True)
+class CompactionPressure:
+    """How much a store would gain from maintenance, measured on its entries.
+
+    Not elapsed time since the last run. Elapsed time nags a clean store and
+    stays silent on a dirty one that happens to have been compacted recently;
+    counting what compaction would actually act on speaks the day something
+    closes and says nothing the week nothing does. It also dissolves the
+    "never compacted" case: a store that has never run a pass is not a special
+    state, it simply has whatever pressure it has.
+    """
+
+    closed_in_inbox: int = 0
+    duplicate_proposals: int = 0
+    unreviewed: int = 0
+    oldest_unreviewed_days: int | None = None
+    # Reported, never removed -- see `find_near_duplicates`. Kept in its own
+    # field rather than folded into `duplicate_proposals` because the two are
+    # different kinds of number: that one counts what `compact` will remove,
+    # this one counts what only a human can decide about.
+    near_duplicate_proposals: int = 0
 
 
 # --- pure helpers ---------------------------------------------------------
@@ -161,8 +232,138 @@ def is_promotable(entry: Mapping) -> bool:
     return entry.get("status") == "accepted" and entry.get("type") in PROMOTABLE_TYPES
 
 
+def detail_rank(entry: Mapping) -> tuple[int, ...]:
+    """How much `entry` carries beyond the wording its group is keyed on.
+
+    Read as a ladder, most significant first, each rung consulted only when
+    the one above ties:
+
+    1. **Evidence**, via `memory_store.has_evidence` -- a commit, a file, or a
+       manual attestation. Deliberately that function and not a local copy of
+       its rule: it is what `validate_entry` enforces for `accepted`, and a
+       dedup that disagreed would keep the twin review then refuses.
+    2. **Source keys.** Attribution alone (`project`) is not evidence, but it
+       is more than nothing, so it outranks an absent source.
+    3. **Tags**, which is what the selector and the index filter on.
+    4. **Unrecognised fields.** A key this schema version cannot read is still
+       detail -- the store preserves unknown fields for forward compatibility,
+       and dedup must not be the one place that quietly prefers the copy
+       without them.
+    5. **Raw summary length**, last and least. Grouping already folded away
+       case, punctuation and spacing, so this separates twins that differ in
+       nothing else; the longer text is the one that kept its punctuation.
+
+    Rungs, not weights: each either breaks the tie or defers to the next.
+    Summing them would let three tags outvote a commit hash.
+    """
+    source = entry.get("source")
+    source = source if isinstance(source, Mapping) else {}
+    tags = entry.get("tags")
+    tags = tags if isinstance(tags, (list, tuple)) else ()
+    return (
+        int(memory_store.has_evidence(source)),
+        sum(1 for value in source.values() if value not in (None, "", False)),
+        len(tags),
+        sum(1 for key in entry if key not in memory_store.SCHEMA_1_FIELDS),
+        len(str(entry.get("summary") or "")),
+    )
+
+
+def merge_duplicate_detail(keeper: Mapping, twins: Sequence[Mapping]) -> dict:
+    """A copy of `keeper` holding support its dropped `twins` carried.
+
+    Ranking picks a whole entry, so whatever the losers held beyond the winner
+    was archived and left the inbox. Usually that is nothing; when it is a
+    file reference or a tag the winner lacked, the store came out poorer than
+    the sum of what it was told. This fills only the gaps.
+
+    **Gaps, never rewrites.** A key the keeper already has is left exactly as
+    it is, including a `source.commit` that differs from the twin's -- two
+    different commits are two assertions, and picking one silently would
+    invent an attribution nobody made. Tags union in first-seen order; unknown
+    fields are adopted only when absent.
+
+    `MERGE_PROTECTED_FIELDS` never moves. Identity and timestamp are what make
+    the entry that entry; type, scope and summary are the claim itself, and
+    grouping already proved the claim identical. `confidence` is the sharp
+    one: folding a `confirmed` twin's confidence into an `inferred` keeper
+    would promote an entry no human confirmed, which is precisely the
+    escalation the review model exists to prevent.
+
+    Returns a new dict; the inputs are never mutated.
+    """
+    merged = dict(keeper)
+    raw_source = merged.get("source")
+    source = dict(raw_source) if isinstance(raw_source, Mapping) else {}
+    raw_tags = merged.get("tags")
+    tags = list(raw_tags) if isinstance(raw_tags, (list, tuple)) else []
+
+    for twin in twins:
+        twin_source = twin.get("source")
+        if isinstance(twin_source, Mapping):
+            for key, value in twin_source.items():
+                if key not in source and value not in (None, "", False):
+                    source[key] = value
+        twin_tags = twin.get("tags")
+        if isinstance(twin_tags, (list, tuple)):
+            for tag in twin_tags:
+                if tag not in tags:
+                    tags.append(tag)
+        for key, value in twin.items():
+            if key in MERGE_PROTECTED_FIELDS or key in ("source", "tags"):
+                continue
+            if key not in merged:
+                merged[key] = value
+
+    if source:
+        merged["source"] = source
+    if tags:
+        merged["tags"] = tags
+    return merged
+
+
+def resolve_duplicates(entries: Sequence[Mapping]) -> tuple[set[str], dict[str, dict]]:
+    """Duplicate ids to drop, plus survivors that gained detail from them.
+
+    Returns `(dropped_ids, {survivor_id: merged_record})`. The second map
+    holds only survivors that actually changed, so a group whose members were
+    identical in everything but wording produces no rewrite at all.
+
+    Split out from `find_duplicates` so `pressure` can keep asking the cheap
+    question -- how many entries would leave -- without computing merges it
+    has no use for.
+    """
+    groups: dict[tuple, list[Mapping]] = {}
+    for entry in entries:
+        if entry.get("status") != "proposed":
+            continue
+        if not str(entry.get("id") or ""):
+            continue
+        key = (entry.get("type"), entry.get("scope"), normalize_summary(entry.get("summary")))
+        groups.setdefault(key, []).append(entry)
+
+    dropped: set[str] = set()
+    merged_survivors: dict[str, dict] = {}
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        # `min` over negated ranks: the richest entry sorts first, and on an
+        # exact tie the smallest id -- the earliest -- wins.
+        keeper = min(
+            members,
+            key=lambda e: (tuple(-v for v in detail_rank(e)), str(e.get("id") or "")),
+        )
+        keeper_id = str(keeper.get("id") or "")
+        twins = [e for e in members if str(e.get("id") or "") != keeper_id]
+        dropped.update(str(e.get("id") or "") for e in twins)
+        merged = merge_duplicate_detail(keeper, twins)
+        if merged != dict(keeper):
+            merged_survivors[keeper_id] = merged
+    return dropped, merged_survivors
+
+
 def find_duplicates(entries: Sequence[Mapping]) -> set[str]:
-    """Ids of redundant *proposals*, keeping the earliest of each group.
+    """Ids of redundant *proposals*, keeping the most detailed of each group.
 
     Only proposals are considered. Two accepted entries that read alike may
     cite different commits, and collapsing them would destroy the audit trail
@@ -171,21 +372,208 @@ def find_duplicates(entries: Sequence[Mapping]) -> set[str]:
 
     Grouping is by (type, scope, normalized summary): identical wording as a
     task and as a decision are two different claims, not one repeated.
+
+    **Which twin survives is decided by the grouping key.** Because the key
+    *is* the normalized summary, twins state the same claim by construction --
+    so what differs between them is never the claim, it is the support: the
+    commit that proves it, the tags that retrieve it, the fields a later
+    schema will read. Keeping the earliest, as this did until now, picked the
+    copy written first, which is systematically the barest one: an agent
+    records a fact on noticing it and re-records it on proving it. The proof
+    was archived and the bare assertion kept -- and since `accepted` requires
+    evidence, the survivor could not pass review without a human restoring by
+    hand what compaction had just filed away.
+
+    `detail_rank` decides; the earliest id breaks a genuine tie, so ordering
+    stays deterministic and a group whose members carry equal detail collapses
+    exactly as it always did.
+
+    Whatever a dropped twin held that the survivor lacked is folded into the
+    survivor by `merge_duplicate_detail`, so ranking chooses the base record
+    rather than deciding what is lost. This function reports only the
+    removals; `resolve_duplicates` returns both halves.
     """
-    seen: dict[tuple, str] = {}
-    dropped: set[str] = set()
-    for entry in sorted(entries, key=lambda e: str(e.get("id") or "")):
+    return resolve_duplicates(entries)[0]
+
+
+def find_near_duplicates(entries: Sequence[Mapping]) -> set[str]:
+    """Ids of *proposals* whose wording one another contains -- a report only.
+
+    `find_duplicates` needs the normalized summaries to match exactly, so it
+    misses the commoner shape: one agent records "Migrated the users table"
+    and another records "Migrated the users table to Postgres with zero
+    downtime". Those are almost certainly one piece of work written twice.
+
+    **Almost certainly is why nothing here removes them.** Containment is not
+    equivalence -- the longer entry states a strictly more specific claim, and
+    the specific one is often the one worth keeping -- and the governing design
+    permits reporting stale memory while forbidding removal from the store of
+    record without a human. So this feeds `pressure` and nothing else;
+    `compact` never consults it.
+
+    Comparison is over the token *set*, so word order and repetition are
+    ignored, and a pair whose token sets are equal is skipped: those are
+    `find_duplicates`' business, and counting them here would advertise a
+    review backlog that running `compact` silently clears. The cost is that
+    two entries with the same words in a different order are reported by
+    neither -- under-reporting, which is the right direction for a signal
+    whose whole value is that it is believed.
+
+    Quadratic in the proposals of one (type, scope) bucket. An inbox is tens
+    of entries and this runs on already-loaded data, so the simple form is
+    kept until there is a store that makes it matter.
+    """
+    grouped: dict[tuple, list[tuple[str, frozenset[str]]]] = {}
+    for entry in entries:
         if entry.get("status") != "proposed":
             continue
         entry_id = str(entry.get("id") or "")
         if not entry_id:
             continue
-        key = (entry.get("type"), entry.get("scope"), normalize_summary(entry.get("summary")))
-        if key in seen:
-            dropped.add(entry_id)
-        else:
-            seen[key] = entry_id
-    return dropped
+        tokens = frozenset(normalize_summary(entry.get("summary")).split())
+        if len(tokens) < NEAR_DUPLICATE_MIN_TOKENS:
+            continue
+        grouped.setdefault((entry.get("type"), entry.get("scope")), []).append(
+            (entry_id, tokens)
+        )
+
+    flagged: set[str] = set()
+    for members in grouped.values():
+        for index, (left_id, left) in enumerate(members):
+            for right_id, right in members[index + 1:]:
+                if left < right or right < left:  # proper subset either way
+                    flagged.update((left_id, right_id))
+    return flagged
+
+
+def _age_days(entry: Mapping, now: datetime) -> int | None:
+    """Age of `entry` in whole days, or `None` if its timestamp is unreadable.
+
+    A per-entry guard rather than a wrapper around the whole pass: one
+    hand-edited timestamp must cost its own entry an age, not silence the
+    count for every other entry in the store.
+    """
+    try:
+        stamped = datetime.strptime(str(entry.get("ts")), _TS_FORMAT)
+    except (TypeError, ValueError):
+        return None
+    # Clamped at zero. Clock skew or a hand-edited stamp can put an entry ahead
+    # of `now`, and `oldest -3d` reads as a broken tool rather than as a fact
+    # about the store -- which costs the line the only thing it has.
+    return max(0, (now - stamped.replace(tzinfo=timezone.utc)).days)
+
+
+def pressure(entries: Sequence[Mapping], now: datetime) -> CompactionPressure:
+    """Measure what maintenance would gain over `entries`.
+
+    Deliberately reuses `is_terminal` and `find_duplicates` rather than
+    restating what is compactable. A second definition would drift from the
+    removal rules the first time those rules changed, and a nudge that
+    overstates its payoff is worse than no nudge: the operator runs the
+    command expecting twelve entries to clear, three clear, and the line stops
+    being believed.
+
+    Total over malformed input rather than wrapped in a catch, which leaves
+    nothing to silently swallow. An unrecognised status counts as neither
+    terminal nor proposed. An entry whose `ts` is missing or unparseable still
+    counts toward `unreviewed` -- it is a real backlog item -- but cannot
+    contribute an age.
+    """
+    # A naive `now` is read as UTC, the same reading `memory_store.format_ts`
+    # gives it. Every caller today passes an aware datetime, but subtracting
+    # one from an aware stamp raises, and the one input that must never take
+    # the context packet down is the clock.
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+
+    closed = {
+        str(e.get("id") or "")
+        for e in entries
+        if is_terminal(e)
+    }
+    # `compact` discards the empty id before removing, so an entry without one
+    # survives the pass. Counting it here would promise a removal that the
+    # command cannot deliver.
+    closed.discard("")
+
+    proposals = [e for e in entries if e.get("status") == "proposed"]
+    ages = [age for age in (_age_days(e, now) for e in proposals) if age is not None]
+
+    return CompactionPressure(
+        closed_in_inbox=len(closed),
+        # Entries that would be *removed*, not duplicate groups: `find_duplicates`
+        # keeps one member of each group, so a group of three contributes two.
+        # Counting groups would overstate the payoff. Which member it keeps is
+        # `find_duplicates`' business and does not move this number.
+        duplicate_proposals=len(find_duplicates(entries)),
+        unreviewed=len(proposals),
+        oldest_unreviewed_days=max(ages) if ages else None,
+        near_duplicate_proposals=len(find_near_duplicates(entries)),
+    )
+
+
+def pressure_notes(
+    measured: CompactionPressure, scope: str = "project"
+) -> tuple[str, ...]:
+    """Render `measured` pressure as at most two session-start lines.
+
+    Two sentences, never merged into one, because they ask for different
+    actions and only one of them is mechanical. Compaction cannot remove a
+    proposal -- an unreviewed proposal is never discarded automatically,
+    because the decision to throw away an observation belongs to a human -- so
+    a single line reading "6 entries, run compact" would send the operator to a
+    command that clears nothing.
+
+    Both notes are silent at zero. A clean store adds nothing to the packet,
+    which is what keeps the line credible when it does appear.
+
+    Scope asymmetry: `review` takes `--scope` and can act on machine memory,
+    but `compact` operates on `project_memory_dir` only. Machine pressure
+    therefore produces the review note alone, and names the scope explicitly
+    because the flag defaults to `project`. Emitting a compact note against
+    machine pressure would print a command that silently does nothing -- the
+    precise failure that trains an operator to ignore the line.
+    """
+    machine = scope == "machine"
+    notes: list[str] = []
+
+    if not machine and (measured.closed_in_inbox or measured.duplicate_proposals):
+        clauses = []
+        if measured.closed_in_inbox:
+            clauses.append(f"{measured.closed_in_inbox} closed")
+        if measured.duplicate_proposals:
+            count = measured.duplicate_proposals
+            clauses.append(f"{count} duplicate proposal{'' if count == 1 else 's'}")
+        notes.append(
+            f"[memory] {', '.join(clauses)} -- run `agent-harness-memory compact`"
+        )
+
+    oldest = measured.oldest_unreviewed_days
+    if measured.unreviewed >= UNREVIEWED_COUNT_THRESHOLD or (
+        oldest is not None and oldest >= UNREVIEWED_AGE_DAYS
+    ):
+        subject = "machine proposal" if machine else "proposal"
+        clause = f"{measured.unreviewed} {subject}{'' if measured.unreviewed == 1 else 's'} unreviewed"
+        if oldest is not None:
+            clause += f", oldest {oldest}d"
+        command = "agent-harness-memory review" + (" --scope machine" if machine else "")
+        notes.append(f"[memory] {clause} -- run `{command}`")
+
+    # Its own line, and it points at `review`. Compaction cannot clear a
+    # near-duplicate -- it deliberately does not remove them at all -- so
+    # folding this into the compact note would advertise removals the command
+    # will not deliver, which is precisely how a nudge stops being read. Fires
+    # at one rather than a threshold: unlike a backlog of unreviewed
+    # proposals, which is normal in small numbers, a single contained pair is
+    # already the thing worth looking at.
+    if measured.near_duplicate_proposals:
+        command = "agent-harness-memory review" + (" --scope machine" if machine else "")
+        notes.append(
+            f"[memory] {measured.near_duplicate_proposals} near-duplicate "
+            f"proposals -- run `{command}`"
+        )
+
+    return tuple(notes)
 
 
 def promoted_ids(durable_path: Path) -> set[str]:
@@ -413,11 +801,16 @@ def _atomic_write(path: Path, text: str) -> None:
     runs, so they exist nowhere else. A process killed mid-write would take
     them with it, which would contradict both "appended, never replaced" and
     the promise that a crash costs only work the next run redoes.
+
+    `atomic_sibling` supplies the scratch path. A name derived from the
+    destination gave every writer of a given archive the same one, so two
+    compactions racing the same file would write into each other's temp and
+    land a blend of the two -- or fail the replace outright, on a source the
+    other had already moved away.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.replace(path)
+    with atomicwrite.atomic_sibling(path) as tmp:
+        tmp.write_text(text, encoding="utf-8")
 
 
 def _write_archive(path: Path, week: str, entries: Sequence[Mapping], now: datetime) -> None:
@@ -444,14 +837,30 @@ def _write_active(directory: Path, text: str) -> None:
     _atomic_write(Path(directory) / "active.md", text)
 
 
-def _splice_inbox(directory: Path, raw_lines: Sequence[str], removed_ids: set[str]) -> None:
-    """Drop `removed_ids` from the inbox at the *line* level.
+def _splice_inbox(
+    directory: Path,
+    raw_lines: Sequence[str],
+    removed_ids: set[str],
+    replacements: Mapping[str, Mapping] | None = None,
+) -> None:
+    """Drop `removed_ids` from the inbox at the *line* level, rewriting the
+    few lines named in `replacements`.
 
-    Line-level rather than `rewrite_entries` for two reasons: a line this
-    schema version cannot parse may be a future schema rather than garbage and
-    must be carried across untouched, and re-serializing every surviving record
-    would rewrite entries this pass has no business modifying.
+    Line-level rather than `rewrite_entries` for two reasons that both still
+    hold: a line this schema version cannot parse may be a future schema
+    rather than garbage and must be carried across untouched, and
+    re-serializing every surviving record would rewrite entries this pass has
+    no business modifying.
+
+    `replacements` is the narrow exception -- survivors of a duplicate merge,
+    and nothing else. It is a named map rather than a blanket re-serialize
+    precisely so the second reason keeps its force: an entry not in the map is
+    still copied byte for byte. `memory_review` already rewrites a line in
+    place when it transitions a status, so rewriting is not foreign to the
+    store; what was foreign is *compaction* doing it, which is why the set is
+    explicit and the count is reported.
     """
+    replacements = replacements or {}
     kept: list[str] = []
     for line in raw_lines:
         try:
@@ -459,8 +868,13 @@ def _splice_inbox(directory: Path, raw_lines: Sequence[str], removed_ids: set[st
         except (ValueError, TypeError):
             kept.append(line)
             continue
-        if isinstance(record, dict) and str(record.get("id") or "") in removed_ids:
-            continue
+        if isinstance(record, dict):
+            record_id = str(record.get("id") or "")
+            if record_id in removed_ids:
+                continue
+            if record_id in replacements:
+                kept.append(json.dumps(replacements[record_id], ensure_ascii=False))
+                continue
         kept.append(line)
     memory_store.write_lines(kept, directory)
 
@@ -511,11 +925,17 @@ def compact(project_root: Path, now: datetime | None = None) -> CompactResult:
         raw_lines = memory_store.read_lines(directory)
         entries = list(memory_store.iter_entries(directory))
 
-        duplicates = find_duplicates(entries)
+        duplicates, merged_survivors = resolve_duplicates(entries)
         removed_ids = {str(e.get("id") or "") for e in entries if is_terminal(e)} | duplicates
         removed_ids.discard("")
         removed = [e for e in entries if str(e.get("id") or "") in removed_ids]
-        kept = [e for e in entries if str(e.get("id") or "") not in removed_ids]
+        # Survivors carry their merged form onward, so `active.md` and the
+        # promotion pass describe the record the inbox will actually hold.
+        kept = [
+            merged_survivors.get(str(e.get("id") or ""), e)
+            for e in entries
+            if str(e.get("id") or "") not in removed_ids
+        ]
 
         already = promoted_ids(durable_path)
         to_promote = [e for e in kept if is_promotable(e) and str(e.get("id") or "") not in already]
@@ -530,7 +950,7 @@ def compact(project_root: Path, now: datetime | None = None) -> CompactResult:
             _write_active(directory, text)
             # Last, deliberately: see the module docstring on write ordering.
             if removed_ids:
-                _splice_inbox(directory, raw_lines, removed_ids)
+                _splice_inbox(directory, raw_lines, removed_ids, merged_survivors)
         except BaseException:
             _restore(snapshot)
             raise
@@ -539,6 +959,7 @@ def compact(project_root: Path, now: datetime | None = None) -> CompactResult:
         week=week,
         archived=len(removed),
         duplicates=len(duplicates),
+        merged=len(merged_survivors),
         promoted=len(to_promote),
         carried=carried,
         omitted=omitted,

@@ -13,11 +13,13 @@ so every write here lands in the sandbox and not in the real `~/.claude`.
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 
 import pytest
 
 from harness import bootstrap_register as br
+from harness import pathsafe
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -42,17 +44,20 @@ class TestMergeHooks:
     ) -> None:
         merged, actions = br.merge_hooks({}, harness_root, "/py")
 
-        assert _commands(merged, "SessionStart") == [
-            f"/py {harness_root.as_posix()}/hooks/claude/memory_context_hook.py"
-        ]
+        def hook(script: str) -> str:
+            # Quoted exactly as registration quotes it, so a checkout path
+            # containing spaces does not change what is expected.
+            return f"/py {pathsafe.shell_quote(f'{harness_root.as_posix()}/hooks/claude/{script}')}"
+
+        assert _commands(merged, "SessionStart") == [hook("memory_context_hook.py")]
         assert _commands(merged, "PreToolUse") == [
-            f"/py {harness_root.as_posix()}/hooks/claude/graph_read_guard.py",
-            f"/py {harness_root.as_posix()}/hooks/claude/claim_guard.py",
+            hook("graph_read_guard.py"),
+            hook("claim_guard.py"),
         ]
         # Progress capture is registered on both events deliberately: Stop
         # fires per turn so work survives a crash, SessionEnd sweeps up
         # commits made after the final turn. One idempotent script serves both.
-        progress = f"/py {harness_root.as_posix()}/hooks/claude/progress_capture_hook.py"
+        progress = hook("progress_capture_hook.py")
         assert _commands(merged, "Stop") == [progress]
         assert _commands(merged, "SessionEnd") == [progress]
         assert all(action.endswith("registered") for action in actions)
@@ -62,7 +67,7 @@ class TestMergeHooks:
         merged, _ = br.merge_hooks({}, harness_root, "/py")
 
         timeouts = {
-            hook["command"].rsplit("/", 1)[-1]: hook.get("timeout")
+            hook["command"].rsplit("/", 1)[-1].strip("\"'"): hook.get("timeout")
             for entries in merged["hooks"].values()
             for entry in entries
             for hook in entry["hooks"]
@@ -137,7 +142,12 @@ class TestMergeHooks:
         merged, _ = br.merge_hooks({}, spaced, "/py")
 
         command = _commands(merged, "SessionStart")[0]
-        assert '"' in command, f"unquoted spaced path would split into extra argv: {command}"
+        # The quote character is platform-specific (list2cmdline uses ", shlex
+        # uses '), so assert what quoting is for: exactly two argv tokens.
+        script = (spaced / "hooks" / "claude" / "memory_context_hook.py").as_posix()
+        assert shlex.split(command) == ["/py", script], (
+            f"spaced path would split into extra argv: {command}"
+        )
 
 
 class TestMergeMcp:

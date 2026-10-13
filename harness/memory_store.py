@@ -53,10 +53,12 @@ import json
 import os
 import re
 import subprocess
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+
+from harness import atomicwrite
 
 SCHEMA_VERSION = 1
 
@@ -67,6 +69,27 @@ ENTRY_TYPES: tuple[str, ...] = (
     "blocker",
     "lesson",
     "relationship",
+)
+
+# Every key schema 1 defines. Named here, beside the contract in the module
+# docstring, so the one place that asks "which fields does this version not
+# recognise?" cannot answer from a list that quietly fell behind the schema.
+# Adding a field to the contract without adding it here would make compaction
+# read it as an unknown extra -- harmless, but it would flatter whichever
+# duplicate happened to carry it.
+SCHEMA_1_FIELDS: frozenset[str] = frozenset(
+    {
+        "schema",
+        "id",
+        "ts",
+        "type",
+        "scope",
+        "status",
+        "confidence",
+        "summary",
+        "source",
+        "tags",
+    }
 )
 
 SCOPES: tuple[str, ...] = ("project", "machine")
@@ -191,7 +214,7 @@ def _reject_secrets(record: dict) -> None:
     walk(record)
 
 
-def _has_source(source: dict | None) -> bool:
+def has_evidence(source: Mapping | None) -> bool:
     """Whether `source` carries real evidence for an accepted entry.
 
     `project` deliberately does not count: it is attribution (which project
@@ -199,6 +222,12 @@ def _has_source(source: dict | None) -> bool:
     entry, so honouring it would make the accepted-needs-evidence rule
     unenforceable. Only a commit, a file, or an explicit human attestation
     counts as evidence.
+
+    Public rather than private because compaction ranks duplicate proposals by
+    the evidence they carry, and it must mean by "evidence" exactly what review
+    means. Two definitions would drift, and the drift has a sharp edge: dedup
+    would keep whichever twin it judged best-evidenced, and review would then
+    refuse to accept it.
     """
     if not source:
         return False
@@ -273,7 +302,7 @@ def validate_entry(entry: dict, now: datetime | None = None) -> dict:
                 "an inferred entry cannot be accepted directly; it stays "
                 "proposed until review confirms it"
             )
-        if not _has_source(source):
+        if not has_evidence(source):
             raise ValueError(
                 "an accepted entry requires a source (commit/file/project) or "
                 "an explicit manual confirmation"
@@ -366,18 +395,21 @@ def write_lines(lines: Iterable[str], directory: Path) -> int:
     temp-then-replace shape `save_registry` uses. A concurrent reader
     therefore sees either the entire old file or the entire new one, never a
     half-rewritten inbox, and a crash mid-write leaves the original intact.
+
+    The sibling comes from `atomic_sibling` rather than a name derived from
+    the destination: two writers rewriting one inbox otherwise share a single
+    `inbox.jsonl.tmp` and interleave their lines into it.
     """
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / "inbox.jsonl"
-    tmp = path.with_suffix(".jsonl.tmp")
     written = 0
-    with tmp.open("w", encoding="utf-8") as fh:
-        for line in lines:
-            fh.write(line)
-            fh.write("\n")
-            written += 1
-    tmp.replace(path)
+    with atomicwrite.atomic_sibling(path) as tmp:
+        with tmp.open("w", encoding="utf-8") as fh:
+            for line in lines:
+                fh.write(line)
+                fh.write("\n")
+                written += 1
     return written
 
 
@@ -493,16 +525,20 @@ def load_registry() -> dict:
 
 
 def save_registry(registry: dict) -> None:
-    """Write the registry atomically (temp file + replace)."""
+    """Write the registry atomically (temp file + replace).
+
+    One registry serves every enrolled project, so two `init` or `enroll`
+    runs in different projects can reach this at once -- the case a shared
+    `registry.json.tmp` would corrupt. `atomic_sibling` gives each its own.
+    """
     directory = machine_memory_dir()
     directory.mkdir(parents=True, exist_ok=True)
     _restrict_permissions(directory)
     path = _registry_path()
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(
-        json.dumps(registry, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
-    tmp.replace(path)
+    with atomicwrite.atomic_sibling(path) as tmp:
+        tmp.write_text(
+            json.dumps(registry, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
 
 
 def project_id_for(project_root: Path) -> str:
