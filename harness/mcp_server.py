@@ -56,6 +56,7 @@ them as parameters.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from collections import OrderedDict
@@ -1134,6 +1135,24 @@ def _build_server():
     return mcp_app
 
 
+def _cap_native_thread_pools() -> None:
+    """Pin OpenBLAS to one thread before anything can import numpy.
+
+    Measured on this Windows machine (2026-10-13): numpy's bundled OpenBLAS
+    commits ~32 MB of private memory per thread at import and sizes its pool
+    to the CPU count. On a 20-thread CPU that was 614 of the server's 697 MB,
+    for a pool that never runs: this server calls no BLAS routine (embeddings
+    go through onnxruntime's own pool, the vector index is hnswlib). Every
+    client session spawns its own stdio server, so the waste multiplied --
+    23 open sessions held ~16 GB of commit. Pinned, the warmed server is
+    ~86 MB.
+
+    `setdefault`, so an operator who sets the variable still wins. It must
+    run before the first numpy import; OpenBLAS reads it once, at load.
+    """
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+
+
 def _warm_optional_native_imports() -> str | None:
     """Import the heavy optional native stack once, on the main thread.
 
@@ -1190,6 +1209,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
+    _cap_native_thread_pools()
     _warm_optional_native_imports()
 
     server = _build_server()

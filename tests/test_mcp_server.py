@@ -11,6 +11,7 @@ from __future__ import annotations
 import ast
 from collections import OrderedDict
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -706,6 +707,39 @@ def test_main_warms_imports_before_serving(monkeypatch):
     monkeypatch.setattr(mcp_server, "_build_server", lambda: FakeServer())
     assert mcp_server.main([]) == 0
     assert order == ["warm", "run"]
+
+
+def test_main_pins_openblas_before_the_warm_up_imports_numpy(monkeypatch):
+    """OpenBLAS sizes its pool once, at load: the cap must precede the import.
+
+    Unpinned, numpy's OpenBLAS committed ~614 MB on a 20-thread CPU in every
+    per-session server, for a pool the server never uses.
+    """
+    from harness import mcp_server
+
+    monkeypatch.delenv("OPENBLAS_NUM_THREADS", raising=False)
+    seen = []
+    monkeypatch.setattr(
+        mcp_server,
+        "_warm_optional_native_imports",
+        lambda: seen.append(os.environ.get("OPENBLAS_NUM_THREADS")),
+    )
+
+    class FakeServer:
+        def run(self, transport):
+            pass
+
+    monkeypatch.setattr(mcp_server, "_build_server", lambda: FakeServer())
+    assert mcp_server.main([]) == 0
+    assert seen == ["1"]
+
+
+def test_cap_native_thread_pools_respects_an_operator_setting(monkeypatch):
+    from harness import mcp_server
+
+    monkeypatch.setenv("OPENBLAS_NUM_THREADS", "4")
+    mcp_server._cap_native_thread_pools()
+    assert os.environ["OPENBLAS_NUM_THREADS"] == "4"
 
 
 # --- memory_search, filters, cross-project search, registry touch ---------
