@@ -490,7 +490,9 @@ def start_daily_telemetry() -> bool:
     Spawns and returns at once; the collect itself runs detached, so this
     adds a file read to session start, not a transcript scan. Runs for every
     project, enrolled or not -- usage is per machine, not per repository.
-    AGENT_HARNESS_TELEMETRY_AUTO=0 turns it off.
+    With an export target set (`agent-harness-telemetry machine --export-to`)
+    the same run also exports there. AGENT_HARNESS_TELEMETRY_AUTO=0 turns it
+    off.
     """
     try:
         _harness()

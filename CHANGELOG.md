@@ -31,6 +31,10 @@ pushed tag `vX.Y.Z` doesn't match) before anything is published.
   export (`--from`), by machine, project or month. `machine --label` names a
   machine. The SessionStart hook runs `collect` in the background at most once
   a day (`AGENT_HARNESS_TELEMETRY_AUTO=0` turns it off).
+  `machine --export-to DIR` sets an opt-in export target (kept in
+  `machine.json`, never exported); with one set, that daily run is
+  `collect --then-export`, which exports under the collect lock and records
+  its outcome for `machine` to show, so synced folders fill hands-off.
 
 - Evidence-bounded automatic memory curation: SessionStart and
   `memory_context` now verify and accept unchanged ingested document pointers,

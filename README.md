@@ -458,7 +458,9 @@ appended as JSONL to `~/.agent-harness/telemetry/events-YYYYMM.jsonl`
 `collect` runs when you invoke it, and the Claude Code SessionStart hook
 also starts it in the background at most once a day (detached, so session
 start does not wait for it). Set `AGENT_HARNESS_TELEMETRY_AUTO=0` to turn
-the daily run off.
+the daily run off. Once `machine --export-to DIR` names a synced folder,
+that same daily run exports there after it collects (see below), so no
+machine needs anyone to remember `export`.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -480,12 +482,12 @@ the daily run off.
 | `subagent` | bool | schema 2: `true` on a subagent turn, absent otherwise |
 
 ```bash
-python harness/telemetry.py collect [--agent claude-code|codex|gemini] [--quiet]
+python harness/telemetry.py collect [--agent claude-code|codex|gemini] [--quiet] [--then-export]
 python harness/telemetry.py tail [-n N] [--agent AGENT] [--project P]
 python harness/telemetry.py aggregate [--by agent|project] [--since ISO8601]
 python harness/telemetry.py export --to DIR
 python harness/telemetry.py baseline [--from DIR] [--days N] [--min-turns 3] [--by machine|project|month] [--json OUT]
-python harness/telemetry.py machine [--label TEXT]
+python harness/telemetry.py machine [--label TEXT] [--export-to DIR]
 ```
 
 `baseline` rolls usage up per session and reports the efficiency KPIs
@@ -497,6 +499,25 @@ same synced folder (OneDrive, Dropbox) on each one, then run
 `baseline --from` on that folder. The export drops local file paths and
 replaces each project path with a hash of its git remote (or of its
 directory name), so the same repository has the same key everywhere.
+
+To keep that folder current without running `export` by hand, set it once
+per machine:
+
+```bash
+agent-harness-telemetry machine --label laptop --export-to "$HOME/OneDrive/agent-harness-telemetry"
+```
+
+The target is stored, as an absolute path, in `~/.agent-harness/machine.json`
+next to the machine id and label: it is a fact about this machine (each
+machine's synced folder sits at its own path), and the export's own
+`machine.json` card carries only the id and label, so the path never leaves
+the machine. From then on the daily background run is
+`collect --quiet --then-export`: it collects, then, still holding the collect
+lock, rewrites `DIR/<machine>/events-YYYYMM.jsonl`. It stays silent; if the
+folder is missing or unwritable, the error is kept in
+`~/.agent-harness/telemetry/.auto_export.json`, and `machine` (with no
+arguments) shows the target and the last export or failure.
+`machine --export-to ""` turns the automatic export off.
 
 Collectors are best-effort: a missing or unrecognized log format degrades
 to zero events (or a single `collector_error` record) rather than crashing

@@ -137,11 +137,21 @@ background at most once a day; set `AGENT_HARNESS_TELEMETRY_AUTO=0` to turn that
 tool and subagent counts; `--agent all` merges Codex and Gemini. `--json` writes the full
 report, including the heaviest sessions, as a dated snapshot.
 
-Across machines, give each machine a label and export it to a shared synced folder. Then
-read the merged tree from any of them:
+Across machines, give each machine a label and an export target in a shared synced folder,
+once per machine:
 
 ```bash
-agent-harness-telemetry machine --label desktop
+agent-harness-telemetry machine --label desktop --export-to "$HOME/OneDrive/agent-harness-telemetry"
+```
+
+From then on the daily background run collects and then exports to
+`<target>/<machine>/events-YYYYMM.jsonl` under the same lock, and the sync client carries
+the files to the other machines; nobody has to remember `export`. `machine` with no
+arguments shows the target and the last export (or why it failed). To publish at once
+instead of waiting for the next daily run, run `export --to` by hand. Then read the
+merged tree from any machine:
+
+```bash
 agent-harness-telemetry export --to "$HOME/OneDrive/agent-harness-telemetry"
 agent-harness-telemetry baseline --from "$HOME/OneDrive/agent-harness-telemetry" --days 30 --by machine
 ```

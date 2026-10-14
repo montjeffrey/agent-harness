@@ -56,6 +56,7 @@ check is performed here.
 from __future__ import annotations
 
 import json
+import os
 import secrets
 from collections.abc import Iterable, Iterator
 from datetime import datetime, timezone
@@ -142,6 +143,35 @@ def set_machine_label(label: str | None) -> dict:
         data["label"] = label
     else:
         data.pop("label", None)
+    _write_machine_file(machine_path(), data)
+    return data
+
+
+def export_target() -> Path | None:
+    """The folder the daily background run exports to, or None (opt-in).
+
+    Kept in `machine_path()` beside the id and label: it is a fact about
+    this machine (each machine's synced folder sits at its own path), and
+    it is never copied into an export, whose card is built from the id and
+    label alone.
+    """
+    data = _read_machine_file(machine_path()) or {}
+    value = data.get("export_to")
+    return Path(value) if isinstance(value, str) and value.strip() else None
+
+
+def set_export_target(path: str | os.PathLike | None) -> dict:
+    """Set (or, with a blank `path`, clear) this machine's export target.
+
+    Stored absolute: the background run starts in whatever directory the
+    session did, so a relative path would point somewhere new every day.
+    """
+    data = dict(machine_identity(create=True) or {})
+    text = str(path or "").strip()
+    if text:
+        data["export_to"] = os.path.abspath(os.path.expanduser(text))
+    else:
+        data.pop("export_to", None)
     _write_machine_file(machine_path(), data)
     return data
 

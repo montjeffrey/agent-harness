@@ -7,15 +7,17 @@ AGENT_HARNESS_TELEMETRY_AUTO=0 to turn that off). Nothing in this module
 opens a network socket: `collect` only reads local agent log files and
 appends to the local JSONL store, and `export` only writes to a directory
 you name -- point it at a synced folder to bring machines together.
+`machine --export-to DIR` names that folder once, and from then on the
+daily background run exports there after it collects.
 
 Usage:
-    python harness/telemetry.py collect [--agent claude-code|codex|gemini] [--quiet]
+    python harness/telemetry.py collect [--agent claude-code|codex|gemini] [--quiet] [--then-export]
     python harness/telemetry.py tail [-n N] [--agent AGENT] [--project P]
     python harness/telemetry.py aggregate [--by agent|project] [--since ISO8601]
     python harness/telemetry.py export --to DIR
     python harness/telemetry.py baseline [--from DIR] [--days N] [--min-turns 3]
                                          [--by machine|project|month] [--json OUT]
-    python harness/telemetry.py machine [--label TEXT]
+    python harness/telemetry.py machine [--label TEXT] [--export-to DIR]
 """
 
 from __future__ import annotations
@@ -59,6 +61,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="collect only this agent (default: all of %s)" % (telemetry_store.AGENTS,),
     )
     collect_p.add_argument("--quiet", action="store_true", help="print nothing (for background runs)")
+    collect_p.add_argument(
+        "--then-export", action="store_true",
+        help="afterwards, still holding the collect lock, export to the folder set with "
+             "`machine --export-to` (nothing when none is set)",
+    )
 
     tail_p = sub.add_parser("tail", help="print the most recent events")
     tail_p.add_argument("-n", type=int, default=20, help="number of records to print (default: 20)")
@@ -94,6 +101,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
     machine_p = sub.add_parser("machine", help="show this machine's telemetry id, or set its label")
     machine_p.add_argument("--label", default=None, help="a readable name for this machine (empty clears it)")
+    machine_p.add_argument(
+        "--export-to", default=None,
+        help="a synced folder the daily background run exports to after it collects (empty turns it off)",
+    )
 
     return parser.parse_args(argv)
 
@@ -204,7 +215,12 @@ def cmd_collect(args: argparse.Namespace) -> int:
             print("another collect is running; nothing done")
         return 0
     try:
-        return _collect(args, quiet)
+        rc = _collect(args, quiet)
+        # Under the same lock: an export reading the store while another
+        # collect appends to it could publish a half-written month.
+        if getattr(args, "then_export", False):
+            rc = _export_to_target(quiet) or rc
+        return rc
     finally:
         _release_lock()
 
@@ -253,6 +269,59 @@ def _collect(args: argparse.Namespace, quiet: bool) -> int:
     return 0
 
 
+def _export_status_path() -> Path:
+    return telemetry_store.telemetry_dir() / ".auto_export.json"
+
+
+def _load_export_status() -> dict:
+    try:
+        data = json.loads(_export_status_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_export_status(status: dict) -> None:
+    try:
+        path = _export_status_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with atomicwrite.atomic_sibling(path) as tmp:
+            tmp.write_text(json.dumps(status, indent=2, sort_keys=True), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _export_to_target(quiet: bool) -> int:
+    """Export to the configured target, if any. Never raises.
+
+    The background run has no console, so the outcome -- or the error, when
+    the synced folder is gone or unwritable -- goes to `.auto_export.json`,
+    which `machine` reads back.
+    """
+    target = telemetry_store.export_target()
+    if target is None:
+        if not quiet:
+            print("no export target set (agent-harness-telemetry machine --export-to DIR); nothing exported")
+        return 0
+    status: dict = {"ts": telemetry_store.format_ts(datetime.now(timezone.utc)), "dir": str(target)}
+    try:
+        summary = telemetry_export.export_store(target)
+    except Exception as exc:  # noqa: BLE001 -- the background run must stay silent; the status says why
+        status["error"] = f"{type(exc).__name__}: {exc}"
+        _save_export_status(status)
+        if not quiet:
+            print(f"export to {target} failed: {status['error']}", file=sys.stderr)
+        return 1
+    status.update(records=summary["records"], files_written=summary["files_written"])
+    _save_export_status(status)
+    if not quiet:
+        print(
+            f"exported {summary['records']} record(s) to {summary['dir']}: "
+            f"{summary['files_written']} file(s) written, {summary['files_unchanged']} unchanged"
+        )
+    return 0
+
+
 # --- background daily collect -------------------------------------------------
 
 
@@ -283,6 +352,10 @@ def maybe_start_daily_collect(now: datetime | None = None, spawn=None) -> bool:
     """Start a background `collect --quiet` unless one started in the last
     AUTO_INTERVAL. Returns whether one was started. Never raises.
 
+    With an export target set (`machine --export-to`), the run is
+    `collect --quiet --then-export`, so the synced folder stays current
+    without anyone running `export`.
+
     The timestamp is written *before* the spawn, so a burst of sessions
     starting together starts one collect, not one each; the collect lock
     covers whatever still overlaps.
@@ -301,7 +374,10 @@ def maybe_start_daily_collect(now: datetime | None = None, spawn=None) -> bool:
         path.parent.mkdir(parents=True, exist_ok=True)
         with atomicwrite.atomic_sibling(path) as tmp:
             tmp.write_text(json.dumps({"last": telemetry_store.format_ts(now)}), encoding="utf-8")
-        (spawn or _spawn_background)([sys.executable, str(Path(__file__).resolve()), "collect", "--quiet"])
+        argv = [sys.executable, str(Path(__file__).resolve()), "collect", "--quiet"]
+        if telemetry_store.export_target() is not None:
+            argv.append("--then-export")
+        (spawn or _spawn_background)(argv)
         return True
     except Exception:  # noqa: BLE001 -- a hook nicety must never break session start
         return False
@@ -433,11 +509,25 @@ def cmd_baseline(args: argparse.Namespace) -> int:
 
 def cmd_machine(args: argparse.Namespace) -> int:
     if args.label is not None:
-        identity = telemetry_store.set_machine_label(args.label)
-    else:
-        identity = telemetry_store.machine_identity(create=True) or {}
+        telemetry_store.set_machine_label(args.label)
+    if args.export_to is not None:
+        telemetry_store.set_export_target(args.export_to)
+    identity = telemetry_store.machine_identity(create=True) or {}
     label = identity.get("label")
     print(f"machine {identity.get('id')}" + (f" ({label})" if label else " (no label)"))
+
+    target = identity.get("export_to")
+    if not target:
+        print("daily export: off (set one with --export-to DIR)")
+        return 0
+    print(f"daily export: {target}")
+    status = _load_export_status()
+    if status.get("dir") != target:
+        print("  not exported there yet; the next daily run will (or run `export --to` now)")
+    elif status.get("error"):
+        print(f"  last attempt {status.get('ts')} failed: {status['error']}")
+    else:
+        print(f"  last export {status.get('ts')}: {status.get('records')} record(s)")
     return 0
 
 
