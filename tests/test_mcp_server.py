@@ -734,6 +734,8 @@ def test_main_pins_openblas_before_the_warm_up_imports_numpy(monkeypatch):
             pass
 
     monkeypatch.setattr(mcp_server, "_build_server", lambda: FakeServer())
+    # CI installs no optional extras; without a stand-in, main() exits 1 early.
+    monkeypatch.setitem(sys.modules, "mcp", types.ModuleType("mcp"))
     assert mcp_server.main([]) == 0
     assert seen == ["1"]
 
