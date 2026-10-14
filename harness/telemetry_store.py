@@ -5,9 +5,9 @@ under ``~/.agent-harness/telemetry/events-YYYYMM.jsonl``. Nothing in this
 module opens a network socket, and no record is ever deleted automatically
 in this phase (retention policy: none yet -- left for a future phase).
 
-Schema (version 1) -- one JSON object per line:
+Schema (version 2) -- one JSON object per line:
 
-    schema          int, required, always ``1`` for this phase
+    schema          int, required; ``2`` for new records, ``1`` still read
     ts              str, required, ISO 8601 UTC with a ``Z`` suffix
     agent           str, required, one of AGENTS
     event           str, required, one of EVENTS
@@ -24,6 +24,23 @@ Schema (version 1) -- one JSON object per line:
                     required whenever limit_remaining is present
     source          str, optional -- local file path only
 
+Added in version 2, all optional, so a version-1 record is still a valid
+version-2 record once its ``schema`` number is ignored:
+
+    machine            str -- random id from ``~/.agent-harness/machine.json``
+                       (see `machine_identity`); never the hostname
+    cache_write_tokens int -- the part of ``input_tokens`` written to cache
+    cache_read_tokens  int -- the part of ``input_tokens`` read from cache
+    tool_calls         int -- tool_use blocks in the response
+    harness_tool_calls int -- the subset named ``mcp__agent-harness__*``
+    harness_tools      dict[str, int] -- that subset by short tool name
+                       (``memory_remember``), omitted when empty
+    subagent           bool -- ``true`` for a subagent turn, omitted otherwise
+
+``input_tokens`` keeps its version-1 meaning: every input token of the turn,
+cached or not. The cache fields split it rather than add to it, so a
+version-1 reader summing ``input_tokens`` gets the same total as before.
+
 Unknown extra fields on a record are preserved (forward-compat for a future
 schema version); readers skip any record whose ``schema`` is not a version
 this module understands, and skip malformed lines outright, rather than
@@ -39,11 +56,25 @@ check is performed here.
 from __future__ import annotations
 
 import json
+import secrets
 from collections.abc import Iterable, Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+from harness import atomicwrite
+
+SCHEMA_VERSION = 2
+
+# Every version a reader in this module accepts. Version 2 only added
+# optional fields, so nothing reads differently between the two.
+SUPPORTED_SCHEMAS: tuple[int, ...] = (1, 2)
+
+_COUNT_FIELDS: tuple[str, ...] = (
+    "cache_write_tokens",
+    "cache_read_tokens",
+    "tool_calls",
+    "harness_tool_calls",
+)
 
 AGENTS: tuple[str, ...] = ("claude-code", "codex", "gemini")
 
@@ -61,6 +92,58 @@ _VALID_LIMIT_KINDS: tuple[str, ...] = ("requests", "tokens", "percent")
 def telemetry_dir() -> Path:
     """Root directory for all telemetry files, created lazily on first write."""
     return Path.home() / ".agent-harness" / "telemetry"
+
+
+def machine_path() -> Path:
+    return Path.home() / ".agent-harness" / "machine.json"
+
+
+def _read_machine_file(path: Path) -> dict | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("id"), str) or not data["id"]:
+        return None
+    return data
+
+
+def _write_machine_file(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with atomicwrite.atomic_sibling(path) as tmp:
+        tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def machine_identity(create: bool = True) -> dict | None:
+    """This machine's telemetry identity: ``{"id": ..., "label": ...}``.
+
+    The id is random, made once and kept in `machine_path()`. It is never
+    derived from the hostname, user name or hardware, because exported
+    records leave this machine (to a synced folder) and the id is all that
+    has to tie them together. `label` is whatever the user set with
+    `set_machine_label`, or absent.
+
+    Returns None only when `create` is False and no identity exists yet.
+    """
+    path = machine_path()
+    data = _read_machine_file(path)
+    if data is not None or not create:
+        return data
+    data = {"id": "m-" + secrets.token_hex(6), "created": format_ts(datetime.now(timezone.utc))}
+    _write_machine_file(path, data)
+    return data
+
+
+def set_machine_label(label: str | None) -> dict:
+    """Set (or, with a blank `label`, clear) the user label on this machine."""
+    data = dict(machine_identity(create=True) or {})
+    label = (label or "").strip()
+    if label:
+        data["label"] = label
+    else:
+        data.pop("label", None)
+    _write_machine_file(machine_path(), data)
+    return data
 
 
 def _month_shard_path(now: datetime) -> Path:
@@ -92,7 +175,7 @@ def parse_ts(value: str) -> datetime:
 
 
 def validate_record(record: dict, now: datetime | None = None) -> dict:
-    """Validate one record against the schema-1 contract and return a
+    """Validate one record against the schema contract and return a
     normalized copy (never mutates the input).
 
     - Fills in `schema` (SCHEMA_VERSION) and `ts` (from `now`) when absent.
@@ -108,7 +191,7 @@ def validate_record(record: dict, now: datetime | None = None) -> dict:
     now = now or datetime.now(timezone.utc)
 
     schema = rec.setdefault("schema", SCHEMA_VERSION)
-    if schema != SCHEMA_VERSION:
+    if schema not in SUPPORTED_SCHEMAS:
         raise ValueError(f"unsupported schema version: {schema!r}")
 
     agent = rec.get("agent")
@@ -129,6 +212,15 @@ def validate_record(record: dict, now: datetime | None = None) -> dict:
             parse_ts(ts)
         except ValueError as exc:
             raise ValueError(f"ts is not valid ISO 8601: {ts!r}") from exc
+
+    for key in _COUNT_FIELDS:
+        value = rec.get(key)
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+            raise ValueError(f"{key} must be a non-negative int, got {value!r}")
+
+    machine = rec.get("machine")
+    if machine is not None and not isinstance(machine, str):
+        raise ValueError(f"machine must be a string, got {type(machine).__name__}")
 
     if "limit_remaining" in rec and rec["limit_remaining"] is not None:
         limit_kind = rec.get("limit_kind")
@@ -179,14 +271,26 @@ def iter_events(
     an explicit path (e.g. doctor's telemetry check) can override it.
     """
     directory = directory if directory is not None else telemetry_dir()
-    if not directory.is_dir():
-        return
+    yield from iter_shards(sorted(directory.glob("events-*.jsonl")) if directory.is_dir() else [],
+                           since=since, agent=agent, project=project)
 
+
+def iter_shards(
+    paths: Iterable[Path],
+    since: datetime | None = None,
+    agent: str | None = None,
+    project: str | None = None,
+) -> Iterator[dict]:
+    """`iter_events` over an explicit list of shard files, in the given order.
+
+    The export tree (one folder per machine) is read through this, so it
+    gets exactly the tolerant parsing the local store does.
+    """
     since_utc = since
     if since_utc is not None and since_utc.tzinfo is None:
         since_utc = since_utc.replace(tzinfo=timezone.utc)
 
-    for path in sorted(directory.glob("events-*.jsonl")):
+    for path in paths:
         try:
             lines = path.read_text(encoding="utf-8").splitlines()
         except OSError:
@@ -201,7 +305,7 @@ def iter_events(
                 continue
             if not isinstance(rec, dict):
                 continue
-            if rec.get("schema") != SCHEMA_VERSION:
+            if rec.get("schema") not in SUPPORTED_SCHEMAS:
                 continue
             if agent is not None and rec.get("agent") != agent:
                 continue

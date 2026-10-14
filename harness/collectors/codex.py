@@ -195,6 +195,13 @@ def _collect_from_file(session_file: Path, since: datetime | None) -> list[dict]
                     # informational-only; telemetry_store preserves unknown
                     # extra fields.
                     record["cached_input_tokens"] = int(cached)
+                    # Schema 2's name for the same subset, so a baseline
+                    # reads the cache split one way across agents. It is a
+                    # part of input_tokens there too, never an addend.
+                    record["cache_read_tokens"] = int(cached)
+                cache_write = usage.get("cache_write_input_tokens")
+                if isinstance(cache_write, (int, float)):
+                    record["cache_write_tokens"] = int(cache_write)
                 output_tokens = usage.get("output_tokens")
                 if isinstance(output_tokens, (int, float)):
                     record["output_tokens"] = int(output_tokens)

@@ -1,34 +1,50 @@
 """Local-only telemetry CLI: collect, tail, and aggregate agent session
 events (see `harness.telemetry_store` for the on-disk schema).
 
-Collection is manual/CLI-only in this phase -- nothing here is wired to a
-hook or runs automatically. Nothing in this module opens a network socket;
-`collect` only reads local agent log files and appends to the local JSONL
-store.
+Collection runs from the CLI, and at most once a day in the background from
+the Claude Code SessionStart hook (`maybe_start_daily_collect`; set
+AGENT_HARNESS_TELEMETRY_AUTO=0 to turn that off). Nothing in this module
+opens a network socket: `collect` only reads local agent log files and
+appends to the local JSONL store, and `export` only writes to a directory
+you name -- point it at a synced folder to bring machines together.
 
 Usage:
-    python harness/telemetry.py collect [--agent claude-code|codex|gemini]
+    python harness/telemetry.py collect [--agent claude-code|codex|gemini] [--quiet]
     python harness/telemetry.py tail [-n N] [--agent AGENT] [--project P]
     python harness/telemetry.py aggregate [--by agent|project] [--since ISO8601]
+    python harness/telemetry.py export --to DIR
+    python harness/telemetry.py baseline [--from DIR] [--days N] [--min-turns 3]
+                                         [--by machine|project|month] [--json OUT]
+    python harness/telemetry.py machine [--label TEXT]
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
+import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 HARNESS_ROOT = Path(__file__).resolve().parent.parent
 
 try:
-    from harness import atomicwrite, telemetry_store
+    from harness import atomicwrite, telemetry_baseline, telemetry_export, telemetry_store
     from harness.collectors import run_collector
 except ImportError:  # running as `python harness/telemetry.py`, not `-m harness.telemetry`
     sys.path.insert(0, str(HARNESS_ROOT))
-    from harness import atomicwrite, telemetry_store
+    from harness import atomicwrite, telemetry_baseline, telemetry_export, telemetry_store
     from harness.collectors import run_collector
+
+AUTO_ENV = "AGENT_HARNESS_TELEMETRY_AUTO"
+# "Once a day" for someone who starts work at roughly the same time each
+# morning: a strict 24 h would skip every day the first session came a
+# little earlier than yesterday's.
+AUTO_INTERVAL = timedelta(hours=20)
+# A collect holding the lock longer than this is assumed dead.
+LOCK_STALE = timedelta(hours=2)
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -42,6 +58,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--agent", choices=telemetry_store.AGENTS, default=None,
         help="collect only this agent (default: all of %s)" % (telemetry_store.AGENTS,),
     )
+    collect_p.add_argument("--quiet", action="store_true", help="print nothing (for background runs)")
 
     tail_p = sub.add_parser("tail", help="print the most recent events")
     tail_p.add_argument("-n", type=int, default=20, help="number of records to print (default: 20)")
@@ -51,6 +68,32 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     agg_p = sub.add_parser("aggregate", help="print per-group event/token/cost summaries")
     agg_p.add_argument("--by", choices=("agent", "project"), default="agent")
     agg_p.add_argument("--since", default=None, help="ISO 8601 timestamp; only include events at/after it")
+
+    export_p = sub.add_parser(
+        "export", help="write this machine's store to DIR/<machine>/ for cross-machine baselines"
+    )
+    export_p.add_argument("--to", required=True, type=Path, help="export root, e.g. a synced folder")
+
+    base_p = sub.add_parser("baseline", help="per-session rollups and the K1-K6 efficiency KPIs")
+    base_p.add_argument(
+        "--from", dest="from_dir", type=Path, default=None,
+        help="an export root holding one folder per machine (default: this machine's store)",
+    )
+    base_p.add_argument("--days", type=int, default=None, help="only the last N days (default: all)")
+    base_p.add_argument(
+        "--min-turns", type=int, default=3,
+        help="minimum main-loop turns for a session to count as interactive (default: 3)",
+    )
+    base_p.add_argument("--by", choices=telemetry_baseline.GROUPINGS, default=None)
+    base_p.add_argument(
+        "--agent", choices=(*telemetry_store.AGENTS, "all"), default="claude-code",
+        help="whose sessions to measure (default: claude-code, the only agent whose records carry "
+             "tool and subagent counts, so the one K1-K5 are defined on; 'all' merges every agent)",
+    )
+    base_p.add_argument("--json", dest="json_out", type=Path, default=None, help="also write the report here")
+
+    machine_p = sub.add_parser("machine", help="show this machine's telemetry id, or set its label")
+    machine_p.add_argument("--label", default=None, help="a readable name for this machine (empty clears it)")
 
     return parser.parse_args(argv)
 
@@ -112,8 +155,63 @@ def _record_ts(rec: dict) -> datetime | None:
         return None
 
 
+def _lock_path() -> Path:
+    return telemetry_store.telemetry_dir() / ".collect.lock"
+
+
+def _acquire_lock() -> bool:
+    """Take the collect lock, clearing one left by a dead run. False if held.
+
+    Two collects at once would both read the same watermark and both append
+    the same records. The background daily run makes that overlap possible
+    (a manual `collect` while it is still reading), so it is excluded here
+    rather than left to luck.
+    """
+    path = _lock_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for _ in range(2):
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                age = datetime.now(timezone.utc).timestamp() - path.stat().st_mtime
+            except OSError:
+                continue
+            if age < LOCK_STALE.total_seconds():
+                return False
+            try:
+                path.unlink()
+            except OSError:
+                return False
+            continue
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(str(os.getpid()))
+        return True
+    return False
+
+
+def _release_lock() -> None:
+    try:
+        _lock_path().unlink()
+    except OSError:
+        pass
+
+
 def cmd_collect(args: argparse.Namespace) -> int:
+    quiet = getattr(args, "quiet", False)
+    if not _acquire_lock():
+        if not quiet:
+            print("another collect is running; nothing done")
+        return 0
+    try:
+        return _collect(args, quiet)
+    finally:
+        _release_lock()
+
+
+def _collect(args: argparse.Namespace, quiet: bool) -> int:
     agents = [args.agent] if args.agent else list(telemetry_store.AGENTS)
+    machine = (telemetry_store.machine_identity(create=True) or {}).get("id")
     state = _load_collect_state()
     total_written = 0
     for agent in agents:
@@ -133,6 +231,8 @@ def cmd_collect(args: argparse.Namespace) -> int:
             ]
         else:
             new_records = records
+        if machine:
+            new_records = [dict(r, machine=r.get("machine") or machine) for r in new_records]
 
         written = telemetry_store.append_events(new_records) if new_records else 0
         total_written += written
@@ -145,10 +245,66 @@ def cmd_collect(args: argparse.Namespace) -> int:
         if latest is not None:
             state[agent] = telemetry_store.format_ts(latest)
 
-        print(f"{agent}: collected {len(records)} record(s), {errors} error(s), wrote {written}")
+        if not quiet:
+            print(f"{agent}: collected {len(records)} record(s), {errors} error(s), wrote {written}")
     _save_collect_state(state)
-    print(f"total written: {total_written}")
+    if not quiet:
+        print(f"total written: {total_written}")
     return 0
+
+
+# --- background daily collect -------------------------------------------------
+
+
+def _auto_state_path() -> Path:
+    return telemetry_store.telemetry_dir() / ".auto_collect.json"
+
+
+def _spawn_background(argv: list[str]) -> None:
+    """Start `argv` detached: no console, no inherited pipes, not waited on.
+
+    The hook that calls this must return in milliseconds and Claude Code
+    waits on its output pipes, so the child gets DEVNULL for all three.
+    """
+    kwargs: dict = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True
+    subprocess.Popen(argv, **kwargs)  # noqa: S603 -- fixed argv: our own interpreter and script
+
+
+def maybe_start_daily_collect(now: datetime | None = None, spawn=None) -> bool:
+    """Start a background `collect --quiet` unless one started in the last
+    AUTO_INTERVAL. Returns whether one was started. Never raises.
+
+    The timestamp is written *before* the spawn, so a burst of sessions
+    starting together starts one collect, not one each; the collect lock
+    covers whatever still overlaps.
+    """
+    try:
+        if os.environ.get(AUTO_ENV, "").strip().lower() in ("0", "off", "false", "no"):
+            return False
+        now = now or datetime.now(timezone.utc)
+        path = _auto_state_path()
+        try:
+            last = telemetry_store.parse_ts(json.loads(path.read_text(encoding="utf-8"))["last"])
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            last = None
+        if last is not None and timedelta(0) <= now - last < AUTO_INTERVAL:
+            return False
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with atomicwrite.atomic_sibling(path) as tmp:
+            tmp.write_text(json.dumps({"last": telemetry_store.format_ts(now)}), encoding="utf-8")
+        (spawn or _spawn_background)([sys.executable, str(Path(__file__).resolve()), "collect", "--quiet"])
+        return True
+    except Exception:  # noqa: BLE001 -- a hook nicety must never break session start
+        return False
 
 
 def _summarize_record(rec: dict) -> str:
@@ -227,6 +383,64 @@ def cmd_aggregate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_export(args: argparse.Namespace) -> int:
+    summary = telemetry_export.export_store(args.to.expanduser())
+    print(
+        f"exported {summary['records']} record(s) for machine {summary['machine']} to {summary['dir']}: "
+        f"{summary['files_written']} file(s) written, {summary['files_unchanged']} unchanged"
+    )
+    return 0
+
+
+def cmd_baseline(args: argparse.Namespace) -> int:
+    keys = telemetry_export.ProjectKeys.load()
+    if args.from_dir is not None:
+        root = args.from_dir.expanduser()
+        if not root.is_dir():
+            raise SystemExit(f"--from is not a directory: {root}")
+        machines = telemetry_export.export_machines(root)
+        records = telemetry_export.iter_export(root)
+        default_machine = "unknown"
+    else:
+        identity = telemetry_store.machine_identity(create=False) or {}
+        default_machine = identity.get("id") or "local"
+        machines = {default_machine: identity.get("label")}
+        records = telemetry_store.iter_events()
+
+    report = telemetry_baseline.baseline(
+        records,
+        days=args.days,
+        min_turns=args.min_turns,
+        by=args.by,
+        agent=None if args.agent == "all" else args.agent,
+        default_machine=default_machine,
+        project_key=keys.key,
+        labels=keys.labels,
+        machines=machines,
+    )
+    keys.save()
+    if report["overall"]["sessions"] == 0:
+        print("no sessions match (run `agent-harness-telemetry collect` first, or lower --min-turns)")
+    else:
+        sys.stdout.write(telemetry_baseline.render(report))
+    if args.json_out is not None:
+        out = args.json_out.expanduser()
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(report, indent=1, sort_keys=True), encoding="utf-8")
+        print(f"wrote {out}")
+    return 0
+
+
+def cmd_machine(args: argparse.Namespace) -> int:
+    if args.label is not None:
+        identity = telemetry_store.set_machine_label(args.label)
+    else:
+        identity = telemetry_store.machine_identity(create=True) or {}
+    label = identity.get("label")
+    print(f"machine {identity.get('id')}" + (f" ({label})" if label else " (no label)"))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     if args.command == "collect":
@@ -235,6 +449,12 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_tail(args)
     if args.command == "aggregate":
         return cmd_aggregate(args)
+    if args.command == "export":
+        return cmd_export(args)
+    if args.command == "baseline":
+        return cmd_baseline(args)
+    if args.command == "machine":
+        return cmd_machine(args)
     return 1
 
 
