@@ -451,16 +451,21 @@ python -m pytest tests/ -q
 
 ## Telemetry
 
-An entirely local, opt-in-by-running-it usage log for Claude Code, Codex
-CLI, and Gemini CLI / Antigravity session history -- nothing here runs
-automatically (no hook, no background process); it only collects when you
-invoke the CLI below, and it never opens a network socket. Events are
+An entirely local usage log for Claude Code, Codex CLI, and Gemini CLI /
+Antigravity session history. It never opens a network socket. Events are
 appended as JSONL to `~/.agent-harness/telemetry/events-YYYYMM.jsonl`
 (month-sharded, never auto-deleted in this phase).
 
+`collect` runs when you invoke it, and the Claude Code SessionStart hook
+also starts it in the background at most once a day (detached, so session
+start does not wait for it). Set `AGENT_HARNESS_TELEMETRY_AUTO=0` to turn
+the daily run off. Once `machine --export-to DIR` names a synced folder,
+that same daily run exports there after it collects (see below), so no
+machine needs anyone to remember `export`.
+
 | Field | Type | Notes |
 |---|---|---|
-| `schema` | int | always `1` for this phase |
+| `schema` | int | `2` for new records; `1` records are still read |
 | `ts` | string | ISO 8601 UTC, `Z` suffix |
 | `agent` | string | `claude-code` \| `codex` \| `gemini` |
 | `event` | string | `session_start` \| `session_end` \| `usage` \| `rate_limit` \| `collector_error` |
@@ -471,12 +476,49 @@ appended as JSONL to `~/.agent-harness/telemetry/events-YYYYMM.jsonl`
 | `model` | string | optional |
 | `limit_remaining` / `limit_kind` | int/float / string | optional pair (`requests`\|`tokens`\|`percent`); `limit_kind` required whenever `limit_remaining` is present |
 | `source` | string | optional, local file path |
+| `machine` | string | schema 2: random id from `~/.agent-harness/machine.json`, never the hostname |
+| `cache_write_tokens` / `cache_read_tokens` | int | schema 2: the cached parts *of* `input_tokens`, which keeps its schema-1 meaning (all input) |
+| `tool_calls` / `harness_tool_calls` | int | schema 2: tool_use blocks in the response, and the `mcp__agent-harness__*` subset |
+| `harness_tools` | object | schema 2: that subset by short name, e.g. `{"memory_remember": 1}` |
+| `subagent` | bool | schema 2: `true` on a subagent turn, absent otherwise |
 
 ```bash
-python harness/telemetry.py collect [--agent claude-code|codex|gemini]
+python harness/telemetry.py collect [--agent claude-code|codex|gemini] [--quiet] [--then-export]
 python harness/telemetry.py tail [-n N] [--agent AGENT] [--project P]
 python harness/telemetry.py aggregate [--by agent|project] [--since ISO8601]
+python harness/telemetry.py export --to DIR
+python harness/telemetry.py baseline [--from DIR] [--days N] [--min-turns 3] [--by machine|project|month] [--json OUT]
+python harness/telemetry.py machine [--label TEXT] [--export-to DIR]
 ```
+
+`baseline` rolls usage up per session and reports the efficiency KPIs
+K1-K6 (context per turn, top-20 token share, harness retrieval use,
+retrieval-to-remember ratio, first-turn context, cache-hit ratio). See
+[the usage baseline](docs/benchmarks/2026-10-14-usage-baseline.md) for what
+they mean and the targets. To compare machines, point `export --to` at the
+same synced folder (OneDrive, Dropbox) on each one, then run
+`baseline --from` on that folder. The export drops local file paths and
+replaces each project path with a hash of its git remote (or of its
+directory name), so the same repository has the same key everywhere.
+
+To keep that folder current without running `export` by hand, set it once
+per machine:
+
+```bash
+agent-harness-telemetry machine --label laptop --export-to "$HOME/OneDrive/agent-harness-telemetry"
+```
+
+The target is stored, as an absolute path, in `~/.agent-harness/machine.json`
+next to the machine id and label: it is a fact about this machine (each
+machine's synced folder sits at its own path), and the export's own
+`machine.json` card carries only the id and label, so the path never leaves
+the machine. From then on the daily background run is
+`collect --quiet --then-export`: it collects, then, still holding the collect
+lock, rewrites `DIR/<machine>/events-YYYYMM.jsonl`. It stays silent; if the
+folder is missing or unwritable, the error is kept in
+`~/.agent-harness/telemetry/.auto_export.json`, and `machine` (with no
+arguments) shows the target and the last export or failure.
+`machine --export-to ""` turns the automatic export off.
 
 Collectors are best-effort: a missing or unrecognized log format degrades
 to zero events (or a single `collector_error` record) rather than crashing
@@ -831,8 +873,9 @@ The only external command this toolkit ever executes on your behalf is the
 `key_command` you write into your own `~/.agent-harness/config.json` -- it is
 run as your user, its output is exported into the named env var for the
 duration of a graph refresh, and it is never printed or logged. Nothing else
-reads credentials, and no telemetry leaves your machine -- the telemetry
-store above is written, read, and aggregated entirely locally.
+reads credentials, and no telemetry leaves your machine on its own -- the
+telemetry store above is written, read, and aggregated entirely locally,
+and `export` writes only to a directory you name.
 
 The optional `[semantic]` extra follows the same rule: it uses ChromaDB's
 default **local** embedding model (ONNX all-MiniLM-L6-v2), so node text

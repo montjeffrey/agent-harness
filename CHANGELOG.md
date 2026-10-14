@@ -19,6 +19,23 @@ pushed tag `vX.Y.Z` doesn't match) before anything is published.
 
 ### Added
 
+- Cross-machine usage benchmarking (see
+  `docs/benchmarks/2026-10-14-usage-baseline.md`). Telemetry schema 2 adds
+  `machine` (a random id in `~/.agent-harness/machine.json`, never the
+  hostname), the cache write/read split of `input_tokens`, and tool-call and
+  `mcp__agent-harness__*` call counts; schema-1 records are still read.
+  `agent-harness-telemetry export --to DIR` writes
+  `DIR/<machine>/events-YYYYMM.jsonl` with local paths dropped and projects
+  keyed by a hash of their git remote. `agent-harness-telemetry baseline`
+  reports per-session rollups and KPIs K1-K6 from the local store or a merged
+  export (`--from`), by machine, project or month. `machine --label` names a
+  machine. The SessionStart hook runs `collect` in the background at most once
+  a day (`AGENT_HARNESS_TELEMETRY_AUTO=0` turns it off).
+  `machine --export-to DIR` sets an opt-in export target (kept in
+  `machine.json`, never exported); with one set, that daily run is
+  `collect --then-export`, which exports under the collect lock and records
+  its outcome for `machine` to show, so synced folders fill hands-off.
+
 - Evidence-bounded automatic memory curation: SessionStart and
   `memory_context` now verify and accept unchanged ingested document pointers,
   reject exact duplicate proposals, and expose only the remaining exception
@@ -74,6 +91,12 @@ pushed tag `vX.Y.Z` doesn't match) before anything is published.
 
 ### Fixed
 
+- The Claude Code telemetry collector counted each API response once per
+  transcript line (a response is often written as several lines with one
+  `message.id`). It also skipped subagent transcripts and failed to open
+  paths past 260 characters on Windows. Usage is now counted once per
+  message id, subagent turns are included and marked, and history that a
+  resumed session copies from its parent is no longer counted twice.
 - `hooks/claude/memory_context_hook.py` returned silently (an empty string)
   when a project's memory store was enrolled but had zero entries, making
   "not wired" and "wired but idle" indistinguishable from the operator's

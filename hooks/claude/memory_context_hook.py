@@ -484,6 +484,25 @@ def record_session_start(project_root: Path, session_id: str, now: datetime | No
     )
 
 
+def start_daily_telemetry() -> bool:
+    """Start the once-a-day background telemetry `collect`, if it is due.
+
+    Spawns and returns at once; the collect itself runs detached, so this
+    adds a file read to session start, not a transcript scan. Runs for every
+    project, enrolled or not -- usage is per machine, not per repository.
+    With an export target set (`agent-harness-telemetry machine --export-to`)
+    the same run also exports there. AGENT_HARNESS_TELEMETRY_AUTO=0 turns it
+    off.
+    """
+    try:
+        _harness()
+        from harness import telemetry
+
+        return telemetry.maybe_start_daily_collect()
+    except Exception:  # noqa: BLE001 -- telemetry is a nicety; the packet is the job
+        return False
+
+
 def _payload() -> dict:
     """The hook event Claude Code sends on stdin, or {} when there is none.
 
@@ -517,6 +536,7 @@ def main(argv: list[str] | None = None) -> int:
                 record_session_start(root, session_id)
             except Exception:  # noqa: BLE001 -- a marker is a nicety; the packet is the job
                 pass
+        start_daily_telemetry()
         text = emit(root, session_id)
         if text:
             sys.stdout.write(text)

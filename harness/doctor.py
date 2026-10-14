@@ -805,9 +805,10 @@ def check_agent_clis() -> CheckResult:
 
 def check_telemetry(telemetry_dir: Path = DEFAULT_TELEMETRY_DIR) -> CheckResult:
     """Report local telemetry store state. Absence is normal on a fresh
-    install (telemetry is collected manually via `harness/telemetry.py
-    collect`, never automatically), so this never WARNs or FAILs -- INFO
-    only, both when the dir is missing and when it's present.
+    install (telemetry is collected by `harness/telemetry.py collect`, or
+    by the SessionStart hook at most once a day, so a new machine has none
+    until its first session), so this never WARNs or FAILs -- INFO only,
+    both when the dir is missing and when it's present.
     """
     if not telemetry_dir.is_dir():
         return CheckResult("INFO", "telemetry", "no telemetry collected yet")
