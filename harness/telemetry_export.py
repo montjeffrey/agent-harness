@@ -66,7 +66,13 @@ def _find_git_dir(start: Path) -> Path | None:
     Follows a worktree's ``.git`` file to its ``commondir``, so every
     worktree of a repository resolves to the main checkout's config (and so
     to the same remote and the same key).
+
+    A path that is not absolute here was recorded on another OS (``D:\\x``
+    on POSIX); walking its parents would end at ``.`` and pick up whatever
+    checkout the current directory sits in, so it has no git directory.
     """
+    if not start.is_absolute():
+        return None
     try:
         candidates = (start, *start.parents)
     except (TypeError, ValueError):
