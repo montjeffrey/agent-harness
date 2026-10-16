@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from tasks_common import BENCH  # noqa: E402
 
 METRICS = ("total_tokens", "cost_usd", "ctx_per_call", "api_calls", "wall_s")
-COMPARISONS = (("A+", "B"), ("A", "B"), ("A", "A+"), ("A+", "M"))
+COMPARISONS = (("A+", "B"), ("A", "B"), ("A", "A+"), ("A+", "M"), ("B", "M"))
 FAMILIES = ("H", "R", "D", "G", "C")
 BOOT = 5000
 WIN, COST = 0.90, 1.10
@@ -33,6 +33,12 @@ WIN, COST = 0.90, 1.10
 def load(path: Path) -> list[dict]:
     rows = [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
     rows = [r for r in rows if r.get("complete") and not r.get("pilot")]
+    # Two matrix processes can overlap after a restart and finish the same
+    # (task, setup, rep); keep the first, so every cell has its planned reps.
+    first: dict = {}
+    for r in rows:
+        first.setdefault((r["task"], r["setup"], r["rep"]), r)
+    rows = list(first.values())
     for r in rows:
         if "api_calls" not in r and r["setup"] != "M":
             backfill_api_calls(r)
@@ -54,11 +60,14 @@ def gmean(xs: list[float]) -> float:
     return math.exp(statistics.fmean(math.log(x) for x in xs))
 
 
-def band(lo: float, hi: float) -> str:
+def band(lo: float, hi: float, num: str, den: str) -> str:
+    """Verdict on the CI. "harness wins/costs" only where the comparison is a
+    harness setup against the no-harness control; otherwise name the cheaper side."""
+    harness_vs_control = num in ("A", "A+") and den == "B"
     if hi <= WIN:
-        return "harness wins"
+        return "harness wins" if harness_vs_control else f"{num} cheaper"
     if lo >= COST:
-        return "harness costs"
+        return "harness costs" if harness_vs_control else f"{num} costs more"
     return "no clear effect"
 
 
@@ -107,7 +116,7 @@ def analyze(rows: list[dict]) -> dict:
             res["gate_ok"] = rate(res["pass_num"]) >= rate(res["pass_den"])
             tt = res.get("total_tokens")
             res["verdict"] = ("invalid (pass rate below comparison)" if not res["gate_ok"]
-                              else band(tt["lo"], tt["hi"]) if tt else "n/a")
+                              else band(tt["lo"], tt["hi"], num, den) if tt else "n/a")
             res["harness_calls_per_run"] = {s: statistics.fmean([r["harness_calls"] for r in runs(s)])
                                             for s in (num, den)}
             fam_out[f"{num}/{den}"] = res
