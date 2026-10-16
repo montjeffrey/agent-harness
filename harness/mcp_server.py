@@ -1149,6 +1149,11 @@ def _cap_native_thread_pools() -> None:
 
     `setdefault`, so an operator who sets the variable still wins. It must
     run before the first numpy import; OpenBLAS reads it once, at load.
+
+    Fixed upstream in OpenMathLib/OpenBLAS#6125 (merged 2026-10-14, first
+    release after 0.3.34): Windows workers now allocate their buffer on first
+    use. Remove this pin once the numpy wheels bundle an OpenBLAS with that
+    fix -- `numpy.show_config()` reports the bundled version.
     """
     os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 
