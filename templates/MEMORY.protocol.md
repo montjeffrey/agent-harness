@@ -1,65 +1,23 @@
 <!-- agent-harness:start -->
-## Agent Harness memory protocol
+## Agent Harness memory
 
-The `agent-harness` MCP tools are registered for every project on this machine.
-They read and write a local, per-project memory store; nothing leaves the
-machine and no model is called on your behalf.
+A local, per-project memory store is available through the `agent-harness` MCP
+tools. Nothing leaves the machine and no model is called on your behalf.
 
-**Retrieve before planning.** For feature-scale work, a bug investigation, or a
-resumed task, call `memory_context` once before planning. Skip it for a trivial
-one-shot question -- the packet spends context, and a one-liner does not earn
-it. One call is enough: the packet is already budgeted and ranked.
+**It is already in your context.** The SessionStart hook injects this project's
+memory, and hooks record commits and finished tasks for you. Do not call
+`memory_context` just to start a task.
 
-**Record what a later session would otherwise have to rediscover.** Call
-`memory_remember` for a decision and its reason, a non-obvious discovery, a
-blocker, or a lesson learned the hard way. Prefer recording at the moment the
-thing is settled, not in a batch at the end.
+**Search only to save reading.** Call `memory_search` for a specific question the
+injected context does not answer, when it would replace reading several files.
 
-**Do not record what the repository already states.** Code structure, git
-history, file contents, and anything a README or ADR already says are all
-retrievable without memory. An entry earns its place only by holding something
-the repository does not.
+**Record only what hooks cannot see:** the reason behind a decision, a
+non-obvious discovery, or a blocker, via `memory_remember` in one sentence. Do
+not record what the repository already states, and never record secrets,
+credentials, tokens, or prompts. Recorded entries stay `proposed` until a human
+accepts them; treat `(proposed)` entries as claims to verify.
 
-**Entries are proposals, not truth.** Agent-recorded observations stay
-`proposed` until a human accepts them. The one automatic exception is an
-ingested document pointer whose repository file still matches its recorded
-digest; deterministic curation promotes that provenance check before context
-retrieval. Treat every other `(proposed)` entry as a claim to verify, not a
-fact to build on.
-
-**Curation is automatic and bounded.** Claude SessionStart and `memory_context`
-run curation before retrieval. It promotes verifiable document pointers and
-rejects exact duplicate proposals; `memory_curate` shows only the remaining
-exception queue. It never auto-accepts an agent's conclusion.
-
-**Never record** secrets, credentials, tokens, prompts, or source dumps.
-
-**Coordinate before implementation.** After the user has authorized a
-non-trivial code change, call `work_status` and then `work_start` before
-editing. Give `work_start` the session id printed at session start (the
-`_Session ..._` line) and one exact repository-relative path per line. It
-refuses files already claimed by an active session, records the immutable diff
-base, and returns the branch/worktree to use plus a task-scoped memory packet.
-In Claude Code the claim is enforced: an `Edit` or `Write` to a path another
-active session claims is refused with the owner's task id -- choose another
-path or wait for that task's `work_finish`; your own claims never block you.
-Call `work_diff` before handoff and `work_finish` only when the task is
-complete; finish records the branch, base, and final commit and releases the
-claim -- it never rebases, merges, or removes a worktree. Do not use these
-tools for read-only investigation.
-
-**Retrieve narrowly, then follow up.** `memory_context` takes `tags`, `types`,
-and `exclude`; filtering happens before ranking, so a narrow call is also a
-cheaper one. For a specific question mid-task use `memory_search` instead of a
-second packet -- it returns ranked entries with no framing, and its `projects`
-parameter reads other registered projects on this machine (`current`, `all`,
-`related`, or an explicit list).
-
-**Progress is captured for you.** At the end of every turn a hook proposes an
-entry for each new commit and each finished task, with the commit SHA as its
-source. These are evidence pointers for review, not knowledge: reject the ones
-that only restate git, and do not re-record commits yourself.
-
-If a project has no memory store yet, `memory_context` returns an empty packet
-with a warning rather than an error -- that is normal, not a failure.
+**Parallel edits:** before an authorized non-trivial change, `work_start` claims
+its paths (pass the `_Session ..._` id and one path per line); `work_finish`
+releases them. Not for read-only work.
 <!-- agent-harness:end -->
