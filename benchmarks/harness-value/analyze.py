@@ -23,7 +23,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from tasks_common import BENCH  # noqa: E402
 
-METRICS = ("total_tokens", "cost_usd", "ctx_per_turn", "turns", "wall_s")
+METRICS = ("total_tokens", "cost_usd", "ctx_per_call", "api_calls", "wall_s")
 COMPARISONS = (("A+", "B"), ("A", "B"), ("A", "A+"), ("A+", "M"))
 FAMILIES = ("H", "R", "D", "G", "C")
 BOOT = 5000
@@ -32,7 +32,22 @@ WIN, COST = 0.90, 1.10
 
 def load(path: Path) -> list[dict]:
     rows = [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
-    return [r for r in rows if r.get("complete") and not r.get("pilot")]
+    rows = [r for r in rows if r.get("complete") and not r.get("pilot")]
+    for r in rows:
+        if "api_calls" not in r and r["setup"] != "M":
+            backfill_api_calls(r)
+    return rows
+
+
+def backfill_api_calls(r: dict) -> None:
+    """Records written before api_calls existed: count model calls from each
+    measured step's own session log (one session per step outside setup M)."""
+    from run import session_profile
+    calls = sum(session_profile(s["session_id"])["api_calls"]
+                for s in r["steps"] if s.get("measured") and s.get("session_id"))
+    total_input = r["input_tokens"] + r["cache_write_tokens"] + r["cache_read_tokens"]
+    r["api_calls"] = calls
+    r["ctx_per_call"] = round(total_input / calls) if calls else None
 
 
 def gmean(xs: list[float]) -> float:
@@ -120,12 +135,12 @@ def _pt(r: dict, metric: str) -> str:
 
 def render(out: dict) -> str:
     lines = [f"{'family':<7} {'compare':<8} {'total tokens (95% CI)':<22} {'cost':<6} "
-             f"{'ctx/turn':<9} {'pass':<16} verdict"]
+             f"{'ctx/call':<9} {'pass':<16} verdict"]
     for fam in FAMILIES:
         for comp, r in (out.get(fam) or {}).items():
             passes = f"{r['pass_num'][0]}/{r['pass_num'][1]} vs {r['pass_den'][0]}/{r['pass_den'][1]}"
             lines.append(f"{fam:<7} {comp:<8} {_ci(r, 'total_tokens'):<22} {_pt(r, 'cost_usd'):<6} "
-                         f"{_pt(r, 'ctx_per_turn'):<9} {passes:<16} {r['verdict']}")
+                         f"{_pt(r, 'ctx_per_call'):<9} {passes:<16} {r['verdict']}")
     for comp, r in (out.get("overall") or {}).items():
         lines.append(f"overall {comp:<8} {r['ratio']:.2f} ({r['lo']:.2f}-{r['hi']:.2f})  "
                      f"families {', '.join(r['families'])}")

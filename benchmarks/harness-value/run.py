@@ -201,8 +201,12 @@ USAGE_KEYS = ("inputTokens", "outputTokens", "cacheCreationInputTokens", "cacheR
 
 
 def session_profile(session_id: str) -> dict:
-    """Tool calls by name, from the session log and its subagent transcripts."""
+    """Tool calls by name and model API calls, from the session log and its
+    subagent transcripts. ``api_calls`` counts distinct assistant message ids:
+    the result JSON's ``num_turns`` counts conversation turns, not model calls,
+    so it cannot give context per call."""
     calls: Counter = Counter()
+    message_ids: set = set()
     files = list(CLAUDE_PROJECTS.glob(f"*/{session_id}.jsonl"))
     for f in list(files):
         sub = f.parent / session_id
@@ -214,6 +218,9 @@ def session_profile(session_id: str) -> dict:
                 msg = json.loads(line).get("message")
             except ValueError:
                 continue
+            if (isinstance(msg, dict) and msg.get("role") == "assistant" and msg.get("id")
+                    and msg.get("model") != "<synthetic>"):
+                message_ids.add(msg["id"])
             if isinstance(msg, dict) and isinstance(msg.get("content"), list):
                 for b in msg["content"]:
                     if isinstance(b, dict) and b.get("type") == "tool_use":
@@ -221,7 +228,7 @@ def session_profile(session_id: str) -> dict:
     harness = {k.removeprefix("mcp__agent-harness__"): v for k, v in calls.items()
                if str(k).startswith("mcp__agent-harness__")}
     return {"tool_calls": dict(calls), "harness_calls": harness,
-            "toolsearch_calls": calls.get("ToolSearch", 0)}
+            "toolsearch_calls": calls.get("ToolSearch", 0), "api_calls": len(message_ids)}
 
 
 def run_session(repo: Path, prompt: str, extra: list[str], resume: str | None,
@@ -261,11 +268,14 @@ def run_session(repo: Path, prompt: str, extra: list[str], resume: str | None,
 
 
 def _delta(cur: dict, prev: dict | None) -> dict:
-    """A resumed conversation reports cumulative usage and cost; keep this step's share."""
+    """A resumed conversation reports cumulative modelUsage and total_cost_usd;
+    keep this step's share. num_turns is already per invocation (verified on a
+    six-step pilot: 11, 11, 11, 4, 10, 7), so it is left as reported."""
     if not prev:
         return cur
     out = dict(cur)
-    for k in (*USAGE_KEYS, "cost_usd", "num_turns"):
+    # The resumed session's log also accumulates, so api_calls is cumulative too.
+    for k in (*USAGE_KEYS, "cost_usd", "api_calls"):
         if (cur.get(k) or 0) >= (prev.get(k) or 0):
             out[k] = (cur.get(k) or 0) - (prev.get(k) or 0)
     return out
@@ -341,6 +351,8 @@ def run_one(task_id: str, setup: str, rep: int, pilot: bool = False) -> dict:
         "total_tokens": total_input + tot("outputTokens"),
         "turns": tot("num_turns"), "wall_s": round(tot("wall_s"), 1),
         "ctx_per_turn": round(total_input / tot("num_turns")) if tot("num_turns") else None,
+        "api_calls": tot("api_calls"),
+        "ctx_per_call": round(total_input / tot("api_calls")) if tot("api_calls") else None,
         "cost_usd": round(tot("cost_usd"), 4),
         "cost_usd_all_steps": round(sum(s.get("cost_usd") or 0 for s in step_recs), 4),
         "harness_calls": sum(sum((s.get("harness_calls") or {}).values()) for s in meas),
@@ -358,8 +370,8 @@ def run_one(task_id: str, setup: str, rep: int, pilot: bool = False) -> dict:
 
 def summary_line(r: dict) -> str:
     return (f"{r['task']:<24} {r['setup']:<2} r{r['rep']}  pass={r['steps_passed']}/{r['steps_measured']} "
-            f"tok={r['total_tokens']:>11,} ctx/turn={r['ctx_per_turn'] or 0:>7,} "
-            f"cost=${r['cost_usd']:.3f} turns={r['turns']} harness={r['harness_calls']} "
+            f"tok={r['total_tokens']:>11,} ctx/call={r.get('ctx_per_call') or 0:>7,} "
+            f"cost=${r['cost_usd']:.3f} calls={r.get('api_calls')} harness={r['harness_calls']} "
             f"wall={r['wall_s']}s")
 
 
