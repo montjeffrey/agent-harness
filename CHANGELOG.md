@@ -19,6 +19,20 @@ pushed tag `vX.Y.Z` doesn't match) before anything is published.
 
 ### Added
 
+- Automatic session hand-off (`harness/handoff.py`). A new Stop/SessionEnd
+  hook, `hooks/claude/handoff_capture_hook.py`, writes one proposed entry
+  group per session from evidence alone: the files changed since session
+  start (a working-tree snapshot taken by the SessionStart hook into a
+  throwaway index), the build/test commands and tool calls from the
+  transcript, `ANSWER:` lines and ANSWER.md, and decisions and open items
+  extracted by fixed rules from the final message. No model call, never the
+  user's prompt, secret-shaped lines dropped, and a later turn replaces the
+  session's still-unreviewed group instead of piling up. The SessionStart hook
+  now pushes the newest hand-offs (up to three sessions, 1,500 chars,
+  `AGENT_HARNESS_HANDOFF_MAX_CHARS`, 0 disables) after the table of contents,
+  which no longer lists those ids. Registered at user scope and in the
+  project settings fragment.
+
 - Cross-machine usage benchmarking (see
   `docs/benchmarks/2026-10-14-usage-baseline.md`). Telemetry schema 2 adds
   `machine` (a random id in `~/.agent-harness/machine.json`, never the

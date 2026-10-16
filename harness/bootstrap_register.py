@@ -92,6 +92,17 @@ HOOK_SPECS: tuple[HookSpec, ...] = (
     HookSpec(
         event="SessionEnd", script="hooks/claude/progress_capture_hook.py", matcher=None, timeout=15
     ),
+    # Hand-off capture: what the session changed, found and left open, so the
+    # next session's SessionStart packet carries it without anyone asking.
+    # Same Stop + SessionEnd pairing and idempotence as progress capture; a
+    # longer timeout because it snapshots the working tree (a stat-mostly
+    # `git add -A` into a throwaway index).
+    HookSpec(
+        event="Stop", script="hooks/claude/handoff_capture_hook.py", matcher=None, timeout=30
+    ),
+    HookSpec(
+        event="SessionEnd", script="hooks/claude/handoff_capture_hook.py", matcher=None, timeout=30
+    ),
 )
 
 

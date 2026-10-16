@@ -57,9 +57,11 @@ class TestMergeHooks:
         # Progress capture is registered on both events deliberately: Stop
         # fires per turn so work survives a crash, SessionEnd sweeps up
         # commits made after the final turn. One idempotent script serves both.
+        # Hand-off capture rides the same pair of events for the same reason.
         progress = hook("progress_capture_hook.py")
-        assert _commands(merged, "Stop") == [progress]
-        assert _commands(merged, "SessionEnd") == [progress]
+        handoff = hook("handoff_capture_hook.py")
+        assert _commands(merged, "Stop") == [progress, handoff]
+        assert _commands(merged, "SessionEnd") == [progress, handoff]
         assert all(action.endswith("registered") for action in actions)
 
     def test_only_the_deny_capable_guards_pin_a_timeout(self, harness_root: Path) -> None:
@@ -74,6 +76,7 @@ class TestMergeHooks:
         }
         assert timeouts["claim_guard.py"] == 10
         assert timeouts["progress_capture_hook.py"] == 15
+        assert timeouts["handoff_capture_hook.py"] == 30
         # Unset means "use the client default", and must stay absent rather
         # than being written as an explicit null.
         assert timeouts["memory_context_hook.py"] is None
