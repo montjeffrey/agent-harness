@@ -8,9 +8,15 @@ since the SessionStart hook's snapshot. The rules -- proposed entries only,
 no prompts, no secrets, no model call, one group per session -- live in
 `harness.handoff`; this file only adapts Claude Code's hook payload.
 
-Like the progress hook it never blocks: every path exits 0 with no output,
-and any error inside the harness is swallowed. A `Stop` hook that exited 2
-would hold the session hostage.
+Like the progress hook it never blocks: every path exits 0, and any error
+inside the harness is swallowed. A `Stop` hook that exited 2 would hold the
+session hostage.
+
+Its only output: once per session, on `Stop`, when the context has passed
+this machine's refresh point (`harness.context_refresh`), it prints
+``{"systemMessage": ...}``. That notice is shown to the user and is not fed
+to the model; nothing here uses `decision`, `reason` or `additionalContext`,
+which would put text into the model's context.
 """
 
 from __future__ import annotations
@@ -26,9 +32,9 @@ def _import_harness():
     root = str(Path(__file__).resolve().parents[2])
     if sys.path[:1] != [root]:
         sys.path.insert(0, root)
-    from harness import handoff
+    from harness import context_refresh, handoff
 
-    return handoff
+    return handoff, context_refresh
 
 
 def main() -> int:
@@ -42,14 +48,22 @@ def main() -> int:
         cwd = payload.get("cwd")
         root = Path(cwd) if isinstance(cwd, str) and cwd else Path.cwd()
         transcript = payload.get("transcript_path")
-        _import_harness().capture(
+        transcript_path = Path(transcript) if isinstance(transcript, str) and transcript else None
+        handoff, context_refresh = _import_harness()
+        result = handoff.capture(
             root,
             session_id,
-            Path(transcript) if isinstance(transcript, str) and transcript else None,
+            transcript_path,
             # Newer Claude Code versions send the final reply with Stop; the
             # transcript may not have it flushed yet when the hook fires.
             last_message=payload.get("last_assistant_message"),
         )
+        if payload.get("hook_event_name", "Stop") != "Stop":
+            return 0  # SessionEnd: the session is over, nobody to tell
+        saved = bool(result.proposed) or result.skipped == "unchanged since the last capture"
+        notice = context_refresh.check(session_id, transcript_path, saved)
+        if notice is not None:
+            print(json.dumps({"systemMessage": notice.message}))
     except Exception:  # noqa: BLE001 -- never block the session from stopping
         return 0
     return 0

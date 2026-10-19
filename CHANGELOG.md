@@ -19,6 +19,16 @@ pushed tag `vX.Y.Z` doesn't match) before anything is published.
 
 ### Added
 
+- One-shot refresh notice (`harness/context_refresh.py`), from the hand-off
+  Stop hook after the note is written: once per session, when the latest
+  call's context passes this machine's refresh point, the hook prints a
+  `systemMessage` (shown to the user, never added to the model's context).
+  The point is 2.0 x (median fresh-session start on this machine + 25k
+  re-read), clamped to 100k-400k -- 130k until three fresh starts are
+  recorded, ~220k on a machine whose sessions start at ~87k. A replay of 66
+  real sessions put the cheapest refresh point there, flat either side.
+  `AGENT_HARNESS_REFRESH_AT` fixes it (`0`/`off` disables) and
+  `AGENT_HARNESS_REFRESH_REREAD` changes the re-read estimate.
 - Automatic session hand-off (`harness/handoff.py`). A new Stop/SessionEnd
   hook, `hooks/claude/handoff_capture_hook.py`, writes one proposed entry
   group per session from evidence alone: the files changed since session
