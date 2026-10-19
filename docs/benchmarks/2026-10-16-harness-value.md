@@ -1,6 +1,6 @@
 # Does the harness pay off on the work that is actually expensive?
 
-*Harness-value benchmark, run 2026-10-15/16. Internal report; not published.
+*Harness-value benchmark, run 2026-10-15/16.
 Method: [benchmarks/harness-value/DESIGN.md](../../benchmarks/harness-value/DESIGN.md).*
 
 ## Headline

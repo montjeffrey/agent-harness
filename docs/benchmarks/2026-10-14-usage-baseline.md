@@ -1,6 +1,6 @@
 # Usage baseline and efficiency targets
 
-*Baseline taken 2026-10-14 on one machine (machine A, Windows 11). Internal; not published.*
+*Baseline taken 2026-10-14 on one machine (machine A, Windows 11).*
 
 This is the first point in a cross-machine benchmark series. It records where real
 day-to-day usage stands, which numbers matter, and the targets the harness should move.

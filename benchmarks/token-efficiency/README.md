@@ -18,8 +18,8 @@ Not part of the package: `pyproject.toml` only packages `harness*`, `templates*`
 | `gocallers/` | `go/ast` walk that produced Q1's ground truth |
 | `results/2026-10-12/` | Raw per-run records and the analysis/cross-check output behind the report |
 
-The archived `results.jsonl` contains local paths and session ids from the operator's
-machine. Strip them before publishing it anywhere.
+The archived `results.jsonl` has local paths and session ids removed; it keeps
+every field `analyze.py` reads.
 
 ## Running it
 

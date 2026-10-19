@@ -22,8 +22,9 @@ Not part of the package (`pyproject.toml` packages only `harness*`, `templates*`
 
 Family C reuses `../token-efficiency/tasks.py` and its `hookwrap.py`.
 
-The archived `results.jsonl` contains local paths and session ids from the
-operator's machine. Strip them before publishing it anywhere.
+The archived `results.jsonl` has local paths and session ids removed; model-call
+counts (`api_calls`, `ctx_per_call`) were computed before the session ids were
+dropped, so `analyze.py` reproduces the report from the archive alone.
 
 ## Running it
 

@@ -1,6 +1,6 @@
 # Does agent-harness reduce the tokens a coding agent spends?
 
-*Benchmark run 2026-10-12. Internal report; not published.*
+*Benchmark run 2026-10-12.*
 
 ## Headline
 
