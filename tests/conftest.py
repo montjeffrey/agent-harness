@@ -91,5 +91,8 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.setenv("XDG_CACHE_HOME", str(cache))
     monkeypatch.setenv("PIP_CACHE_DIR", str(cache / "pip"))
+    # The SessionStart hook starts a detached background `collect` once a
+    # day; a hook test must not leave one running against its tmp home.
+    monkeypatch.setenv("AGENT_HARNESS_TELEMETRY_AUTO", "0")
     monkeypatch.setattr(Path, "home", lambda: home)
     return home

@@ -34,7 +34,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from harness import atomicwrite, config_validation, pathsafe
+from harness import atomicwrite, config_validation, memory_store, pathsafe
 
 log = logging.getLogger(__name__)
 
@@ -51,8 +51,6 @@ HOOK_FRAGMENT_PATH = resources.files("hooks.claude") / "settings-fragment.json"
 
 MARKER_START = "<!-- agent-harness:start -->"
 MARKER_END = "<!-- agent-harness:end -->"
-
-GITIGNORE_ENTRY = "graphify-out/"
 
 VAULT_README_TEMPLATE = """# Agent <-> Human Vault Pipeline
 
@@ -355,20 +353,19 @@ def upsert_marker_block(file_path: Path, block: str, txn: InstallTransaction | N
     return "updated"
 
 
-def ensure_gitignore_entry(project_dir: Path, txn: InstallTransaction | None = None) -> str:
-    gitignore_path = project_dir / ".gitignore"
-    if not gitignore_path.exists():
-        _write(gitignore_path, GITIGNORE_ENTRY + "\n", txn)
-        return "created"
-
-    content = _read_preserving_newlines(gitignore_path)
-    existing_lines = {line.strip() for line in content.splitlines()}
-    if GITIGNORE_ENTRY.strip("/") in {line.strip("/") for line in existing_lines}:
-        return "unchanged"
-
-    separator = "" if content.endswith("\n") or not content else "\n"
-    _write(gitignore_path, content + separator + GITIGNORE_ENTRY + "\n", txn)
-    return "updated"
+def _describe_graph_exclude(exclude: memory_store.ExcludeResult) -> str | None:
+    """One summary line for the graph's git exclusion, or None for nothing
+    to say (not a git repository)."""
+    line = memory_store.GRAPH_EXCLUDE_LINE
+    if exclude.status == "added":
+        return f".git/info/exclude: added {line}"
+    if exclude.status == "present":
+        return ".git/info/exclude: unchanged"
+    if exclude.status == "tracked":
+        return f".git/info/exclude: unchanged (git tracks {line}; not excluding it)"
+    if exclude.status == "failed":
+        return f".git/info/exclude: not updated ({exclude.note})"
+    return None
 
 
 def install_vault_files(
@@ -573,9 +570,6 @@ def run_install(
         vault_actions = install_vault_files(project_dir, HARNESS_ROOT, txn)
         summary.extend(vault_actions)
 
-        gitignore_action = ensure_gitignore_entry(project_dir, txn)
-        summary.append(f".gitignore: {gitignore_action}")
-
         agents_block = render_agents_block(HARNESS_ROOT)
         agents_action = upsert_marker_block(project_dir / "AGENTS.md", agents_block, txn)
         summary.append(f"AGENTS.md: {agents_action}")
@@ -602,6 +596,16 @@ def run_install(
     except Exception:
         txn.rollback()
         raise
+
+    # Keep the graph's build output out of git through the repository's
+    # private `.git/info/exclude`, never the project's `.gitignore` (ADR 0004:
+    # the exclusion must not itself become a diff others see). It runs last
+    # and outside the transaction, which covers only the project tree: by now
+    # nothing can fail, so a failed install never leaves this line behind, and
+    # `ensure_graph_git_exclude` never raises.
+    exclude_line = _describe_graph_exclude(memory_store.ensure_graph_git_exclude(project_dir))
+    if exclude_line:
+        summary.append(exclude_line)
 
     return summary
 

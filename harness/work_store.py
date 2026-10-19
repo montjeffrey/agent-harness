@@ -15,9 +15,9 @@ They are excluded from versioning by a ``.gitignore`` containing a single
 ``*`` written *inside* ``work/``. That pattern ignores the whole directory
 including the ignore file itself, so enabling this tier in a new project never
 requires editing -- or even reading -- that project's root ``.gitignore``.
-``install_cli.ensure_gitignore_entry`` takes the other approach for
-``graphify-out/`` because that path predates this tier; new state should not
-need a host-file edit to stay untracked.
+``graphify-out/`` is kept out through the repository's private
+``.git/info/exclude`` instead (``memory_store.ensure_graph_git_exclude``);
+neither approach edits the project's root ``.gitignore``.
 
 Nothing here reads or writes memory entries. ``memory_store.iter_entries``
 resolves exactly one file, ``<directory>/inbox.jsonl``, so a sibling ``work/``

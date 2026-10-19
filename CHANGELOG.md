@@ -19,6 +19,47 @@ pushed tag `vX.Y.Z` doesn't match) before anything is published.
 
 ### Added
 
+- One-shot refresh notice (`harness/context_refresh.py`), from the hand-off
+  Stop hook after the note is written: once per session, when the latest
+  call's context passes this machine's refresh point, the hook prints a
+  `systemMessage` (shown to the user, never added to the model's context).
+  The point is 2.0 x (median fresh-session start on this machine + 25k
+  re-read), clamped to 100k-400k -- 130k until three fresh starts are
+  recorded, ~220k on a machine whose sessions start at ~87k. A replay of 66
+  real sessions put the cheapest refresh point there, flat either side.
+  `AGENT_HARNESS_REFRESH_AT` fixes it (`0`/`off` disables) and
+  `AGENT_HARNESS_REFRESH_REREAD` changes the re-read estimate.
+- Automatic session hand-off (`harness/handoff.py`). A new Stop/SessionEnd
+  hook, `hooks/claude/handoff_capture_hook.py`, writes one proposed entry
+  group per session from evidence alone: the files changed since session
+  start (a working-tree snapshot taken by the SessionStart hook into a
+  throwaway index), the build/test commands and tool calls from the
+  transcript, `ANSWER:` lines and ANSWER.md, and decisions and open items
+  extracted by fixed rules from the final message. No model call, never the
+  user's prompt, secret-shaped lines dropped, and a later turn replaces the
+  session's still-unreviewed group instead of piling up. The SessionStart hook
+  now pushes the newest hand-offs (up to three sessions, 1,500 chars,
+  `AGENT_HARNESS_HANDOFF_MAX_CHARS`, 0 disables) after the table of contents,
+  which no longer lists those ids. Registered at user scope and in the
+  project settings fragment.
+
+- Cross-machine usage benchmarking (see
+  `docs/benchmarks/2026-10-14-usage-baseline.md`). Telemetry schema 2 adds
+  `machine` (a random id in `~/.agent-harness/machine.json`, never the
+  hostname), the cache write/read split of `input_tokens`, and tool-call and
+  `mcp__agent-harness__*` call counts; schema-1 records are still read.
+  `agent-harness-telemetry export --to DIR` writes
+  `DIR/<machine>/events-YYYYMM.jsonl` with local paths dropped and projects
+  keyed by a hash of their git remote. `agent-harness-telemetry baseline`
+  reports per-session rollups and KPIs K1-K6 from the local store or a merged
+  export (`--from`), by machine, project or month. `machine --label` names a
+  machine. The SessionStart hook runs `collect` in the background at most once
+  a day (`AGENT_HARNESS_TELEMETRY_AUTO=0` turns it off).
+  `machine --export-to DIR` sets an opt-in export target (kept in
+  `machine.json`, never exported); with one set, that daily run is
+  `collect --then-export`, which exports under the collect lock and records
+  its outcome for `machine` to show, so synced folders fill hands-off.
+
 - Evidence-bounded automatic memory curation: SessionStart and
   `memory_context` now verify and accept unchanged ingested document pointers,
   reject exact duplicate proposals, and expose only the remaining exception
@@ -74,6 +115,12 @@ pushed tag `vX.Y.Z` doesn't match) before anything is published.
 
 ### Fixed
 
+- The Claude Code telemetry collector counted each API response once per
+  transcript line (a response is often written as several lines with one
+  `message.id`). It also skipped subagent transcripts and failed to open
+  paths past 260 characters on Windows. Usage is now counted once per
+  message id, subagent turns are included and marked, and history that a
+  resumed session copies from its parent is no longer counted twice.
 - `hooks/claude/memory_context_hook.py` returned silently (an empty string)
   when a project's memory store was enrolled but had zero entries, making
   "not wired" and "wired but idle" indistinguishable from the operator's

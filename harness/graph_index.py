@@ -13,7 +13,7 @@ Install the optional extra to use this module for anything beyond
 
 The index lives at `graphify-out/semantic-index/` (see
 `harness.graph_location.INDEX_RELATIVE_PATH`), a sibling of graph.json
-inside the directory the harness already gitignores.
+inside the directory enroll and install exclude from git.
 
 Embedding: Chroma's default local embedding function (ONNX all-MiniLM-L6-v2)
 is used unless a caller supplies its own `embedding_function` -- fully local,

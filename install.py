@@ -11,7 +11,6 @@ from __future__ import annotations
 from harness.install_cli import (  # noqa: F401
     CLAUDE_POINTER,
     GEMINI_POINTER,
-    GITIGNORE_ENTRY,
     HARNESS_ROOT,
     HOOK_FRAGMENT_PATH,
     MARKER_END,
@@ -23,7 +22,6 @@ from harness.install_cli import (  # noqa: F401
     _json_string_escape,
     _shell_quote,
     deep_merge_hooks,
-    ensure_gitignore_entry,
     install_hooks,
     install_mcp_registration,
     install_vault_files,

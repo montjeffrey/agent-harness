@@ -48,6 +48,15 @@
             "timeout": 15
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "<python> <harness>/hooks/claude/handoff_capture_hook.py",
+            "timeout": 30
+          }
+        ]
       }
     ],
     "SessionEnd": [
@@ -57,6 +66,15 @@
             "type": "command",
             "command": "<python> <harness>/hooks/claude/progress_capture_hook.py",
             "timeout": 15
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "<python> <harness>/hooks/claude/handoff_capture_hook.py",
+            "timeout": 30
           }
         ]
       }

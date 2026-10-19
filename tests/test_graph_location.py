@@ -201,6 +201,75 @@ def test_report_health_fresh_when_clean_and_matching(tmp_path: Path, monkeypatch
     assert graph_location.report_health(graph, tmp_path) == GraphHealth.FRESH
 
 
+def _git(cwd: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(cwd), "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+         *args],
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, check=True, timeout=30,
+    )
+    return result.stdout.strip()
+
+
+def _committed_repo(root: Path) -> str:
+    root.mkdir(parents=True, exist_ok=True)
+    _git(root, "init", "-q")
+    (root / "app.py").write_text("print('hi')\n", encoding="utf-8")
+    _git(root, "add", "app.py")
+    _git(root, "commit", "-q", "-m", "init")
+    return _git(root, "rev-parse", "HEAD")
+
+
+def test_graph_git_exclusion_names_the_graph_output_directory() -> None:
+    """memory_store spells the exclude line literally; it must not drift
+    from the directory graphs are actually written to."""
+    from harness import memory_store
+
+    expected = f"{graph_location.GRAPH_RELATIVE_PATH.parent.as_posix()}/"
+    assert memory_store.GRAPH_EXCLUDE_LINE == expected
+    assert expected.rstrip("/") in graph_location.HARNESS_OUTPUT_DIRS
+
+
+def test_untracked_harness_output_does_not_make_the_graph_dirty(tmp_path: Path) -> None:
+    """Real git, no exclude line: the graph's own untracked output directory
+    (and project memory beside it) must not condemn a graph just built."""
+    head = _committed_repo(tmp_path)
+    graph = _write_graph(tmp_path, built_at=head)
+    (tmp_path / "graphify-out" / "cache").mkdir()
+    (tmp_path / "graphify-out" / "cache" / "x.json").write_text("{}", encoding="utf-8")
+    (tmp_path / ".agent-harness").mkdir()
+    (tmp_path / ".agent-harness" / "scope.md").write_text("# scope\n", encoding="utf-8")
+    assert "graphify-out" in _git(tmp_path, "status", "--porcelain")
+
+    assert graph_location.git_is_dirty(tmp_path) is False
+    assert graph_location.report_health(graph, tmp_path) == GraphHealth.FRESH
+
+
+def test_source_changes_still_make_the_graph_dirty_beside_harness_output(
+    tmp_path: Path,
+) -> None:
+    head = _committed_repo(tmp_path)
+    graph = _write_graph(tmp_path, built_at=head)
+    (tmp_path / "app.py").write_text("print('changed')\n", encoding="utf-8")
+    assert graph_location.report_health(graph, tmp_path) == GraphHealth.DIRTY
+
+    _git(tmp_path, "checkout", "--", "app.py")
+    (tmp_path / "new_module.py").write_text("x = 1\n", encoding="utf-8")
+    assert graph_location.report_health(graph, tmp_path) == GraphHealth.DIRTY
+
+
+def test_only_the_graph_dirs_own_output_is_ignored_not_any_graphify_out(
+    tmp_path: Path,
+) -> None:
+    """The exclusion is anchored at repo_root: a nested project's
+    `sub/graphify-out/` is still a change to this repository."""
+    head = _committed_repo(tmp_path)
+    graph = _write_graph(tmp_path, built_at=head)
+    nested = tmp_path / "sub" / "graphify-out"
+    nested.mkdir(parents=True)
+    (nested / "graph.json").write_text("{}", encoding="utf-8")
+    assert graph_location.report_health(graph, tmp_path) == GraphHealth.DIRTY
+
+
 def test_report_health_unknown_when_git_state_cannot_be_determined(tmp_path: Path) -> None:
     """HIGH-1 regression guard: a REAL non-git tmp_path (no `.git` anywhere,
     `git status`/`git rev-parse` will both fail) with a valid graph present

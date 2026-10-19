@@ -30,6 +30,7 @@ HOOK_IMPORTERS = [
     ("memory_context_hook.py", "_harness"),
     ("claim_guard.py", "_import_work"),
     ("progress_capture_hook.py", "_import_harness"),
+    ("handoff_capture_hook.py", "_import_harness"),
 ]
 
 PROBE = """

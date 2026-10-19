@@ -202,12 +202,13 @@ def _entry_line(entry: dict, limit: int) -> str:
     return f"- `{entry.get('id', '?')}` [{entry.get('type', '?')}]{flag} {_clip(entry.get('summary', ''), limit)}"
 
 
-def _toc_sections(packet: Any) -> list[tuple[str, list[str], int]]:
+def _toc_sections(packet: Any, skip_ids: frozenset[str] = frozenset()) -> list[tuple[str, list[str], int]]:
     """`(title, lines, already_omitted)` per section, in reading order.
 
     Built from the packet's *records* rather than its rendered units, so each
     line can be clipped to table-of-contents length while the ids -- the
-    handles for `memory_search` -- stay intact.
+    handles for `memory_search` -- stay intact. Records in `skip_ids` (the
+    hand-off entries, which print in full in their own block) are left out.
     """
     by_key = {section.key: section for section in packet.sections}
 
@@ -255,7 +256,11 @@ def _toc_sections(packet: Any) -> list[tuple[str, list[str], int]]:
         section = by_key.get(key)
         if section is None:
             continue
-        knowledge.extend(_entry_line(r, KNOWLEDGE_CHARS) for r in section.records if r.get("id"))
+        knowledge.extend(
+            _entry_line(r, KNOWLEDGE_CHARS)
+            for r in section.records
+            if r.get("id") and str(r["id"]) not in skip_ids
+        )
         knowledge_omitted += section.omitted
 
     active_omitted = active.omitted if active is not None else 0
@@ -292,7 +297,12 @@ def _fit_lines(lines: list[str], start: int, allowance: int) -> int:
     return taken
 
 
-def render_toc(packet: Any, max_chars: int, session_id: str | None = None) -> str:
+def render_toc(
+    packet: Any,
+    max_chars: int,
+    session_id: str | None = None,
+    skip_ids: frozenset[str] = frozenset(),
+) -> str:
     """The packet as a table of contents that fits `max_chars`.
 
     The header (title, generation line, notes) sits outside the budget as it
@@ -314,7 +324,9 @@ def render_toc(packet: Any, max_chars: int, session_id: str | None = None) -> st
     budget = max(max_chars - reserved, 0)
 
     sections = [
-        (title, lines, omitted) for title, lines, omitted in _toc_sections(packet) if lines or omitted
+        (title, lines, omitted)
+        for title, lines, omitted in _toc_sections(packet, skip_ids)
+        if lines or omitted
     ]
     header_cost = {title: len(title) + 12 for title, _, _ in sections}  # "## ", " (n of m)", blank line
     kept: dict[str, int] = {title: 0 for title, _, _ in sections}
@@ -379,11 +391,47 @@ def _harness():
 
 
 def emit(project_root: Path, session_id: str | None = None) -> str:
-    """Build the table-of-contents text for `project_root`, or "" if none.
+    """The session-start text for `project_root`, or "" if none.
 
-    Returns empty for an unenrolled project so the hook stays silent rather
-    than announcing itself in every repository on the machine.
+    The table of contents, then the hand-off block (`handoff_block`). Returns
+    empty for an unenrolled project so the hook stays silent rather than
+    announcing itself in every repository on the machine.
     """
+    text = _emit_toc(project_root, session_id)
+    if not text:
+        return ""
+    return text + handoff_block(project_root, session_id)
+
+
+def handoff_block(project_root: Path, session_id: str | None = None) -> str:
+    """Recent sessions' hand-off notes, pushed rather than left to be asked for.
+
+    Agents in the harness-value benchmark never called `memory_context` to
+    any effect, so retrieval that waits to be asked delivers nothing. The
+    block has its own budget (`harness.handoff.HANDOFF_MAX_CHARS`, 1,500;
+    `AGENT_HARNESS_HANDOFF_MAX_CHARS=0` turns it off) and never fails the
+    table of contents above it.
+    """
+    try:
+        _harness()
+        from harness import handoff
+
+        block = handoff.render_block(project_root, session_id)
+    except Exception:  # noqa: BLE001 -- see rule 1 in the module docstring
+        return ""
+    return "\n" + block if block else ""
+
+
+def _handoff_ids(project_root: Path, memory_store: Any) -> frozenset[str]:
+    try:
+        from harness import handoff
+
+        return frozenset(handoff.handoff_ids(memory_store.project_memory_dir(project_root)))
+    except Exception:  # noqa: BLE001 -- see rule 1 in the module docstring
+        return frozenset()
+
+
+def _emit_toc(project_root: Path, session_id: str | None = None) -> str:
     memory_context, memory_curation, memory_index, memory_store = _harness()
 
     if not (project_root / ".agent-harness").is_dir():
@@ -451,7 +499,7 @@ def emit(project_root: Path, session_id: str | None = None) -> str:
             # identity contract needs the id printed regardless.
             notice += f"_Session `{session_id}`: give it to work_start as `session`._\n"
         return notice
-    return render_toc(packet, max_chars, session_id)
+    return render_toc(packet, max_chars, session_id, _handoff_ids(project_root, memory_store))
 
 
 def record_session_start(project_root: Path, session_id: str, now: datetime | None = None) -> Path | None:
@@ -482,6 +530,43 @@ def record_session_start(project_root: Path, session_id: str, now: datetime | No
             "reported_tasks": [],
         },
     )
+
+
+def record_handoff_start(project_root: Path, session_id: str) -> bool:
+    """Snapshot the working tree so the hand-off hook can diff against it.
+
+    Separate from `record_session_start`, whose marker is HEAD only: work in
+    a session is usually uncommitted, and "files changed this session" needs
+    the working tree as it was. Fail-open like everything here.
+    """
+    try:
+        if not (project_root / ".agent-harness").is_dir():
+            return False
+        _harness()
+        from harness import handoff
+
+        return handoff.record_start(project_root, session_id) is not None
+    except Exception:  # noqa: BLE001 -- a snapshot is a nicety; the packet is the job
+        return False
+
+
+def start_daily_telemetry() -> bool:
+    """Start the once-a-day background telemetry `collect`, if it is due.
+
+    Spawns and returns at once; the collect itself runs detached, so this
+    adds a file read to session start, not a transcript scan. Runs for every
+    project, enrolled or not -- usage is per machine, not per repository.
+    With an export target set (`agent-harness-telemetry machine --export-to`)
+    the same run also exports there. AGENT_HARNESS_TELEMETRY_AUTO=0 turns it
+    off.
+    """
+    try:
+        _harness()
+        from harness import telemetry
+
+        return telemetry.maybe_start_daily_collect()
+    except Exception:  # noqa: BLE001 -- telemetry is a nicety; the packet is the job
+        return False
 
 
 def _payload() -> dict:
@@ -517,6 +602,8 @@ def main(argv: list[str] | None = None) -> int:
                 record_session_start(root, session_id)
             except Exception:  # noqa: BLE001 -- a marker is a nicety; the packet is the job
                 pass
+            record_handoff_start(root, session_id)
+        start_daily_telemetry()
         text = emit(root, session_id)
         if text:
             sys.stdout.write(text)

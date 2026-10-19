@@ -132,16 +132,19 @@ _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 @dataclass(frozen=True)
 class ExcludeResult:
-    """Outcome of `ensure_git_exclude` for one repository.
+    """Outcome of `ensure_git_exclude` (or `ensure_graph_git_exclude`) for
+    one repository.
 
     `status` is one of:
 
         not-git   the project is not inside a git repository; nothing done
+        tracked   git already tracks files there; nothing done (graph only)
         present   the exclusion was already there; nothing written
         added     the exclusion line was appended
         failed    the exclude file could not be read or written (see `note`)
 
-    `path` is the exclude file consulted, or None for ``not-git``.
+    `path` is the exclude file consulted, or None for ``not-git`` and
+    ``tracked``.
     """
 
     status: str
@@ -774,6 +777,14 @@ _EXCLUDE_COMMENT = (
     "# agent-harness memory is machine-local, never shared through git (ADR 0004)"
 )
 
+# The code graph's output directory (`graph_location.GRAPH_RELATIVE_PATH`'s
+# parent). Rebuilt per machine, so it is kept out of git the same private way.
+GRAPH_EXCLUDE_LINE = "graphify-out/"
+
+_GRAPH_EXCLUDE_COMMENT = (
+    "# agent-harness code graph is rebuilt per machine, never shared through git"
+)
+
 
 def _git_stdout(directory: Path, *args: str) -> str | None:
     """Run one fixed-shape git command; stdout on success, None otherwise.
@@ -819,20 +830,28 @@ def git_common_dir(project_root: Path) -> Path | None:
     return Path(out).resolve()
 
 
-def _exclusion_present(text: str) -> bool:
+def _exclusion_present(text: str, line: str = EXCLUDE_LINE) -> bool:
     """Whether some non-comment line of a git pattern file already covers
-    ``.agent-harness/``, in any of the spellings git treats the same way."""
+    the directory `line` names, in any of the spellings git treats the same
+    way (with or without leading and trailing slashes)."""
+    name = line.strip().strip("/")
     for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
+        candidate = raw.strip()
+        if not candidate or candidate.startswith("#"):
             continue
-        if line.lstrip("/").rstrip("/") == ".agent-harness":
+        if candidate.lstrip("/").rstrip("/") == name:
             return True
     return False
 
 
-def ensure_git_exclude(project_root: Path) -> ExcludeResult:
-    """Make sure the repository around `project_root` ignores ``.agent-harness/``.
+def ensure_git_exclude(
+    project_root: Path,
+    line: str = EXCLUDE_LINE,
+    comment: str = _EXCLUDE_COMMENT,
+) -> ExcludeResult:
+    """Make sure the repository around `project_root` ignores ``.agent-harness/``
+    -- or, given `line` and `comment`, another directory the harness writes
+    beside the project (enroll passes ``graphify-out/`` this way).
 
     The line goes into the repository's private ``.git/info/exclude`` and
     never into ``.gitignore``: the exclusion itself must not surface as a
@@ -852,16 +871,34 @@ def ensure_git_exclude(project_root: Path) -> ExcludeResult:
     exclude = git_dir / "info" / "exclude"
     try:
         existing = exclude.read_text(encoding="utf-8") if exclude.is_file() else ""
-        if _exclusion_present(existing):
+        if _exclusion_present(existing, line):
             return ExcludeResult("present", exclude)
         exclude.parent.mkdir(parents=True, exist_ok=True)
         with exclude.open("a", encoding="utf-8") as fh:
             if existing and not existing.endswith("\n"):
                 fh.write("\n")
-            fh.write(f"{_EXCLUDE_COMMENT}\n{EXCLUDE_LINE}\n")
+            fh.write(f"{comment}\n{line}\n")
     except OSError as exc:
         return ExcludeResult("failed", exclude, f"could not update {exclude}: {exc}")
     return ExcludeResult("added", exclude)
+
+
+def ensure_graph_git_exclude(project_root: Path) -> ExcludeResult:
+    """List ``graphify-out/`` in the repository's ``.git/info/exclude``.
+
+    The single path through which enroll and install keep the graph's build
+    output out of git -- never through ``.gitignore``, for ADR 0004's reason.
+    Returns ``tracked`` without writing when git already tracks anything
+    under ``graphify-out/``: that project has chosen to commit its graph,
+    and an exclude line would only hide newly added outputs from the people
+    reviewing them. Graph health never depends on this line --
+    `graph_location.git_is_dirty` ignores the directory either way.
+
+    Never raises; see `ensure_git_exclude`.
+    """
+    if tracked_files(project_root, GRAPH_EXCLUDE_LINE.rstrip("/")):
+        return ExcludeResult("tracked")
+    return ensure_git_exclude(project_root, GRAPH_EXCLUDE_LINE, _GRAPH_EXCLUDE_COMMENT)
 
 
 def tracked_memory_files(project_root: Path) -> tuple[str, ...]:
@@ -873,10 +910,16 @@ def tracked_memory_files(project_root: Path) -> tuple[str, ...]:
     someone runs ``git rm -r --cached .agent-harness`` -- a visible history
     change this module deliberately never performs on the caller's behalf.
     """
+    return tracked_files(project_root, ".agent-harness")
+
+
+def tracked_files(project_root: Path, relative_dir: str) -> tuple[str, ...]:
+    """Paths under `relative_dir` (relative to `project_root`) that git
+    currently tracks or has staged; empty when none or not a repo."""
     root = Path(project_root)
     if not (root / ".git").exists():
         return ()
-    out = _git_stdout(root, "ls-files", "-z", "--", ".agent-harness")
+    out = _git_stdout(root, "ls-files", "-z", "--", relative_dir)
     if not out:
         return ()
     return tuple(p for p in out.split("\0") if p)
