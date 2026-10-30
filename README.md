@@ -400,6 +400,58 @@ Antigravity receives a standards-shaped `mcp_config.json` inside its global
 plugin together with the guarded context hook. Gemini CLI is not configured
 by this release; use `GEMINI.md` / `AGENTS.md` as its portable fallback.
 
+## MCP gate: heavy servers on demand (optional)
+
+Every agent session starts its own copy of every MCP server registered for
+it, and keeps it running whether or not a tool is ever called. With many
+sessions open, browser and file-system servers (and their `npx` wrappers)
+hold gigabytes of RAM while idle. `agent-harness-gate` is one small stdio MCP
+server that stands in for them:
+
+- **asleep by default** -- tools are advertised from a cached manifest, so
+  listing them starts nothing;
+- **wakes on first use** -- the first call to `<server>__<tool>` starts that
+  server and forwards the call unchanged;
+- **back to sleep when idle** -- after `idle_timeout_seconds` without a call
+  the server's process tree is stopped; the next call starts it again;
+- **manual control** -- `gate_status`, `gate_open`, and `gate_close` tools.
+
+Move a server out of the agent's own MCP config and into
+`~/.agent-harness/gate.json` (or the file named by
+`AGENT_HARNESS_GATE_CONFIG`). Entries use the same `command`/`args`/`env`
+an agent config holds:
+
+```json
+{
+  "idle_timeout_seconds": 600,
+  "servers": {
+    "playwright": {
+      "command": "npx",
+      "args": ["@playwright/mcp@latest"],
+      "description": "browser automation",
+      "idle_timeout_seconds": 300
+    }
+  }
+}
+```
+
+Server names are lowercase words joined by single hyphens. Capture each
+server's tool list once, then register the gate with your clients in place
+of the servers it now fronts:
+
+```bash
+agent-harness-gate warm              # wake each server once, cache its tools
+agent-harness-gate status            # what is configured and cached
+claude mcp add --scope user gate -- agent-harness-gate serve
+codex mcp add gate -- agent-harness-gate serve
+```
+
+A server with no cached manifest is still reachable: `gate_open` wakes it,
+caches its tools, and the gate sends `tools/list_changed` so the client
+re-lists. The gate is still one process per session, but it replaces every
+server it fronts with a single lightweight Python process until a tool is
+actually used.
+
 ## The blueprint gate
 
 This is an **advisory convention**, not a technical control -- nothing in

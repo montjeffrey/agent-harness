@@ -60,6 +60,15 @@ pushed tag `vX.Y.Z` doesn't match) before anything is published.
   `collect --then-export`, which exports under the collect lock and records
   its outcome for `machine` to show, so synced folders fill hands-off.
 
+
+- On-demand MCP gate (`agent-harness-gate`, `harness.mcp_gate`): one small
+  stdio MCP server that fronts heavy MCP servers configured in
+  `~/.agent-harness/gate.json`. Their tools are advertised from a cached
+  manifest without starting them; the first `<server>__<tool>` call starts the
+  server, and it is stopped again after `idle_timeout_seconds` idle.
+  `gate_status` / `gate_open` / `gate_close` give manual control, `warm`
+  captures manifests, and a ping before each forwarded call restarts a
+  downstream that died.
 - Evidence-bounded automatic memory curation: SessionStart and
   `memory_context` now verify and accept unchanged ingested document pointers,
   reject exact duplicate proposals, and expose only the remaining exception
