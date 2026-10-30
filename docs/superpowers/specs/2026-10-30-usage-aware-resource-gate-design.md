@@ -1,6 +1,6 @@
 # Usage-aware resource gate — design
 
-Status: Draft — pending approval (phase 1 only)
+Status: Phase 1 approved and built (2026-10-30); phases 2 and 3 not started
 Date: 2026-10-30
 Builds on: `harness/mcp_gate.py` (on-demand MCP gate, branch `claude/work-20261029-d98e59c8`)
 
@@ -133,6 +133,21 @@ recommendations from a synthetic telemetry file.
   accounting in `harness.gate_runtime`. The command line lives in
   `harness.gate_cli`, which `harness.mcp_gate.main` delegates to. This keeps
   each file under 800 lines. `harness.mcp_gate` re-exports the config names.
+- **Tree walks fail closed.** Windows never updates a process's recorded
+  parent PID, so a long-lived process can name a parent that died long ago.
+  A node that cannot be read is neither admitted nor walked through, a child
+  older than its parent is not admitted, and the root's identity is checked
+  again after the process-table snapshot.
+- **Known residual race.** Between the snapshot and the identity probe, a
+  real child can exit and an unrelated, newer process can take its PID. That
+  newcomer passes the age check and would be recorded, and could be
+  terminated at stop. Closing this needs the PID to be reused within a few
+  milliseconds; a tree-membership check alone cannot rule it out.
+- **Long home paths.** The crash registry is written through a temp sibling
+  whose name adds about 75 characters. On Windows without long-path support,
+  a home directory deeper than about 120 characters pushes it past MAX_PATH:
+  the write fails with one stderr line and crash cleanup is off for that
+  gate. A normal `C:\Users\<name>` home is well inside the limit.
 
 ## Phase 2 — machine-wide broker for shareable servers
 
