@@ -17,11 +17,16 @@ The gate is one small stdio MCP server that stands in for all of them:
   process tree and all, and wakes again on the next call.
 * **Manual control.** `gate_status`, `gate_open`, and `gate_close` let an
   agent (or a person) see and drive the state explicitly.
+* **Pressure, accounting, verified cleanup.** Below the machine's free-RAM
+  watermarks idle servers are stopped sooner (or at once); every wake, call,
+  and stop is recorded with the downstream tree's memory; a stop is checked
+  until the whole tree is gone (see `harness.gate_runtime`).
 
 Configuration lives in `~/.agent-harness/gate.json` (or the path named by
-`AGENT_HARNESS_GATE_CONFIG`); each entry is the same `command`/`args`/`env`
-triple an agent's own MCP config would hold. The server works with any MCP
-client -- Claude Code, Codex, Gemini -- because it is an ordinary stdio server.
+`AGENT_HARNESS_GATE_CONFIG`; see `harness.gate_config`); each entry is the same
+`command`/`args`/`env` triple an agent's own MCP config would hold. The server
+works with any MCP client -- Claude Code, Codex, Gemini -- because it is an
+ordinary stdio server.
 
 Like `harness.mcp_server`, importing this module never requires the optional
 `mcp` SDK: every `mcp`/`anyio` import is local, so `main` can explain a missing
@@ -30,30 +35,60 @@ extra instead of crashing on import.
 
 from __future__ import annotations
 
-import argparse
-import hashlib
 import json
-import math
 import os
-import re
 import sys
 import time
-from collections.abc import AsyncIterator, Mapping
-from contextlib import asynccontextmanager
-from dataclasses import dataclass
-from datetime import UTC, datetime
+from collections.abc import AsyncIterator, Callable, Mapping
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from harness.atomicwrite import atomic_sibling
+from harness import gate_runtime
+from harness.gate_config import (
+    CONFIG_ENV,
+    CONTROL_TOOLS,
+    DEFAULT_CALL_TIMEOUT_SECONDS,
+    DEFAULT_IDLE_TIMEOUT_SECONDS,
+    DEFAULT_MIN_IDLE_SECONDS,
+    DEFAULT_STARTUP_TIMEOUT_SECONDS,
+    SEPARATOR,
+    GateConfig,
+    GateConfigError,
+    ManifestCache,
+    ServerSpec,
+    default_config_path,
+    load_config,
+    public_name,
+    split_public_name,
+)
 
-CONFIG_ENV = "AGENT_HARNESS_GATE_CONFIG"
-SEPARATOR = "__"
-DEFAULT_IDLE_TIMEOUT_SECONDS = 600.0
-DEFAULT_STARTUP_TIMEOUT_SECONDS = 60.0
-# A live but wedged downstream must not hold a call (and, through `inflight`,
-# the reaper) forever. Generous because browser tools legitimately run long.
-DEFAULT_CALL_TIMEOUT_SECONDS = 900.0
+# Config lives in `harness.gate_config`; these names are re-exported so
+# existing callers of `harness.mcp_gate` keep working.
+__all__ = [
+    "CONFIG_ENV",
+    "CONTROL_TOOLS",
+    "DEFAULT_CALL_TIMEOUT_SECONDS",
+    "DEFAULT_IDLE_TIMEOUT_SECONDS",
+    "DEFAULT_MIN_IDLE_SECONDS",
+    "DEFAULT_STARTUP_TIMEOUT_SECONDS",
+    "SEPARATOR",
+    "Gate",
+    "GateConfig",
+    "GateConfigError",
+    "GateError",
+    "ManifestCache",
+    "ServerSpec",
+    "build_server",
+    "default_config_path",
+    "load_config",
+    "main",
+    "public_name",
+    "serve",
+    "split_public_name",
+    "warm",
+]
+
 # A killed downstream does not always surface as EOF on Windows: measured
 # 2026-10-29, the SDK's stdout reader stayed parked after `taskkill /F`, so a
 # forwarded call waited forever. A ping before each call is answered in
@@ -72,201 +107,9 @@ MIN_REAP_INTERVAL_SECONDS = 0.05
 CLIENT_TOOL_NAME_LIMIT = 64
 CLIENT_PREFIX_ESTIMATE = len("mcp__gate__")
 
-CONTROL_TOOLS = ("gate_status", "gate_open", "gate_close")
-_SERVER_KEYS = frozenset(
-    {
-        "command",
-        "args",
-        "env",
-        "cwd",
-        "description",
-        "idle_timeout_seconds",
-        "startup_timeout_seconds",
-        "call_timeout_seconds",
-    }
-)
-
-# Lowercase words joined by single hyphens. No underscores at all, so a
-# server name can never contain SEPARATOR and `split_public_name` stays exact
-# even when the downstream tool's own name contains "__".
-_SERVER_NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
-
-
-class GateConfigError(ValueError):
-    """The gate configuration file is unreadable or describes an invalid server."""
-
 
 class GateError(RuntimeError):
     """A gate operation was asked for something that does not exist."""
-
-
-@dataclass(frozen=True)
-class ServerSpec:
-    """One gated downstream server, exactly as an agent's MCP config would launch it."""
-
-    name: str
-    command: str
-    args: tuple[str, ...] = ()
-    env: tuple[tuple[str, str], ...] = ()
-    cwd: str | None = None
-    description: str = ""
-    idle_timeout_seconds: float = DEFAULT_IDLE_TIMEOUT_SECONDS
-    startup_timeout_seconds: float = DEFAULT_STARTUP_TIMEOUT_SECONDS
-    call_timeout_seconds: float = DEFAULT_CALL_TIMEOUT_SECONDS
-
-    def digest(self) -> str:
-        """Identity of the launch command; a cached manifest is valid only for this."""
-        payload = json.dumps([self.command, list(self.args), list(self.env), self.cwd])
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
-@dataclass(frozen=True)
-class GateConfig:
-    servers: dict[str, ServerSpec]
-    cache_dir: Path
-    idle_timeout_seconds: float = DEFAULT_IDLE_TIMEOUT_SECONDS
-
-
-def default_config_path() -> Path:
-    override = os.environ.get(CONFIG_ENV)
-    if override:
-        return Path(override).expanduser()
-    return Path.home() / ".agent-harness" / "gate.json"
-
-
-def _positive_number(value: Any, where: str) -> float:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(value)
-        or value <= 0
-    ):
-        raise GateConfigError(f"{where} must be a positive number, got {value!r}")
-    return float(value)
-
-
-def _parse_server(name: str, entry: Any, default_idle: float, base_dir: Path) -> ServerSpec:
-    where = f"gate server '{name}'"
-    if not _SERVER_NAME.match(name):
-        raise GateConfigError(
-            f"{where}: name must be lowercase letters, digits, and single hyphens"
-        )
-    if not isinstance(entry, Mapping):
-        raise GateConfigError(f"{where}: entry must be an object")
-    unknown = sorted(set(entry) - _SERVER_KEYS)
-    if unknown:
-        raise GateConfigError(
-            f"{where}: unknown keys {', '.join(unknown)} (allowed: {', '.join(sorted(_SERVER_KEYS))})"
-        )
-    command = entry.get("command")
-    if not isinstance(command, str) or not command:
-        raise GateConfigError(f"{where}: 'command' must be a non-empty string")
-    args = entry.get("args", [])
-    if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
-        raise GateConfigError(f"{where}: 'args' must be a list of strings")
-    env = entry.get("env", {})
-    if not isinstance(env, Mapping) or not all(
-        isinstance(k, str) and isinstance(v, str) for k, v in env.items()
-    ):
-        raise GateConfigError(f"{where}: 'env' must map strings to strings")
-    cwd = entry.get("cwd")
-    if cwd is not None and not isinstance(cwd, str):
-        raise GateConfigError(f"{where}: 'cwd' must be a string")
-    if cwd is not None and not Path(cwd).is_absolute():
-        # Relative to the config file, not to whichever folder the agent
-        # happened to launch the gate from.
-        cwd = os.path.normpath(base_dir / cwd)
-    description = entry.get("description", "")
-    if not isinstance(description, str):
-        raise GateConfigError(f"{where}: 'description' must be a string")
-    idle = entry.get("idle_timeout_seconds", default_idle)
-    startup = entry.get("startup_timeout_seconds", DEFAULT_STARTUP_TIMEOUT_SECONDS)
-    call = entry.get("call_timeout_seconds", DEFAULT_CALL_TIMEOUT_SECONDS)
-    return ServerSpec(
-        name=name,
-        command=command,
-        args=tuple(args),
-        env=tuple(sorted(env.items())),
-        cwd=cwd,
-        description=description,
-        idle_timeout_seconds=_positive_number(idle, f"{where}: 'idle_timeout_seconds'"),
-        startup_timeout_seconds=_positive_number(
-            startup, f"{where}: 'startup_timeout_seconds'"
-        ),
-        call_timeout_seconds=_positive_number(call, f"{where}: 'call_timeout_seconds'"),
-    )
-
-
-def load_config(path: Path | None = None, cache_dir: Path | None = None) -> GateConfig:
-    """Read the gate config. A missing file is a valid, empty gate."""
-    path = Path(path) if path is not None else default_config_path()
-    cache_dir = Path(cache_dir) if cache_dir is not None else path.parent / "gate-cache"
-    if not path.is_file():
-        return GateConfig(servers={}, cache_dir=cache_dir)
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise GateConfigError(f"gate config {path} is unreadable: {exc}") from exc
-    if not isinstance(data, Mapping):
-        raise GateConfigError(f"gate config {path} must be a JSON object")
-    default_idle = _positive_number(
-        data.get("idle_timeout_seconds", DEFAULT_IDLE_TIMEOUT_SECONDS),
-        "'idle_timeout_seconds'",
-    )
-    servers = data.get("servers", {})
-    if not isinstance(servers, Mapping):
-        raise GateConfigError(f"gate config {path}: 'servers' must be an object")
-    parsed = {
-        name: _parse_server(name, entry, default_idle, path.parent)
-        for name, entry in servers.items()
-    }
-    return GateConfig(servers=parsed, cache_dir=cache_dir, idle_timeout_seconds=default_idle)
-
-
-def public_name(server: str, tool: str) -> str:
-    return f"{server}{SEPARATOR}{tool}"
-
-
-def split_public_name(name: str) -> tuple[str, str] | None:
-    server, sep, tool = name.partition(SEPARATOR)
-    if not sep or not server or not tool:
-        return None
-    return server, tool
-
-
-class ManifestCache:
-    """Each gated server's tool list on disk, so listing tools starts nothing."""
-
-    def __init__(self, directory: Path) -> None:
-        self.directory = Path(directory)
-
-    def _path(self, spec: ServerSpec) -> Path:
-        return self.directory / f"{spec.name}.json"
-
-    def load(self, spec: ServerSpec) -> list[dict] | None:
-        try:
-            data = json.loads(self._path(spec).read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            return None
-        if not isinstance(data, Mapping) or data.get("digest") != spec.digest():
-            return None
-        tools = data.get("tools")
-        if not isinstance(tools, list) or not all(
-            isinstance(t, Mapping) and isinstance(t.get("name"), str) for t in tools
-        ):
-            return None
-        return tools
-
-    def store(self, spec: ServerSpec, tools: list[dict]) -> None:
-        self.directory.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "digest": spec.digest(),
-            "captured_at": datetime.now(UTC).isoformat(timespec="seconds"),
-            "tools": tools,
-        }
-        target = self._path(spec)
-        with atomic_sibling(target) as tmp:
-            tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def _describe(exc: BaseException) -> str:
@@ -310,9 +153,18 @@ class _Downstream:
     The client session is entered and exited inside a single runner task,
     because anyio cancel scopes must be left by the task that entered them. A
     call from any other task only uses the live session object.
+
+    `account` follows each awake period, from wake to verified stop: the root
+    process the gate launched, its tree, and the calls it served.
     """
 
-    def __init__(self, spec: ServerSpec, cache: ManifestCache, task_group: Any) -> None:
+    def __init__(
+        self,
+        spec: ServerSpec,
+        cache: ManifestCache,
+        task_group: Any,
+        runtime: gate_runtime.GateRuntime,
+    ) -> None:
         import anyio
 
         self.spec = spec
@@ -327,6 +179,7 @@ class _Downstream:
         self.last_used = time.monotonic()
         self.last_error: str | None = None
         self._failed_at: float | None = None
+        self.account = gate_runtime.ServerAccount(spec.name, runtime)
 
     @property
     def awake(self) -> bool:
@@ -349,7 +202,7 @@ class _Downstream:
             raise GateError(f"gated server '{self.spec.name}' is asleep")
         return self._session
 
-    async def wake(self, *, force: bool = False) -> bool:
+    async def wake(self, *, force: bool = False, reason: str = "call") -> bool:
         """Start the server if it is asleep. Returns True when its tool list changed.
 
         Within FAILURE_BACKOFF_SECONDS of a failed start this raises GateError
@@ -365,6 +218,7 @@ class _Downstream:
                 raise GateError(
                     f"gated server '{self.spec.name}' is still stopping ({self.last_error})"
                 )
+            await self.account.finish("dead")  # a runner that unwound on its own
             if (
                 not force
                 and self._failed_at is not None
@@ -379,21 +233,43 @@ class _Downstream:
             self._stop = anyio.Event()
             self._stopped = anyio.Event()
             timeout = self.spec.startup_timeout_seconds
+            started = time.monotonic()
             try:
                 with anyio.fail_after(timeout):
                     await self._task_group.start(self._run)
-            except TimeoutError:
-                self._failed_at = time.monotonic()
-                self.last_error = f"did not start within {timeout:g}s ({self.spec.command})"
-                raise GateError(f"gated server '{self.spec.name}' {self.last_error}") from None
             except Exception as exc:
+                timed_out = isinstance(exc, TimeoutError)
                 self._failed_at = time.monotonic()
-                self.last_error = _describe(exc)
+                self.last_error = (
+                    f"did not start within {timeout:g}s ({self.spec.command})"
+                    if timed_out
+                    else _describe(exc)
+                )
+                self.account.start_failed(started, reason, self.last_error)
+                if timed_out:
+                    raise GateError(f"gated server '{self.spec.name}' {self.last_error}") from None
                 raise
             self._failed_at = None
             self.last_error = None
             self.last_used = time.monotonic()
+            await self.account.begin(reason, started)
             return self.tools != before
+
+    async def refresh_tree(self) -> None:
+        """Re-record the awake tree for crash cleanup; skipped while a wake or stop runs."""
+        if self._lock.locked() or not self.awake:
+            return
+        async with self._lock:
+            if self.awake:
+                await self.account.refresh()
+
+    async def finish_if_dead(self) -> None:
+        """Account for a server whose process exited without being asked to stop."""
+        if not self.stopped or self.account.woke_at is None or self._lock.locked():
+            return
+        async with self._lock:
+            if self.stopped:
+                await self.account.finish("dead")
 
     async def ping(self) -> bool:
         """True when the awake server answers a ping within PING_TIMEOUT_SECONDS."""
@@ -422,7 +298,9 @@ class _Downstream:
         )
         started = False
         try:
-            async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
+            async with AsyncExitStack() as stack:
+                read, write = await self.account.spawn(stack, stdio_client(params))
+                session = await stack.enter_async_context(ClientSession(read, write))
                 await session.initialize()
                 tools: list[dict] = []
                 cursor: str | None = None
@@ -456,31 +334,43 @@ class _Downstream:
             self._session = None
             self._stopped.set()
 
-    def is_idle(self, now: float) -> bool:
-        return self.inflight == 0 and now - self.last_used >= self.spec.idle_timeout_seconds
+    def is_idle(self, now: float, idle: float | None = None) -> bool:
+        """No call in flight and unused for `idle` seconds (default: the configured timeout)."""
+        limit = self.spec.idle_timeout_seconds if idle is None else idle
+        return self.inflight == 0 and now - self.last_used >= limit
 
-    async def sleep(self, *, only_if_idle: bool = False) -> None:
+    async def sleep(
+        self, *, reason: str = "manual", only_if_idle: bool = False, idle: float | None = None
+    ) -> None:
         """Stop the server (process tree included). A no-op when already asleep.
 
-        `only_if_idle` re-checks idleness under the lock: the reaper decides
-        before it gets the lock, and a call may have started in between.
+        `only_if_idle` re-checks idleness (against `idle`) under the lock: the
+        reaper decides before it gets the lock, and a call may have started in
+        between. The tree is sampled just before the stop, so children spawned
+        after the wake are verified too.
         """
         import anyio
 
         async with self._lock:
             if self._session is None:
+                await self.account.finish("dead")
                 return
-            if only_if_idle and not self.is_idle(time.monotonic()):
+            if only_if_idle and not self.is_idle(time.monotonic(), idle):
                 return
+            tree, tree_mb = await self.account.sample(self.account.tree)
             self._stop.set()
             with anyio.move_on_after(STOP_WAIT_SECONDS):
                 await self._stopped.wait()
             if self._session is not None:
                 self.last_error = f"did not stop within {STOP_WAIT_SECONDS:g}s"
+            await self.account.finish(reason, tree, tree_mb)
 
 
 def _default_reap_interval(config: GateConfig) -> float:
     timeouts = [spec.idle_timeout_seconds for spec in config.servers.values()]
+    if timeouts:
+        # Under low memory the shorter `min_idle_seconds` applies instead.
+        timeouts.append(config.min_idle_seconds)
     smallest = min(timeouts, default=MAX_REAP_INTERVAL_SECONDS * 2)
     return max(MIN_REAP_INTERVAL_SECONDS, min(MAX_REAP_INTERVAL_SECONDS, smallest / 2))
 
@@ -488,34 +378,66 @@ def _default_reap_interval(config: GateConfig) -> float:
 class Gate:
     """All gated servers for one agent session."""
 
-    def __init__(self, config: GateConfig, task_group: Any, *, reap_interval: float) -> None:
+    def __init__(
+        self,
+        config: GateConfig,
+        task_group: Any,
+        *,
+        reap_interval: float,
+        runtime: gate_runtime.GateRuntime,
+    ) -> None:
         cache = ManifestCache(config.cache_dir)
         self.config = config
         self._reap_interval = reap_interval
+        self._runtime = runtime
         self._tools_changed = False
         self._warned_long_names: set[str] = set()
         self._downstreams = {
-            name: _Downstream(spec, cache, task_group)
+            name: _Downstream(spec, cache, task_group, runtime)
             for name, spec in sorted(config.servers.items())
         }
 
     @classmethod
     @asynccontextmanager
     async def running(
-        cls, config: GateConfig, *, reap_interval: float | None = None
+        cls,
+        config: GateConfig,
+        *,
+        reap_interval: float | None = None,
+        memory_sampler: Callable[[], int | None] | None = None,
+        total_memory: Any = gate_runtime.UNSET,
+        ledger: Any = None,
+        registry_dir: Path | None = None,
     ) -> AsyncIterator[Gate]:
-        """Run a gate; on exit every awake server is stopped."""
+        """Run a gate; on exit every awake server is stopped.
+
+        Starting first sweeps processes that a crashed gate left running. The
+        keywords after `reap_interval` are seams (defaults in parentheses): a
+        free-RAM sampler (`procinfo.available_memory_bytes`), total RAM for
+        the tier (what `load_config` saw), a `GateLedger` (the telemetry
+        folder), and the PID registry folder (`~/.agent-harness/gate-state`).
+        """
         import anyio
 
         interval = reap_interval if reap_interval is not None else _default_reap_interval(config)
+        runtime = await gate_runtime.GateRuntime.start(
+            config,
+            memory_sampler=memory_sampler,
+            total_memory=total_memory,
+            ledger=ledger,
+            registry_dir=registry_dir,
+        )
         async with anyio.create_task_group() as task_group:
-            gate = cls(config, task_group, reap_interval=interval)
+            gate = cls(config, task_group, reap_interval=interval, runtime=runtime)
             task_group.start_soon(gate._reap_forever)
             try:
                 yield gate
             finally:
                 with anyio.CancelScope(shield=True):
-                    await gate.close_all()
+                    try:
+                        await gate.close_all()
+                    finally:
+                        runtime.close()
                 task_group.cancel_scope.cancel()
 
     # ------------------------------------------------------------ lifecycle
@@ -532,39 +454,58 @@ class Gate:
 
         while True:
             await anyio.sleep(self._reap_interval)
-            await self.reap(time.monotonic())
+            try:
+                await self.reap(time.monotonic())
+            except Exception as exc:  # noqa: BLE001 -- one bad tick must not end the gate
+                gate_runtime.warn(f"reaper tick failed: {_describe(exc)}")
 
     async def reap(self, now: float) -> None:
-        """Stop every awake server that has been idle past its timeout."""
-        for downstream in self._downstreams.values():
-            if downstream.awake and downstream.is_idle(now):
-                await downstream.sleep(only_if_idle=True)
+        """Stop every awake server idle past its effective timeout.
 
-    async def open_server(self, server: str) -> str:
+        Free RAM is sampled first: below the low watermark the timeout drops
+        to `min_idle_seconds`, below the critical one to zero, so every awake
+        server with no call in flight stops now (reason "pressure").
+        """
+        await self._runtime.sample_pressure()
+        for downstream in self._downstreams.values():
+            if not downstream.awake:
+                await downstream.finish_if_dead()
+                continue
+            idle = self._runtime.effective_idle(downstream.spec.idle_timeout_seconds)
+            if downstream.is_idle(now, idle):
+                reason = "idle" if downstream.is_idle(now) else "pressure"
+                await downstream.sleep(reason=reason, only_if_idle=True, idle=idle)
+            else:
+                await downstream.refresh_tree()
+
+    async def open_server(self, server: str, *, reason: str = "open") -> str:
         downstream = self._get(server)
-        if await downstream.wake(force=True):
+        if await downstream.wake(force=True, reason=reason):
             self._tools_changed = True
         count = len(downstream.tools or [])
-        return (
-            f"'{server}' is awake with {count} tools; it goes back to sleep after "
-            f"{downstream.spec.idle_timeout_seconds:g}s idle."
-        )
+        idle = self._runtime.effective_idle(downstream.spec.idle_timeout_seconds)
+        return f"'{server}' is awake with {count} tools; it goes back to sleep after {idle:g}s idle."
 
     async def close_server(self, server: str) -> str:
         downstream = self._get(server)
-        await downstream.sleep()
+        await downstream.sleep(reason="manual")
         if not downstream.stopped:
             raise GateError(f"'{server}' {downstream.last_error}; it is still stopping")
         return f"'{server}' is asleep."
 
     async def close_all(self) -> None:
         for downstream in self._downstreams.values():
-            await downstream.sleep()
+            await downstream.sleep(reason="exit")
 
     def pop_tools_changed(self) -> bool:
         """True once after any wake changed an advertised tool list."""
         changed, self._tools_changed = self._tools_changed, False
         return changed
+
+    def note_client(self, session: Any) -> None:
+        """Label accounting records with the MCP client's name (best effort)."""
+        info = getattr(getattr(session, "client_params", None), "clientInfo", None)
+        self._runtime.set_client(getattr(info, "name", None))
 
     def status(self) -> list[dict]:
         now = time.monotonic()
@@ -575,10 +516,22 @@ class Gate:
                 "tools": None if downstream.tools is None else len(downstream.tools),
                 "idle_seconds": round(now - downstream.last_used, 1) if downstream.awake else None,
                 "idle_timeout_seconds": downstream.spec.idle_timeout_seconds,
+                "effective_idle_seconds": self._runtime.effective_idle(
+                    downstream.spec.idle_timeout_seconds
+                ),
+                "tree_mb": downstream.account.tree_mb if downstream.awake else None,
                 "last_error": downstream.last_error,
             }
             for name, downstream in self._downstreams.items()
         ]
+
+    async def status_report(self) -> dict:
+        """`gate_status`: machine tier and pressure, then each server with fresh tree MB."""
+        await self._runtime.sample_pressure()
+        for downstream in self._downstreams.values():
+            if downstream.awake:
+                await downstream.account.sample_mb()
+        return {"summary": self._runtime.summary(), "servers": self.status()}
 
     # ---------------------------------------------------------------- tools
 
@@ -658,7 +611,7 @@ class Gate:
     async def call_tool(self, name: str, arguments: Mapping[str, Any]) -> Any:
         try:
             if name == "gate_status":
-                return _text_result(json.dumps(self.status(), indent=2))
+                return _text_result(json.dumps(await self.status_report(), indent=2))
             if name == "gate_open":
                 return _text_result(await self.open_server(str(arguments.get("server", ""))))
             if name == "gate_close":
@@ -675,51 +628,75 @@ class Gate:
         return await self._forward(self._downstreams[server], tool, dict(arguments))
 
     async def _forward(self, downstream: _Downstream, tool: str, arguments: dict) -> Any:
-        """Wake if needed, check the server answers, forward; restart once if it died."""
-        import anyio
-
-        server = downstream.spec.name
+        """Forward one call and account for it (`gate_call`) once it has an outcome."""
+        started = time.monotonic()
         downstream.inflight += 1
         try:
-            for attempt in (1, 2):
-                try:
-                    if await downstream.wake():
-                        self._tools_changed = True
-                except GateError as exc:
-                    return _error_result(str(exc))
-                except Exception as exc:  # noqa: BLE001 -- reported to the caller, not raised
-                    return _error_result(
-                        f"gated server '{server}' failed to start: {_describe(exc)}"
-                    )
-                if tool not in {record["name"] for record in downstream.tools or []}:
-                    return _error_result(f"gated server '{server}' has no tool '{tool}'")
-                # A dead server is safe to restart: nothing was sent to it yet.
-                if not await downstream.ping():
-                    downstream.last_error = "stopped answering; restarted"
-                    await downstream.sleep()
-                    continue
-                timeout = downstream.spec.call_timeout_seconds
-                try:
-                    with anyio.fail_after(timeout):
-                        return await downstream.session.call_tool(tool, arguments)
-                except TimeoutError:
-                    downstream.last_error = f"call to '{tool}' exceeded {timeout:g}s"
-                    await downstream.sleep()
-                    return _error_result(
-                        f"gated server '{server}' did not answer '{tool}' within {timeout:g}s "
-                        "and was stopped"
-                    )
-                except Exception as exc:  # noqa: BLE001 -- classified below
-                    if not _is_transport_failure(exc):
-                        return _error_result(f"gated server '{server}' error: {_describe(exc)}")
-                    downstream.last_error = _describe(exc)
-                    await downstream.sleep()
-                    # The request may already have run, so it is not retried.
-                    return _error_result(f"gated server '{server}' failed: {downstream.last_error}")
-            return _error_result(f"gated server '{server}' is not answering after a restart")
+            result, error_kind = await self._dispatch(downstream, tool, arguments)
         finally:
             downstream.inflight -= 1
             downstream.last_used = time.monotonic()
+        if error_kind is None and getattr(result, "isError", False):
+            error_kind = "server_error"
+        self._runtime.record(
+            "gate_call", downstream.spec.name,
+            tool=tool,
+            duration_ms=gate_runtime.ms_since(started),
+            ok=error_kind is None,
+            error_kind=error_kind,
+        )
+        return result
+
+    async def _dispatch(
+        self, downstream: _Downstream, tool: str, arguments: dict
+    ) -> tuple[Any, str | None]:
+        """Wake if needed, check the server answers, forward; restart once if it died.
+
+        Returns the result and its error kind (None when the call went through).
+        """
+        import anyio
+
+        server = downstream.spec.name
+        for _attempt in (1, 2):
+            try:
+                if await downstream.wake():
+                    self._tools_changed = True
+            except GateError as exc:
+                return _error_result(str(exc)), "start_failed"
+            except Exception as exc:  # noqa: BLE001 -- reported to the caller, not raised
+                message = f"gated server '{server}' failed to start: {_describe(exc)}"
+                return _error_result(message), "start_failed"
+            if tool not in {record["name"] for record in downstream.tools or []}:
+                return _error_result(f"gated server '{server}' has no tool '{tool}'"), "not_found"
+            # A dead server is safe to restart: nothing was sent to it yet.
+            if not await downstream.ping():
+                downstream.last_error = "stopped answering; restarted"
+                await downstream.sleep(reason="dead")
+                continue
+            timeout = downstream.spec.call_timeout_seconds
+            downstream.account.calls += 1
+            try:
+                with anyio.fail_after(timeout):
+                    return await downstream.session.call_tool(tool, arguments), None
+            except TimeoutError:
+                downstream.last_error = f"call to '{tool}' exceeded {timeout:g}s"
+                await downstream.sleep(reason="timeout")
+                message = (
+                    f"gated server '{server}' did not answer '{tool}' within {timeout:g}s "
+                    "and was stopped"
+                )
+                return _error_result(message), "timeout"
+            except Exception as exc:  # noqa: BLE001 -- classified below
+                if not _is_transport_failure(exc):
+                    message = f"gated server '{server}' error: {_describe(exc)}"
+                    return _error_result(message), "server_error"
+                downstream.last_error = _describe(exc)
+                await downstream.sleep(reason="transport")
+                # The request may already have run, so it is not retried.
+                message = f"gated server '{server}' failed: {downstream.last_error}"
+                return _error_result(message), "transport"
+        message = f"gated server '{server}' is not answering after a restart"
+        return _error_result(message), "transport"
 
 
 def _text_result(text: str) -> Any:
@@ -761,6 +738,7 @@ def build_server(gate: Gate) -> Any:
 
     @call_tool_decorator
     async def _call_tool(name: str, arguments: dict[str, Any] | None) -> Any:
+        gate_runtime.safely("client name", None, lambda: gate.note_client(server.request_context.session))
         result = await gate.call_tool(name, arguments or {})
         if gate.pop_tools_changed():
             try:
@@ -794,83 +772,19 @@ async def warm(config: GateConfig, names: list[str]) -> list[tuple[bool, str]]:
     outcomes = []
     async with Gate.running(config) as gate:
         for name in names:
-            result = await gate.call_tool("gate_open", {"server": name})
-            outcomes.append((not result.isError, result.content[0].text))
+            try:
+                outcomes.append((True, await gate.open_server(name, reason="warm")))
+            except Exception as exc:  # noqa: BLE001 -- reported per server, as gate_open would
+                outcomes.append((False, str(exc) if isinstance(exc, GateError) else _describe(exc)))
             await gate.close_server(name)
     return outcomes
 
 
-def _status_lines(config: GateConfig) -> list[str]:
-    if not config.servers:
-        return [f"no gated servers configured (config: {default_config_path()})"]
-    cache = ManifestCache(config.cache_dir)
-    lines = []
-    for name, spec in sorted(config.servers.items()):
-        tools = cache.load(spec)
-        cached = "not cached (run warm)" if tools is None else f"{len(tools)} tools cached"
-        lines.append(f"{name}: {cached}; idle timeout {spec.idle_timeout_seconds:g}s")
-    return lines
-
-
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        prog="agent-harness-gate",
-        description="Serve heavy MCP servers on demand: asleep until used, stopped when idle.",
-    )
-    # Accepted before or after the subcommand: agent MCP configs naturally
-    # write `serve --config ...`. SUPPRESS keeps a subcommand from resetting a
-    # value given before it.
-    common = argparse.ArgumentParser(add_help=False, argument_default=argparse.SUPPRESS)
-    for target in (parser, common):
-        target.add_argument(
-            "--config", type=Path, help="gate config (default: ~/.agent-harness/gate.json)"
-        )
-        target.add_argument("--cache-dir", type=Path, help="tool manifest cache directory")
-    sub = parser.add_subparsers(dest="command")
-    sub.add_parser("serve", parents=[common], help="run the gate as a stdio MCP server (default)")
-    sub.add_parser(
-        "status", parents=[common], help="list gated servers and their cached tool manifests"
-    )
-    warm_parser = sub.add_parser(
-        "warm", parents=[common], help="capture tool manifests (wakes each server once)"
-    )
-    warm_parser.add_argument("servers", nargs="*", help="servers to warm (default: all)")
-    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    """`agent-harness-gate`; the command line lives in `harness.gate_cli`."""
+    from harness.gate_cli import main as cli_main
 
-    try:
-        config = load_config(args.config, args.cache_dir)
-    except GateConfigError as exc:
-        print(f"agent-harness-gate: {exc}", file=sys.stderr)
-        return 2
-
-    if args.command == "status":
-        print("\n".join(_status_lines(config)))
-        return 0
-
-    try:
-        import anyio
-        import mcp  # noqa: F401
-    except ImportError:
-        print(
-            "agent-harness-gate requires the optional 'mcp' Python SDK.\n"
-            'from this checkout install with: python -m pip install -e ".[mcp]"',
-            file=sys.stderr,
-        )
-        return 1
-
-    if args.command == "warm":
-        names = args.servers or sorted(config.servers)
-        unknown = [name for name in names if name not in config.servers]
-        if unknown:
-            print(f"agent-harness-gate: unknown servers: {', '.join(unknown)}", file=sys.stderr)
-            return 2
-        outcomes = anyio.run(warm, config, names)
-        for ok, message in outcomes:
-            print(message if ok else f"FAILED: {message}")
-        return 0 if all(ok for ok, _ in outcomes) else 1
-
-    anyio.run(serve, config)
-    return 0
+    return cli_main(argv)
 
 
 if __name__ == "__main__":

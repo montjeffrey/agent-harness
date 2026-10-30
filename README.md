@@ -452,6 +452,49 @@ re-lists. The gate is still one process per session, but it replaces every
 server it fronts with a single lightweight Python process until a tool is
 actually used.
 
+### Memory pressure, accounting, and cleanup
+
+The keep-warm time follows the machine. Without an `idle_timeout_seconds`
+(per server or top level), the default comes from total RAM: 300 s on a
+16 GB machine, 600 s on 32 GB, 900 s above that. Explicit config always
+wins. The gate checks free RAM each time its reaper runs:
+
+| Total RAM | low watermark (free) | critical watermark (free) | default idle |
+|---|---|---|---|
+| up to 16 GB | 3 GB | 1.5 GB | 300 s |
+| up to 32 GB | 5 GB | 2.5 GB | 600 s |
+| more | 8 GB | 4 GB | 900 s |
+
+Below the low watermark, servers are kept warm for at most
+`min_idle_seconds` (default 60). Below the critical watermark, every server
+with no call in flight is stopped at once. Override the watermarks with
+`low_watermark_mb` and `critical_watermark_mb`. Unknown top-level keys are
+rejected, the same way unknown server keys are.
+
+Every wake, call, and stop is recorded in
+`~/.agent-harness/telemetry/gate-YYYYMM.jsonl`, together with the downstream
+process tree's memory. Set `"accounting": false` to turn that off. Every stop
+is verified: the gate waits up to 3 s for each process in the tree to exit,
+then terminates any survivor. It only terminates a process whose PID *and*
+creation time match what it recorded, so a reused PID is never killed. Any
+process still running after that is reported as leaked.
+
+The gate records what it has running in `~/.agent-harness/gate-state/`. A
+gate that starts after another one crashed terminates that gate's leftover
+processes, again only by exact identity.
+
+```bash
+agent-harness-gate report            # last 7 days: wakes, calls, MB-hours, advice
+agent-harness-gate report --days 30 --json
+```
+
+The report suggests removing unused servers, raising the idle timeout of
+servers that are woken again soon after they stop, and pinning `npx` packages
+that start slowly. It also flags servers that leak processes and servers that
+are mostly stopped for memory pressure. `gate_status` shows the memory tier,
+the pressure level, free MB, and, for each server, its effective idle time and
+tree MB.
+
 ## The blueprint gate
 
 This is an **advisory convention**, not a technical control -- nothing in

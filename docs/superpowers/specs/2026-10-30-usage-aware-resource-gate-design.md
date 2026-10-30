@@ -75,8 +75,9 @@ No daemon; everything stays inside the per-session gate.
    if their image path and start time still match the record.
 4. **Report.** `agent-harness-gate report [--days N]` summarizes per server:
    wakes, calls, warm minutes, median startup, median tree MB, MB·hours held,
-   and a recommendation (`unused in N days: remove`, `woken > X/day with
-   short gaps: raise idle`, `startup > Ys: pin the package version`).
+   and a recommendation (`unused in N days: remove`, `re-woken > X/day by
+   the same session after short gaps: raise idle`, `startup > Ys: pin the
+   package version`).
 
 Tier defaults (overridable; to be checked against phase-1 data):
 
@@ -91,6 +92,47 @@ shortening and critical stop with real fake-server processes (as the existing
 lifecycle tests do); telemetry records written and parseable; leaked-PID
 detection with a downstream that spawns a detached grandchild; report
 recommendations from a synthetic telemetry file.
+
+### Decisions made while building (2026-10-30)
+
+- **Own ledger file.** Gate records go to `gate-YYYYMM.jsonl` with their own
+  schema 1, not through `telemetry_store`'s `events-*.jsonl`. That keeps the
+  agent/event contract and its readers unchanged. `gate_sleep` also carries
+  `tree_pids` (every PID verified at stop) and `reaped_pids`, and there is a
+  `gate_sweep` record for crash cleanup.
+- **The tier also sets the default idle.** A server with no
+  `idle_timeout_seconds` (and no top-level default) gets the tier's default
+  idle, resolved when the config is loaded. Unknown total RAM gives the 32 GB
+  tier. Unknown free RAM counts as "normal", so a failed probe never stops a
+  server.
+- **Critical means an effective idle of 0.** Every server with no call in
+  flight stops on the next reaper tick. A stop counts as "pressure" only when
+  the configured timeout alone would not have stopped the server.
+- **Root PID attribution.** The SDK does not expose the PID it launched, so
+  the gate snapshots its own direct children just before and just after the
+  spawn, under a gate-wide lock. Only the spawn is under the lock, not the
+  MCP startup that follows, so a slow server does not hold up other wakes.
+  The root counts only when exactly one new child appears, and other servers'
+  roots are excluded. Otherwise `root_pid` is null: accounting degrades,
+  behaviour does not.
+- **Tree sampling is identity-guarded.** The tree is sampled from the root
+  only while the root still has its recorded creation time, plus earlier
+  identities that are still alive. Sampling happens at wake, on every reaper
+  tick (to refresh the crash registry) and just before stop. A recycled root
+  PID therefore never pulls in a stranger's tree.
+- **Process identity is PID plus creation time; the image path is not
+  compared.** That is enough to rule out PID reuse. A POSIX `exec` keeps both
+  values but changes the image, and treating that process as gone would hide
+  a leak. This deviates from item 3's "image path and start time".
+- **Verified stop.** The gate waits `STOP_VERIFY_SECONDS` (3 s) for the tree
+  to exit, then calls `procinfo.terminate`, which re-checks the identity
+  through the same handle it kills with. Anything still alive is
+  `leaked_pids` plus one stderr line. A server whose process exits on its own
+  is finalized as `dead` on the next reaper tick or wake.
+- **Module layout.** Config lives in `harness.gate_config` and process
+  accounting in `harness.gate_runtime`. The command line lives in
+  `harness.gate_cli`, which `harness.mcp_gate.main` delegates to. This keeps
+  each file under 800 lines. `harness.mcp_gate` re-exports the config names.
 
 ## Phase 2 — machine-wide broker for shareable servers
 
