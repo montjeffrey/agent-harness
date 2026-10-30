@@ -60,6 +60,33 @@ pushed tag `vX.Y.Z` doesn't match) before anything is published.
   `collect --then-export`, which exports under the collect lock and records
   its outcome for `machine` to show, so synced folders fill hands-off.
 
+
+- On-demand MCP gate (`agent-harness-gate`, `harness.mcp_gate`): one small
+  stdio MCP server that fronts heavy MCP servers configured in
+  `~/.agent-harness/gate.json`. Their tools are advertised from a cached
+  manifest without starting them; the first `<server>__<tool>` call starts the
+  server, and it is stopped again after `idle_timeout_seconds` idle.
+  `gate_status` / `gate_open` / `gate_close` give manual control, `warm`
+  captures manifests, and a ping before each forwarded call restarts a
+  downstream that died. Phase 1 of the usage-aware gate adds:
+  - **Pressure-scaled idle.** Keep-warm time follows a memory tier picked from
+    total RAM (16 GB / 32 GB / larger). Below the free-RAM low watermark it
+    drops to `min_idle_seconds`; below the critical watermark, idle servers
+    stop at once. `gate.json` gains `min_idle_seconds`, `low_watermark_mb`,
+    `critical_watermark_mb` and `accounting`, and unknown top-level keys are
+    now rejected.
+  - **Accounting.** Every wake, call and stop is written to
+    `gate-YYYYMM.jsonl` with the downstream process tree's memory.
+  - **Verified cleanup.** Each stop checks that the whole process tree has
+    exited and terminates survivors only by exact PID and creation time.
+  - **Crash sweep.** A gate that starts after another one crashed cleans up
+    that gate's orphaned processes.
+  - **Reporting.** `agent-harness-gate report [--days N] [--json]` gives
+    per-server usage and keep/remove advice, and `gate_status` adds a
+    tier/pressure summary.
+  - New modules: `harness.procinfo`, `harness.gate_accounting`,
+    `harness.gate_report`, `harness.gate_config`, `harness.gate_runtime` and
+    `harness.gate_cli`.
 - Evidence-bounded automatic memory curation: SessionStart and
   `memory_context` now verify and accept unchanged ingested document pointers,
   reject exact duplicate proposals, and expose only the remaining exception
