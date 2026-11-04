@@ -166,8 +166,10 @@ def test_the_installed_memory_rules_carry_the_review_policy(tmp_path: Path) -> N
         "failing test",
         "another open pr",
         "advisory",
+        "`agent-harness-pr size`",
     ):
         assert phrase in lowered, f"user-scope rules are missing {phrase!r}"
+    assert "measures pr size yet" not in " ".join(lowered.split()), "stale: agent-harness-pr size measures it now"
     for claim in ("is blocked", "enforced", "pre-push", "refuses"):
         assert claim not in lowered, f"user-scope rules imply a gate that does not exist: {claim!r}"
 
