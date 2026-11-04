@@ -148,11 +148,72 @@ def test_manifest_cache_round_trips_and_invalidates_on_spec_change(
     assert cache.load(changed) is None
 
 
+def test_gates_with_different_specs_for_one_server_keep_each_others_manifest(
+    config: mcp_gate.GateConfig,
+) -> None:
+    # A gate started before gate.json changed still holds the old spec (A) and
+    # re-stores its manifest on every wake. That must not hide the new spec's
+    # (B) tools from gates started after the change.
+    spec_a = config.servers["fake"]
+    spec_b = spec_a.__class__(**{**spec_a.__dict__, "args": (*spec_a.args, "--new-launch")})
+    assert spec_a.name == spec_b.name and spec_a.digest() != spec_b.digest()
+    cache = mcp_gate.ManifestCache(config.cache_dir)
+    tools_a = [{"name": "old_tool", "inputSchema": {"type": "object"}}]
+    tools_b = [{"name": "new_tool", "inputSchema": {"type": "object"}}]
+
+    cache.store(spec_a, tools_a)
+    assert cache.load(spec_b) is None
+    cache.store(spec_b, tools_b)
+    cache.store(spec_a, tools_a)
+
+    assert cache.load(spec_b) == tools_b
+    assert cache.load(spec_a) == tools_a
+
+
 def test_corrupt_manifest_is_treated_as_missing(config: mcp_gate.GateConfig) -> None:
     spec = config.servers["fake"]
     config.cache_dir.mkdir(parents=True, exist_ok=True)
     (config.cache_dir / "fake.json").write_text("{not json", encoding="utf-8")
+    (config.cache_dir / f"fake.{spec.digest()[:16]}.json").write_text("{not", encoding="utf-8")
     assert mcp_gate.ManifestCache(config.cache_dir).load(spec) is None
+
+
+def test_pre_digest_manifest_still_loads_when_its_digest_matches(
+    config: mcp_gate.GateConfig,
+) -> None:
+    # Caches written before per-digest files stay valid: no re-warm on upgrade.
+    spec = config.servers["fake"]
+    tools = [{"name": "echo", "inputSchema": {"type": "object"}}]
+    config.cache_dir.mkdir(parents=True, exist_ok=True)
+    legacy = config.cache_dir / "fake.json"
+    legacy.write_text(json.dumps({"digest": spec.digest(), "tools": tools}), encoding="utf-8")
+    cache = mcp_gate.ManifestCache(config.cache_dir)
+    assert cache.load(spec) == tools
+
+    changed = spec.__class__(**{**spec.__dict__, "args": (*spec.args, "--extra")})
+    assert cache.load(changed) is None
+
+
+def test_store_sweeps_only_this_servers_stale_entries(config: mcp_gate.GateConfig) -> None:
+    spec = config.servers["fake"]
+    cache = mcp_gate.ManifestCache(config.cache_dir)
+    config.cache_dir.mkdir(parents=True, exist_ok=True)
+    stale = config.cache_dir / "fake.0123456789abcdef.json"
+    fresh = config.cache_dir / "fake.fedcba9876543210.json"
+    legacy = config.cache_dir / "fake.json"
+    other = config.cache_dir / "fake-two.0123456789abcdef.json"
+    for path in (stale, fresh, legacy, other):
+        path.write_text("{}", encoding="utf-8")
+    old = time.time() - cache.STALE_AFTER_SECONDS - 60
+    for path in (stale, legacy, other):
+        os.utime(path, (old, old))
+
+    cache.store(spec, [{"name": "echo"}])
+
+    assert not stale.exists() and not legacy.exists()
+    assert fresh.exists(), "an entry another live gate still rewrites must survive"
+    assert other.exists(), "another server's entries are not this store's to sweep"
+    assert cache.load(spec) == [{"name": "echo"}]
 
 
 # ------------------------------------------------------------------ lifecycle
