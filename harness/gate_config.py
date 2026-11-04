@@ -277,17 +277,37 @@ def split_public_name(name: str) -> tuple[str, str] | None:
 
 
 class ManifestCache:
-    """Each gated server's tool list on disk, so listing tools starts nothing."""
+    """Each gated server's tool list on disk, so listing tools starts nothing.
+
+    One file per launch spec: `<server>.<digest[:16]>.json`. Gates in sessions
+    started before a gate.json edit keep the old spec and re-store on every
+    wake; keyed by digest, they refresh their own entry instead of evicting the
+    new spec's. Each write replaces only its own file, so concurrent gates
+    cannot race on a shared one. The full digest inside the payload is still
+    checked, so a prefix collision reads as a miss. The pre-digest
+    `<server>.json` is still read (digest-checked), so an upgrade needs no
+    re-warm. A store sweeps sibling entries untouched for `STALE_AFTER_SECONDS`;
+    a live gate's own entry is rewritten on each wake, so it stays fresh.
+    """
+
+    STALE_AFTER_SECONDS = 30 * 24 * 3600.0
 
     def __init__(self, directory: Path) -> None:
         self.directory = Path(directory)
 
     def _path(self, spec: ServerSpec) -> Path:
+        return self.directory / f"{spec.name}.{spec.digest()[:16]}.json"
+
+    def _legacy_path(self, spec: ServerSpec) -> Path:
         return self.directory / f"{spec.name}.json"
 
     def load(self, spec: ServerSpec) -> list[dict] | None:
+        tools = self._read(self._path(spec), spec)
+        return tools if tools is not None else self._read(self._legacy_path(spec), spec)
+
+    def _read(self, path: Path, spec: ServerSpec) -> list[dict] | None:
         try:
-            data = json.loads(self._path(spec).read_text(encoding="utf-8"))
+            data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             return None
         if not isinstance(data, Mapping) or data.get("digest") != spec.digest():
@@ -309,3 +329,22 @@ class ManifestCache:
         target = self._path(spec)
         with atomic_sibling(target) as tmp:
             tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        self._sweep_stale(spec.name, keep=target)
+
+    def _sweep_stale(self, name: str, *, keep: Path) -> None:
+        """Best effort: drop this server's entries no gate has rewritten lately."""
+        pattern = re.compile(rf"^{re.escape(name)}(?:\.[0-9a-f]{{16}})?\.json$")
+        cutoff = datetime.now(UTC).timestamp() - self.STALE_AFTER_SECONDS
+        try:
+            entries = list(self.directory.iterdir())
+        except OSError:
+            return
+        for entry in entries:
+            if entry.name == keep.name or not pattern.match(entry.name):
+                continue
+            try:
+                if entry.stat().st_mtime < cutoff:
+                    entry.unlink()
+            except OSError:
+                # Cloud-sync locks or a concurrent sweep: leave it for next time.
+                continue
