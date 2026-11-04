@@ -93,6 +93,14 @@ def _git(directory: Path, *args: str) -> str:
     the live JSON-RPC pipe. A git child that inherits that pipe blocks before
     git starts -- GIT_TRACE never emits a line -- until the timeout below
     fires, so every call costs its full timeout instead of milliseconds.
+
+    ``encoding="utf-8"`` is required too. ``text=True`` alone decodes with the
+    locale encoding (cp1252 on Windows). A diff holding a UTF-8 byte cp1252
+    leaves undefined, such as the 0x9d in U+201D, kills subprocess's reader
+    thread. The exception is swallowed and ``stdout`` comes back None. Git
+    emits UTF-8 paths and content. ``errors="replace"`` keeps a non-UTF-8
+    file's diff readable instead of failing it; that output is lossy, which
+    is acceptable for review.
     """
     try:
         result = subprocess.run(
@@ -100,6 +108,8 @@ def _git(directory: Path, *args: str) -> str:
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=False,
             timeout=30,
         )
@@ -122,9 +132,12 @@ def repository_for(directory: Path) -> Repository:
         branch_result = subprocess.run(
             ["git", "-C", str(root), "symbolic-ref", "--quiet", "--short", "HEAD"],
             # Same reason as `_git`: under the stdio MCP server an inherited
-            # JSON-RPC stdin pipe makes git hang until the timeout.
+            # JSON-RPC stdin pipe makes git hang until the timeout. UTF-8 for
+            # the same reason too: a non-ASCII branch name must not decode as
+            # cp1252.
             stdin=subprocess.DEVNULL,
-            capture_output=True, text=True, check=False, timeout=30,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            check=False, timeout=30,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise WorkError(f"could not determine current branch: {exc}") from exc
