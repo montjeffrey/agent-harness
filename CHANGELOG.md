@@ -24,6 +24,12 @@ pushed tag `vX.Y.Z` doesn't match) before anything is published.
   session on the machine gets it: single-purpose PRs under about 500 changed
   lines sliced before code, a `Testing` section in every PR body, a failing
   test before each fix, and no PR stacked on another open PR. Advisory only.
+- Review policy in the installed instruction block (`templates/AGENTS.harness.md`):
+  plan work as single-purpose PRs under about 500 changed lines (tests and
+  fixtures counted), sliced before code; every PR body carries a `Testing`
+  section; a fix lands as a failing test, then the fix; no PR stacked on
+  another open PR. The feature blueprint gains a `PR Slices` table (change,
+  tests, estimated lines). Advisory only -- nothing measures PR size yet.
 - One-shot refresh notice (`harness/context_refresh.py`), from the hand-off
   Stop hook after the note is written: once per session, when the latest
   call's context passes this machine's refresh point, the hook prints a

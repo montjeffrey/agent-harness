@@ -20,6 +20,13 @@
 2. [ ] **Step 2:** {{dependency impacts and how they are handled}}
 3. [ ] **Step 3:** {{tests: which suites prove the blast radius is safe (unit tests / DB tests / E2E tests)}}
 
+## PR Slices
+<!-- One reviewable PR per slice, each under about 500 changed lines with tests and fixtures
+     counted. A slice that needs another lands after that one merges -- never stacked on an open PR. -->
+| # | Change | Tests that prove it | Estimated lines |
+|---|---|---|---|
+| 1 | {{one single-purpose change}} | {{test names and the command that runs them}} | {{~N}} |
+
 ## Open Questions for Human
 - {{anything the agent could not decide from code or memory}}
 

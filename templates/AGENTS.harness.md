@@ -48,4 +48,23 @@ advisory convention, not a technical control -- nothing in the harness
 prevents an agent from writing code before that happens; the gate only works
 if the agent chooses to honor it. Re-read the blueprint immediately before
 executing -- do not trust a stale in-context copy.
+
+### Review policy
+
+Every pull request spends a reviewer's time, so plan work as PRs a reviewer
+can read in one sitting. Before writing code, slice the task into
+single-purpose PRs: for each slice, name the change, the tests that prove it,
+and an estimate of its size. Keep each PR under about 500 changed lines,
+tests and fixtures included -- the reviewer reads those too. If a change
+truly cannot be split, say why at the top of the PR and give a reading order.
+
+Every PR body carries a `Testing` section listing the commands run and what
+they returned. A bug fix lands as two commits: a failing test that reproduces
+the bug, then the fix that makes it pass.
+
+Do not stack a PR on another open PR: a branch cut from an unmerged branch
+shows the reviewer both diffs at once. Wait for the parent to merge and
+rebase onto the base branch, or keep the follow-up as a draft until then.
+This policy is an advisory convention; nothing in the harness measures PR
+size yet.
 <!-- agent-harness:end -->
