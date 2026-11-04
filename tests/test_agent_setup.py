@@ -152,6 +152,26 @@ def test_the_memory_rules_carry_no_project_specific_paths() -> None:
         assert token not in text
 
 
+def test_the_installed_memory_rules_carry_the_review_policy(tmp_path: Path) -> None:
+    """User scope is the one file every session loads, so the small-PR policy
+    must reach it, reason included, and must not claim a gate that is not built."""
+    agent_setup.install_memory_rules(home=tmp_path, dry_run=False)
+    lowered = agent_setup.claude_rules_path(tmp_path).read_text(encoding="utf-8").lower()
+
+    for phrase in (
+        "reviewer",
+        "before writing code",
+        "500 changed lines",
+        "`testing`",
+        "failing test",
+        "another open pr",
+        "advisory",
+    ):
+        assert phrase in lowered, f"user-scope rules are missing {phrase!r}"
+    for claim in ("is blocked", "enforced", "pre-push", "refuses"):
+        assert claim not in lowered, f"user-scope rules imply a gate that does not exist: {claim!r}"
+
+
 # --- auto-enrollment ------------------------------------------------------
 
 

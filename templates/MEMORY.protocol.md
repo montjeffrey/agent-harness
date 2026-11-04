@@ -20,4 +20,11 @@ accepts them; treat `(proposed)` entries as claims to verify.
 **Parallel edits:** before an authorized non-trivial change, `work_start` claims
 its paths (pass the `_Session ..._` id and one path per line); `work_finish`
 releases them. Not for read-only work.
+
+**Pull requests:** each one spends a reviewer's time. Before writing code,
+slice the work into single-purpose PRs under about 500 changed lines, tests and
+fixtures counted. Every PR body carries a `Testing` section with the commands
+run and what they returned; a fix lands as a failing test, then the fix. Never
+stack a PR on another open PR -- wait for it to merge. Advisory: nothing
+measures PR size yet.
 <!-- agent-harness:end -->
