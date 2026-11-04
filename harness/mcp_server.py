@@ -401,7 +401,11 @@ WORK_TOOL_DESCRIPTIONS: dict[str, str] = {
         "`summary` and optional `tags` (comma-separated topic words), so the "
         "task starts with the memory relevant to it rather than the whole "
         "store; call memory_search for anything it omits. The task still "
-        "starts if that packet cannot be built."
+        "starts if that packet cannot be built. The base is the remote default "
+        "branch (origin, then upstream) when local HEAD is strictly behind it, "
+        "otherwise HEAD; optional `base` names a commit or ref instead. The "
+        "reply's `base_source` and `base_note` lines say which was used and "
+        "warn when HEAD has diverged. Remote refs are as of the last fetch."
     ),
     "work_status": (
         "List task branches, sessions, paths, private plans, and worktree paths "
@@ -888,18 +892,21 @@ def dispatch_work(tool_name: str, arguments: dict) -> str:
         if tool_name == "work_start":
             paths = [line.strip() for line in str(arguments.get("paths") or "").splitlines() if line.strip()]
             summary = str(arguments.get("summary") or "")
-            task = work.start(
+            task, choice = work.start_with_base(
                 project,
                 summary=summary,
                 session_id=str(arguments.get("session") or ""),
                 paths=paths,
                 agent=str(arguments.get("agent") or "codex"),
                 worktree_mode=str(arguments.get("worktree") or "auto"),
+                base=str(arguments.get("base") or "") or None,
             )
             started = (
                 f"status: success\nsummary: started {task.id}\n"
                 f"next_actions: work only in {task.worktree}; call work_diff before handoff\n"
-                f"artifacts: {task.plan_path}\nbranch: {task.branch}\nbase: {task.base_sha}"
+                f"artifacts: {task.plan_path}\nbranch: {task.branch}\nbase: {task.base_sha}\n"
+                f"base_source: {choice.source}"
+                + (f"\nbase_note: {choice.note}" if choice.note else "")
             )
             # Appended after the task record, never in place of it: the
             # first lines keep their shape for callers that parse them.
@@ -1110,11 +1117,12 @@ def _build_server():
         worktree: str = "auto",
         project: str = "",
         tags: str = "",
+        base: str = "",
     ) -> str:
         return dispatch_work(
             "work_start",
             {"summary": summary, "session": session, "paths": paths, "agent": agent,
-             "worktree": worktree, "project": project, "tags": tags},
+             "worktree": worktree, "project": project, "tags": tags, "base": base},
         )
 
     def work_status(project: str = "", active_only: bool = False) -> str:
