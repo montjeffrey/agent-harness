@@ -148,6 +148,28 @@ def test_manifest_cache_round_trips_and_invalidates_on_spec_change(
     assert cache.load(changed) is None
 
 
+def test_gates_with_different_specs_for_one_server_keep_each_others_manifest(
+    config: mcp_gate.GateConfig,
+) -> None:
+    # A gate started before gate.json changed still holds the old spec (A) and
+    # re-stores its manifest on every wake. That must not hide the new spec's
+    # (B) tools from gates started after the change.
+    spec_a = config.servers["fake"]
+    spec_b = spec_a.__class__(**{**spec_a.__dict__, "args": (*spec_a.args, "--new-launch")})
+    assert spec_a.name == spec_b.name and spec_a.digest() != spec_b.digest()
+    cache = mcp_gate.ManifestCache(config.cache_dir)
+    tools_a = [{"name": "old_tool", "inputSchema": {"type": "object"}}]
+    tools_b = [{"name": "new_tool", "inputSchema": {"type": "object"}}]
+
+    cache.store(spec_a, tools_a)
+    assert cache.load(spec_b) is None
+    cache.store(spec_b, tools_b)
+    cache.store(spec_a, tools_a)
+
+    assert cache.load(spec_b) == tools_b
+    assert cache.load(spec_a) == tools_a
+
+
 def test_corrupt_manifest_is_treated_as_missing(config: mcp_gate.GateConfig) -> None:
     spec = config.servers["fake"]
     config.cache_dir.mkdir(parents=True, exist_ok=True)
