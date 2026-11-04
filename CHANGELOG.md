@@ -25,6 +25,12 @@ pushed tag `vX.Y.Z` doesn't match) before anything is published.
   plus deletions, renames detected, binary files listed but not counted.
   Reports against a 500-line limit (`--max-lines`) with the largest files, or
   as `--json`. Measures only; nothing blocks a push or a PR.
+- Review policy in the installed instruction block (`templates/AGENTS.harness.md`):
+  plan work as single-purpose PRs under about 500 changed lines (tests and
+  fixtures counted), sliced before code; every PR body carries a `Testing`
+  section; a fix lands as a failing test, then the fix; no PR stacked on
+  another open PR. The feature blueprint gains a `PR Slices` table (change,
+  tests, estimated lines). Advisory only -- nothing measures PR size yet.
 - One-shot refresh notice (`harness/context_refresh.py`), from the hand-off
   Stop hook after the note is written: once per session, when the latest
   call's context passes this machine's refresh point, the hook prints a
