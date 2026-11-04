@@ -7,8 +7,9 @@ these tests pin the reason alongside the rules:
 (a) the installed AGENTS block has a Review policy section that states the
     reviewer-time reason, slices work before code, caps a PR's size, requires
     testing evidence and a failing test before a fix, and forbids stacking.
-(b) the section claims no enforcement -- no gate checks PR size yet, so the
-    wording must not say one does.
+(b) the section claims no enforcement -- `agent-harness-pr size` measures a
+    branch but nothing blocks one yet, so the wording must name the command
+    and must not say a gate exists.
 (c) the feature blueprint, where planning happens, carries a PR Slices
     section, and so does the copy an install generates.
 """
@@ -72,6 +73,12 @@ def test_review_policy_claims_no_enforcement() -> None:
     for phrase in ENFORCEMENT_CLAIMS:
         assert phrase not in lowered, f"review policy implies a gate that does not exist: {phrase!r}"
     assert "advisory" in lowered
+
+
+def test_review_policy_names_the_size_command() -> None:
+    lowered = " ".join(_review_policy_section().lower().split())
+    assert "`agent-harness-pr size`" in lowered, "the policy must say how to measure a PR"
+    assert "measures pr size yet" not in lowered, "stale: agent-harness-pr size measures it now"
 
 
 def test_blueprint_template_plans_pr_slices_before_execution() -> None:

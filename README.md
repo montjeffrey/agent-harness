@@ -511,6 +511,25 @@ should:
 3. The agent re-reads the blueprint before executing -- never trusts a stale
    in-context copy -- and checks off steps as they land.
 
+## Measuring PR size
+
+A pull request costs its reviewer time in proportion to its diff, so measure
+a branch before opening one:
+
+```bash
+agent-harness-pr size            # against origin/HEAD, else origin/main, main, ...
+agent-harness-pr size --base main --max-lines 500 --json
+```
+
+The count is what the PR header will show: committed additions plus
+deletions since the branch's merge-base with the base, renames detected, tests
+and fixtures included. Commits that landed on the base after the branch was
+cut and uncommitted edits are not counted. A branch cut from another unmerged
+branch carries both diffs -- that is what its reviewer would read. Over the
+limit, the report lists the largest files so you can see where to split. It
+only measures: nothing blocks a push or a PR, and it exits 2 only when the
+branch cannot be measured (no base branch or no shared history).
+
 ## Per-agent support matrix
 
 | Agent | Reads `AGENTS.md`? | Adapter | MCP tools |
