@@ -18,7 +18,9 @@ from harness import pr_size
 
 
 def _run(repo: Path, *args: str) -> str:
-    result = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, check=False)
+    result = subprocess.run(
+        ["git", "-C", str(repo), *args], stdin=subprocess.DEVNULL, capture_output=True, text=True, check=False
+    )
     assert result.returncode == 0, result.stderr
     return result.stdout.strip()
 

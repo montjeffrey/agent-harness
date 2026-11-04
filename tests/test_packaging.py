@@ -34,6 +34,7 @@ CONSOLE_SCRIPTS = {
     "agent-harness-enroll": "harness.enroll:main",
     "agent-harness-setup": "harness.agent_setup:main",
     "agent-harness-work": "harness.work:main",
+    "agent-harness-pr": "harness.pr_size:main",
 }
 
 

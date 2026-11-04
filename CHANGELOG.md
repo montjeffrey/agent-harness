@@ -19,6 +19,12 @@ pushed tag `vX.Y.Z` doesn't match) before anything is published.
 
 ### Added
 
+- `agent-harness-pr size` (`harness/pr_size.py`): counts a branch's committed
+  changes since its merge-base with the base branch (`--base`, else
+  `origin/HEAD`, then main/master), as the GitHub PR header does -- additions
+  plus deletions, renames detected, binary files listed but not counted.
+  Reports against a 500-line limit (`--max-lines`) with the largest files, or
+  as `--json`. Measures only; nothing blocks a push or a PR.
 - One-shot refresh notice (`harness/context_refresh.py`), from the hand-off
   Stop hook after the note is written: once per session, when the latest
   call's context passes this machine's refresh point, the hook prints a
