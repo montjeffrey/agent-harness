@@ -24,7 +24,8 @@ pushed tag `vX.Y.Z` doesn't match) before anything is published.
   `origin/HEAD`, then main/master), as the GitHub PR header does -- additions
   plus deletions, renames detected, binary files listed but not counted.
   Reports against a 500-line limit (`--max-lines`) with the largest files, or
-  as `--json`. Measures only; nothing blocks a push or a PR.
+  as `--json`. Measures only; nothing blocks a push or a PR. Both copies of
+  the review policy tell agents to run it before opening a PR.
 - Review policy in the user-scope memory rules (`templates/MEMORY.protocol.md`,
   written into `~/.claude/CLAUDE.md` by `agent-harness-setup`), so every
   session on the machine gets it: single-purpose PRs under about 500 changed
@@ -35,7 +36,7 @@ pushed tag `vX.Y.Z` doesn't match) before anything is published.
   fixtures counted), sliced before code; every PR body carries a `Testing`
   section; a fix lands as a failing test, then the fix; no PR stacked on
   another open PR. The feature blueprint gains a `PR Slices` table (change,
-  tests, estimated lines). Advisory only -- nothing measures PR size yet.
+  tests, estimated lines). Advisory only.
 - One-shot refresh notice (`harness/context_refresh.py`), from the hand-off
   Stop hook after the note is written: once per session, when the latest
   call's context passes this machine's refresh point, the hook prints a
