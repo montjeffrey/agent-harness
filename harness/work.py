@@ -368,7 +368,6 @@ def _write_plan(task: Task, base_note: str | None = None) -> None:
         f"- Base: `{task.base_sha}`\n"
         + (f"  - {base_note}\n" if base_note else "")
         + f"- Branch: `{task.branch}`\n"
-        f"- Branch: `{task.branch}`\n"
         f"- Claimed paths: {', '.join(f'`{path}`' for path in task.paths)}\n\n"
         "## Plan\n\n"
         "## Verification\n\n"
