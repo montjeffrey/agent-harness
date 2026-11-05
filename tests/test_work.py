@@ -201,6 +201,19 @@ def test_start_bases_on_the_remote_default_when_local_head_is_behind(repo: Path,
     assert _run(clone, "config", "--get", "--default", "", f"branch.{task.branch}.remote") == ""
 
 
+def test_plan_lists_the_base_note_under_base_and_the_branch_once(repo: Path, clone: Path) -> None:
+    _advance_remote(repo, "upstream.txt")
+    _run(clone, "fetch", "-q")
+
+    task, choice = work.start_with_base(clone, "Change application", "codex-chat-a", ["src/app.py"], now=NOW)
+
+    lines = Path(task.plan_path).read_text(encoding="utf-8").splitlines()
+    base = lines.index(f"- Base: `{task.base_sha}`")
+    assert lines[base + 1] == f"  - {choice.note}"
+    assert lines[base + 2] == f"- Branch: `{task.branch}`"
+    assert [line for line in lines if line.startswith("- Branch:")] == [f"- Branch: `{task.branch}`"]
+
+
 def test_start_falls_back_to_remote_main_without_a_remote_head(repo: Path, clone: Path) -> None:
     tip = _advance_remote(repo, "upstream.txt")
     _run(clone, "fetch", "-q")
