@@ -174,6 +174,42 @@ def test_git_helper_closes_stdin(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     assert calls[0]["stdin"] is subprocess.DEVNULL
 
 
+# --- git output is UTF-8, whatever the locale says --------------------------
+#
+# `text=True` alone decodes with the locale encoding -- cp1252 on Windows.
+# A diff holding a UTF-8 byte cp1252 leaves undefined (0x81, 0x8d, 0x8f,
+# 0x90, 0x9d) kills subprocess's reader thread; the exception is swallowed
+# and `stdout` comes back None, so `_git` crashed on `.strip()` with
+# "'NoneType' object has no attribute 'strip'" (work_diff on a real repo).
+
+
+def test_git_helper_decodes_output_as_utf8(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Deterministic guard: on a UTF-8 locale the bug cannot reproduce, so the
+    decoding contract itself is pinned for every platform."""
+    calls: list[dict] = []
+
+    def fake_run(args, **kwargs):
+        calls.append(kwargs)
+        return subprocess.CompletedProcess(args, 0, "output\n", "")
+
+    monkeypatch.setattr(work.subprocess, "run", fake_run)
+
+    work._git(tmp_path, "rev-parse", "HEAD")
+
+    assert calls[0]["encoding"] == "utf-8"
+    assert calls[0]["errors"] == "replace"
+
+
+def test_diff_survives_utf8_bytes_the_locale_cannot_decode(repo: Path) -> None:
+    task = work.start(repo, "Change application", "codex-chat-a", ["src/app.py"], now=NOW)
+    # U+201D is E2 80 9D in UTF-8; 0x9d has no cp1252 mapping.
+    (Path(task.worktree) / "src" / "app.py").write_text('value = "”quoted”"\n', encoding="utf-8")
+
+    result = work.diff(repo, task.id)
+
+    assert '+value = "”quoted”"' in result
+
+
 def test_repository_for_closes_stdin_on_every_git_call(
     monkeypatch: pytest.MonkeyPatch, repo: Path
 ) -> None:
@@ -193,6 +229,7 @@ def test_repository_for_closes_stdin_on_every_git_call(
     assert len(calls) >= 4, f"expected every git call to be recorded, saw {len(calls)}"
     for kwargs in calls:
         assert kwargs["stdin"] is subprocess.DEVNULL
+        assert kwargs.get("encoding") == "utf-8"
 
 
 # --- git evidence recorded at finish ---------------------------------------
