@@ -151,6 +151,128 @@ def test_mcp_work_start_surfaces_overlap_as_a_recoverable_error(repo: Path) -> N
     assert "overlap active task" in out
 
 
+# --- the base a task starts from -------------------------------------------
+#
+# A checkout's local `main` can sit months behind its remote (seen: the ECC
+# clone's local main 4,217 commits behind origin/main). Basing a task on that
+# HEAD makes every diff and PR carry the whole gap. When HEAD is strictly
+# behind the remote default branch, it holds nothing the remote lacks, so the
+# remote tip is the base. When HEAD has commits of its own, it stays the base
+# -- moving would drop them -- and the caller is warned instead. Remote-
+# tracking refs are used as they are: `work_start` never fetches.
+
+
+@pytest.fixture
+def clone(tmp_path: Path, repo: Path) -> Path:
+    """A clone whose origin/HEAD -> origin/main, like any `git clone`."""
+    remote = tmp_path / "remote.git"
+    _run(tmp_path, "init", "--bare", "--initial-branch=main", str(remote))
+    _run(repo, "branch", "-M", "main")
+    _run(repo, "remote", "add", "origin", str(remote))
+    _run(repo, "push", "-q", "origin", "main")
+    root = tmp_path / "clone"
+    _run(tmp_path, "clone", "-q", str(remote), str(root))
+    _run(root, "config", "user.name", "Test User")
+    _run(root, "config", "user.email", "test@example.test")
+    return root
+
+
+def _advance_remote(seed: Path, name: str) -> str:
+    """Land a commit on the remote's main from the seed repository."""
+    tip = _commit(seed, name, f"upstream {name}")
+    _run(seed, "push", "-q", "origin", "main")
+    return tip
+
+
+def test_start_bases_on_the_remote_default_when_local_head_is_behind(repo: Path, clone: Path) -> None:
+    stale = _run(clone, "rev-parse", "HEAD")
+    tip = _advance_remote(repo, "upstream.txt")
+    _run(clone, "fetch", "-q")
+    assert _run(clone, "rev-parse", "main") == stale  # local main untouched by fetch
+
+    task, choice = work.start_with_base(clone, "Change application", "codex-chat-a", ["src/app.py"], now=NOW)
+
+    assert task.base_sha == tip == choice.sha
+    assert choice.source == "origin/main"
+    assert "behind origin/main" in (choice.note or "")
+    assert _run(Path(task.worktree), "rev-parse", "HEAD") == tip
+    assert (Path(task.worktree) / "upstream.txt").is_file()
+    # Cut from the SHA, not the remote ref, so the task branch tracks nothing.
+    assert _run(clone, "config", "--get", "--default", "", f"branch.{task.branch}.remote") == ""
+
+
+def test_plan_lists_the_base_note_under_base_and_the_branch_once(repo: Path, clone: Path) -> None:
+    _advance_remote(repo, "upstream.txt")
+    _run(clone, "fetch", "-q")
+
+    task, choice = work.start_with_base(clone, "Change application", "codex-chat-a", ["src/app.py"], now=NOW)
+
+    lines = Path(task.plan_path).read_text(encoding="utf-8").splitlines()
+    base = lines.index(f"- Base: `{task.base_sha}`")
+    assert lines[base + 1] == f"  - {choice.note}"
+    assert lines[base + 2] == f"- Branch: `{task.branch}`"
+    assert [line for line in lines if line.startswith("- Branch:")] == [f"- Branch: `{task.branch}`"]
+
+
+def test_start_falls_back_to_remote_main_without_a_remote_head(repo: Path, clone: Path) -> None:
+    tip = _advance_remote(repo, "upstream.txt")
+    _run(clone, "fetch", "-q")
+    _run(clone, "remote", "set-head", "origin", "--delete")
+
+    task = work.start(clone, "Change application", "codex-chat-a", ["src/app.py"], now=NOW)
+
+    assert task.base_sha == tip
+
+
+def test_start_keeps_a_head_that_has_commits_the_remote_lacks(repo: Path, clone: Path) -> None:
+    tip = _advance_remote(repo, "upstream.txt")
+    _run(clone, "fetch", "-q")
+    local = _commit(clone, "local.txt", "unpushed local work")
+
+    task, choice = work.start_with_base(clone, "Change application", "codex-chat-a", ["src/app.py"], now=NOW)
+
+    assert task.base_sha == local != tip
+    assert choice.source == "HEAD"
+    assert "diverged" in (choice.note or "") and "origin/main" in (choice.note or "")
+
+
+def test_start_keeps_a_head_ahead_of_the_remote_without_a_warning(clone: Path) -> None:
+    local = _commit(clone, "local.txt", "unpushed local work")
+
+    task, choice = work.start_with_base(clone, "Change application", "codex-chat-a", ["src/app.py"], now=NOW)
+
+    assert task.base_sha == local
+    assert choice.note is None
+
+
+def test_start_accepts_an_explicit_base_and_refuses_a_bad_one(repo: Path, clone: Path) -> None:
+    old = _run(clone, "rev-parse", "HEAD")
+    _advance_remote(repo, "upstream.txt")
+    _run(clone, "fetch", "-q")
+
+    task = work.start(clone, "Change application", "codex-chat-a", ["src/app.py"], base=old, now=NOW)
+    assert task.base_sha == old
+
+    with pytest.raises(work.WorkError, match="not a commit"):
+        work.start(clone, "Change readme", "codex-chat-b", ["README.md"], base="no-such-ref", now=NOW)
+
+
+def test_mcp_work_start_reports_where_the_base_came_from(repo: Path, clone: Path) -> None:
+    tip = _advance_remote(repo, "upstream.txt")
+    _run(clone, "fetch", "-q")
+
+    out = mcp_server.dispatch_work(
+        "work_start",
+        {"project": str(clone), "summary": "Change application", "session": "codex-chat-a", "paths": "src/app.py"},
+    )
+
+    lines = out.splitlines()
+    assert lines[0] == "status: success"
+    assert f"base: {tip}" in lines
+    assert "base_source: origin/main" in lines
+    assert any(line.startswith("base_note: ") and "behind origin/main" in line for line in lines)
+
+
 # --- git subprocesses must never inherit the caller's stdin ---------------
 #
 # The `work_*` tools run inside the long-lived stdio MCP server, whose stdin

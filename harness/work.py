@@ -248,7 +248,115 @@ def _worktree_path(repo: Repository, task_id: str) -> Path:
     return state_dir(repo) / "worktrees" / task_id
 
 
-def _write_plan(task: Task) -> None:
+# Remotes whose default branch is a candidate base, in preference order. A
+# fork checkout usually has both; whichever is further ahead wins when one
+# contains the other (see `select_base`).
+BASE_REMOTES = ("origin", "upstream")
+
+
+@dataclass(frozen=True)
+class BaseChoice:
+    """The commit a task starts from, and why.
+
+    ``source`` is ``"HEAD"``, a remote default branch such as ``origin/main``,
+    or the caller's explicit ref. ``note`` explains a choice the caller should
+    know about. Neither is persisted: the task record keeps only ``base_sha``,
+    so records stay readable by servers running older code.
+    """
+
+    sha: str
+    source: str
+    note: str | None = None
+
+
+def _commit_sha(root: Path, ref: str) -> str | None:
+    with contextlib.suppress(WorkError):
+        return _git(root, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}") or None
+    return None
+
+
+def _is_ancestor(root: Path, ancestor: str, descendant: str) -> bool:
+    """Whether ``ancestor`` is reachable from ``descendant`` (or equal to it).
+
+    Any git failure reads as False, which keeps the caller on HEAD: the
+    conservative choice.
+    """
+    with contextlib.suppress(WorkError):
+        _git(root, "merge-base", "--is-ancestor", ancestor, descendant)
+        return True
+    return False
+
+
+def _remote_default(root: Path, remote: str) -> str | None:
+    """``<remote>/HEAD``'s target, else ``<remote>/main`` or ``<remote>/master``.
+
+    ``refs/remotes/<remote>/HEAD`` exists after a clone or
+    ``git remote set-head``. A remote that was added and fetched by hand
+    lacks it, so the conventional names are tried next.
+    """
+    with contextlib.suppress(WorkError):
+        target = _git(root, "symbolic-ref", "--quiet", f"refs/remotes/{remote}/HEAD")
+        if target.startswith("refs/remotes/"):
+            return target.removeprefix("refs/remotes/")
+    for name in ("main", "master"):
+        if _commit_sha(root, f"refs/remotes/{remote}/{name}"):
+            return f"{remote}/{name}"
+    return None
+
+
+def select_base(repo: Repository, base: str | None = None) -> BaseChoice:
+    """Choose the commit a new task starts from.
+
+    An explicit ``base`` is used as given. Otherwise the remote default
+    branch is used when HEAD is strictly behind it: HEAD then holds nothing
+    the remote lacks, so nothing is lost. When HEAD has commits of its own it
+    stays the base, because moving would silently drop them. If it has also
+    fallen behind, the note says so. Remote-tracking refs are as of the last
+    fetch; this never fetches.
+    """
+    if base and base.strip():
+        sha = _commit_sha(repo.root, base.strip())
+        if sha is None:
+            raise WorkError(f"base {base.strip()!r} is not a commit in {repo.root}")
+        return BaseChoice(sha=sha, source=base.strip())
+
+    best: tuple[str, str] | None = None
+    for remote in BASE_REMOTES:
+        ref = _remote_default(repo.root, remote)
+        sha = _commit_sha(repo.root, f"refs/remotes/{ref}") if ref else None
+        if ref is None or sha is None:
+            continue
+        if best is None or (sha != best[1] and _is_ancestor(repo.root, best[1], sha)):
+            best = (ref, sha)
+    if best is None or best[1] == repo.head:
+        return BaseChoice(sha=repo.head, source="HEAD")
+
+    ref, sha = best
+    behind = commit_count(repo.root, repo.head, sha)
+    behind_text = f"{behind} commit(s)" if behind is not None else "commits"
+    if _is_ancestor(repo.root, repo.head, sha):
+        return BaseChoice(
+            sha=sha,
+            source=ref,
+            note=(
+                f"local HEAD {repo.head[:12]} is {behind_text} behind {ref}; "
+                f"based the task on {ref} {sha[:12]} instead (as of the last fetch)"
+            ),
+        )
+    if _is_ancestor(repo.root, sha, repo.head):
+        return BaseChoice(sha=repo.head, source="HEAD")
+    return BaseChoice(
+        sha=repo.head,
+        source="HEAD",
+        note=(
+            f"warning: local HEAD {repo.head[:12]} has diverged from {ref}: it lacks "
+            f"{behind_text} of {ref} and has commits {ref} does not; based the task "
+            f"on HEAD to keep them -- pass base to choose another commit"
+        ),
+    )
+
+
+def _write_plan(task: Task, base_note: str | None = None) -> None:
     path = Path(task.plan_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
@@ -258,7 +366,8 @@ def _write_plan(task: Task) -> None:
         f"- Task: `{task.id}`\n"
         f"- Session: `{task.session_id}`\n"
         f"- Base: `{task.base_sha}`\n"
-        f"- Branch: `{task.branch}`\n"
+        + (f"  - {base_note}\n" if base_note else "")
+        + f"- Branch: `{task.branch}`\n"
         f"- Claimed paths: {', '.join(f'`{path}`' for path in task.paths)}\n\n"
         "## Plan\n\n"
         "## Verification\n\n"
@@ -279,8 +388,23 @@ def start(
     agent: str = "codex",
     worktree_mode: str = "auto",
     now: datetime | None = None,
+    base: str | None = None,
 ) -> Task:
     """Start an isolated implementation task and return its complete record."""
+    return start_with_base(directory, summary, session_id, paths, agent, worktree_mode, now, base)[0]
+
+
+def start_with_base(
+    directory: Path,
+    summary: str,
+    session_id: str,
+    paths: list[str],
+    agent: str = "codex",
+    worktree_mode: str = "auto",
+    now: datetime | None = None,
+    base: str | None = None,
+) -> tuple[Task, BaseChoice]:
+    """``start``, also returning how the base commit was chosen (``select_base``)."""
     if agent not in memory_claims.KNOWN_AGENTS:
         raise WorkError(f"unknown agent {agent!r} (expected one of {memory_claims.KNOWN_AGENTS})")
     if worktree_mode not in WORKTREE_MODES:
@@ -292,6 +416,7 @@ def start(
 
     repo = repository_for(directory)
     claimed_paths = normalize_paths(paths)
+    choice = select_base(repo, base)
     task_now = now or datetime.now(timezone.utc)
     stamp = _now(task_now)
     task_id = f"{TASK_PREFIX}-{task_now.strftime('%Y%m%d')}-{uuid.uuid4().hex[:8]}"
@@ -314,11 +439,13 @@ def start(
         if use_worktree:
             worktree = _worktree_path(repo, task_id)
             worktree.parent.mkdir(parents=True, exist_ok=True)
-            _git(repo.root, "worktree", "add", "-b", branch, str(worktree), repo.head)
+            # Always a SHA, never a remote ref: `-b <branch> origin/main`
+            # would make the task branch track origin/main.
+            _git(repo.root, "worktree", "add", "-b", branch, str(worktree), choice.sha)
         else:
             if repo.current_branch is None:
                 raise WorkError("cannot switch the primary checkout from a detached HEAD; use --worktree always")
-            _git(repo.root, "switch", "-c", branch, repo.head)
+            _git(repo.root, "switch", "-c", branch, choice.sha)
             worktree = repo.root
 
         task = Task(
@@ -327,7 +454,7 @@ def start(
             agent=agent,
             session_id=session_id.strip(),
             paths=claimed_paths,
-            base_sha=repo.head,
+            base_sha=choice.sha,
             branch=branch,
             worktree=str(worktree),
             plan_path=str(state_dir(repo) / "plans" / f"{task_id}.md"),
@@ -335,7 +462,7 @@ def start(
             created_at=stamp,
         )
         try:
-            _write_plan(task)
+            _write_plan(task, choice.note)
             _save_tasks(repo, [*tasks, task])
         except Exception:
             # A failed local state write must not leave Git artifacts that
@@ -349,7 +476,7 @@ def start(
                     _git(repo.root, "switch", repo.current_branch)
                 _git(repo.root, "branch", "-D", branch)
             raise
-    return task
+    return task, choice
 
 
 def recorded_tasks(repo: Repository) -> list[Task]:
@@ -562,6 +689,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     start_p.add_argument("--path", action="append", default=[], help="exact repository-relative claimed path (repeatable)")
     start_p.add_argument("--agent", choices=memory_claims.KNOWN_AGENTS, default="codex")
     start_p.add_argument("--worktree", choices=WORKTREE_MODES, default="auto")
+    start_p.add_argument(
+        "--base",
+        default=None,
+        help="commit or ref to start from (default: the remote default branch when HEAD is strictly behind it, else HEAD)",
+    )
     start_p.add_argument("--project", default=".", help="repository or directory within it (default: current directory)")
 
     list_p = sub.add_parser("list", help="show recorded tasks for the repository")
@@ -584,8 +716,11 @@ def main(argv: list[str] | None = None) -> int:
     project = Path(args.project)
     try:
         if args.command == "start":
-            task = start(project, args.summary, args.session, args.path, args.agent, args.worktree)
+            task, choice = start_with_base(
+                project, args.summary, args.session, args.path, args.agent, args.worktree, base=args.base
+            )
             print(f"status: success\nsummary: started {task.id}\nnext_actions: work only in {task.worktree}; run `agent-harness-work diff {task.id}` before handoff\nartifacts: {task.plan_path}\n{_render_task(task)}")
+            print(f"  base_source: {choice.source}" + (f"\n  base_note: {choice.note}" if choice.note else ""))
         elif args.command == "list":
             tasks = list_tasks(project, args.active)
             if not tasks:
