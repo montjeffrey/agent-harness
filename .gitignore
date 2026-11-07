@@ -13,6 +13,10 @@ build/
 graphify-out/
 private-plans/
 
+# The maintainer's own memory store for this checkout. Enrolled projects get
+# this via .git/info/exclude; committing it here keeps it out of every clone.
+.agent-harness/
+
 # Local git worktrees (including agent-spawned ones)
 .worktrees/
 .claude/worktrees/
