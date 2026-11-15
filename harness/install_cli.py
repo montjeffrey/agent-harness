@@ -281,17 +281,21 @@ def _query_command() -> str:
     path is shell-quoted (matching `install_hooks`' handling of the same
     value) since it's spliced into copy-pasteable command text that may
     contain spaces (e.g. a Windows `Program Files` install).
+
+    `-P` keeps the project directory off `sys.path`: these commands run with a
+    repository as the working directory, and a repo-supplied `harness/` package
+    would otherwise shadow the installed one.
     """
     if _console_scripts_available():
         return "agent-harness-query"
-    return f"{pathsafe.shell_quote(sys.executable)} -m harness.graph_query"
+    return f"{pathsafe.shell_quote(sys.executable)} -P -m harness.graph_query"
 
 
 def _refresh_command() -> str:
     """Command prefix for `graph_refresh.py` in generated docs; see `_query_command`."""
     if _console_scripts_available():
         return "agent-harness-refresh"
-    return f"{pathsafe.shell_quote(sys.executable)} -m harness.graph_refresh"
+    return f"{pathsafe.shell_quote(sys.executable)} -P -m harness.graph_refresh"
 
 
 def render_agents_block(harness_path: Path) -> str:

@@ -145,8 +145,8 @@ def test_query_command_uses_console_script_when_resolvable_in_same_environment(m
 def test_query_command_falls_back_to_module_invocation_when_console_script_unresolvable(monkeypatch) -> None:
     monkeypatch.setattr(shutil, "which", lambda name: None)
 
-    assert install_cli._query_command() == f"{sys.executable} -m harness.graph_query"
-    assert install_cli._refresh_command() == f"{sys.executable} -m harness.graph_refresh"
+    assert install_cli._query_command() == f"{sys.executable} -P -m harness.graph_query"
+    assert install_cli._refresh_command() == f"{sys.executable} -P -m harness.graph_refresh"
 
 
 def test_query_command_ignores_same_named_script_from_a_different_environment(monkeypatch) -> None:
@@ -158,7 +158,7 @@ def test_query_command_ignores_same_named_script_from_a_different_environment(mo
     script_name = "agent-harness-query.exe" if sys.platform == "win32" else "agent-harness-query"
     monkeypatch.setattr(shutil, "which", lambda name: str(other_dir / script_name))
 
-    assert install_cli._query_command() == f"{sys.executable} -m harness.graph_query"
+    assert install_cli._query_command() == f"{sys.executable} -P -m harness.graph_query"
 
 
 def test_render_agents_block_and_vault_readme_agree_and_avoid_broken_raw_script_form(monkeypatch) -> None:
@@ -174,8 +174,8 @@ def test_render_agents_block_and_vault_readme_agree_and_avoid_broken_raw_script_
     agents_block = install_cli.render_agents_block(install_cli.HARNESS_ROOT)
     vault_readme = install_cli.render_vault_readme(install_cli.HARNESS_ROOT)
 
-    expected_query = f"{sys.executable} -m harness.graph_query"
-    expected_refresh = f"{sys.executable} -m harness.graph_refresh"
+    expected_query = f"{sys.executable} -P -m harness.graph_query"
+    expected_refresh = f"{sys.executable} -P -m harness.graph_refresh"
     old_broken_query = f"python {install_cli.HARNESS_ROOT}/harness/graph_query.py"
     old_broken_refresh = f"python {install_cli.HARNESS_ROOT}/harness/graph_refresh.py"
     for text in (agents_block, vault_readme):

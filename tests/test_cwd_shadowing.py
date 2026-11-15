@@ -69,3 +69,12 @@ def test_graphify_probe_ignores_a_graphify_package_in_the_cwd(tmp_path: Path, mo
 def test_graphify_commands_pass_safe_path() -> None:
     cmd = graph_refresh.build_graphify_command("update", Path("/repo"), "auto")
     assert cmd[:4] == [sys.executable, "-P", "-m", "graphify"]
+
+
+def test_generated_doc_commands_do_not_put_the_project_on_sys_path(monkeypatch) -> None:
+    from harness import install_cli
+
+    monkeypatch.setattr(install_cli, "_console_scripts_available", lambda: False)
+
+    assert " -P -m harness.graph_query" in install_cli._query_command()
+    assert " -P -m harness.graph_refresh" in install_cli._refresh_command()
