@@ -141,8 +141,12 @@ _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     # name=value, name: value and JSON "name": "value". An optional closing
     # quote after the name lets the JSON and quoted-YAML forms through.
     re.compile(
-        r"[\w-]*(?:password|passwd|secret|token|api[ _-]?key|access[ _-]?key"
-        r"|private[ _-]?key)[\w-]*[\"']?\s*[=:]\s*[\"']?\S{6,}",
+        # `(?<![\w-])` starts a match only at a word boundary: an unanchored
+        # leading `[\w-]*` made every position of a long word a fresh start and
+        # the scan quadratic (20k letters took ~9 s). The trailing run is capped
+        # for the same reason.
+        r"(?<![\w-])[\w-]*(?:password|passwd|secret|token|api[ _-]?key|access[ _-]?key"
+        r"|private[ _-]?key)[\w-]{0,64}[\"']?\s*[=:]\s*[\"']?\S{6,}",
         re.IGNORECASE,
     ),
 )
