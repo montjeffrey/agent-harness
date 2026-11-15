@@ -224,6 +224,35 @@ class TestMain:
         settings = json.loads(br.user_settings_path().read_text(encoding="utf-8"))
         assert "SessionStart" in settings["hooks"]
 
+    def test_rewriting_an_existing_config_keeps_a_backup(self, harness_root: Path) -> None:
+        settings_path = br.user_settings_path()
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        original = json.dumps({"theme": "dark"})
+        settings_path.write_text(original, encoding="utf-8")
+
+        assert br.main(["--harness-root", str(harness_root), "--python", "/py"]) == 0
+
+        backups = list(settings_path.parent.glob("settings.json.bak-*"))
+        assert len(backups) == 1
+        assert backups[0].read_text(encoding="utf-8") == original
+        assert json.loads(settings_path.read_text(encoding="utf-8"))["theme"] == "dark"
+
+    def test_a_symlinked_config_stays_a_symlink(self, harness_root: Path, tmp_path: Path) -> None:
+        settings_path = br.user_settings_path()
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        real = tmp_path / "kit" / "settings.json"
+        real.parent.mkdir()
+        real.write_text("{}", encoding="utf-8")
+        try:
+            settings_path.symlink_to(real)
+        except (OSError, NotImplementedError):
+            pytest.skip("cannot create symlinks here")
+
+        assert br.main(["--harness-root", str(harness_root), "--python", "/py"]) == 0
+
+        assert settings_path.is_symlink()
+        assert "SessionStart" in json.loads(real.read_text(encoding="utf-8"))["hooks"]
+
     def test_skip_mcp_leaves_the_mcp_config_alone(self, harness_root: Path) -> None:
         assert (
             br.main(["--harness-root", str(harness_root), "--python", "/py", "--skip-mcp"]) == 0
