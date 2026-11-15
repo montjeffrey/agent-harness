@@ -4,7 +4,7 @@ This is the in-session approval path. Instead of an agent writing a
 blueprint file and a human opening it to tick a box, the agent presents a
 plan in chat, the human accepts or objects in chat, and `confirm()` records
 that exchange as memory: one `decision` entry for the plan plus one `task`
-entry per step, all `proposed`/`confirmed`.
+entry per step, all `proposed`/`inferred`, carrying the confirmation text but no human-evidence flag.
 
 The entries are PROPOSED, not accepted, on purpose. `confirm()` is reachable
 from an agent (the `memory_confirm` MCP tool), and the guarantee is that
@@ -136,7 +136,11 @@ def confirm(
         ids = _allocate_ids(directory, 1 + len(steps), now)
         tag_list = [t for t in (tags or []) if t]
 
-        source: dict = {"manual": True, "confirmation": confirmation}
+        # No `manual: True`, and `inferred`: `confirm` is callable by an agent, and
+        # `manual` counts as human evidence while `confirmed` outranks `accepted`
+        # in context ranking. The quoted words are unverifiable text; only a
+        # person running `review accept` supplies the human evidence.
+        source: dict = {"confirmation": confirmation}
         if project_id:
             source["project"] = project_id
 
@@ -145,7 +149,7 @@ def confirm(
             "type": "decision",
             "scope": "project",
             "status": "proposed",
-            "confidence": "confirmed",
+            "confidence": "inferred",
             "summary": summary.strip(),
             "source": dict(source),
         }
@@ -159,7 +163,7 @@ def confirm(
                 "type": "task",
                 "scope": "project",
                 "status": "proposed",
-                "confidence": "confirmed",
+                "confidence": "inferred",
                 "summary": step,
                 "source": dict(source),
                 # Links the step back to the plan it came from, so completing a
