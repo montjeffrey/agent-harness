@@ -417,10 +417,16 @@ def _windows_console_stdin() -> bool:
     return bool(kernel32.GetConsoleMode(handle, ctypes.byref(mode)))
 
 
+# A module constant rather than an inline `os.name` test so a test can stand in
+# for Windows without patching the shared `os` module (which breaks pathlib on
+# every other platform).
+_ON_WINDOWS = os.name == "nt"
+
+
 def _stdin_is_console() -> bool:
     if not sys.stdin.isatty():
         return False
-    if os.name == "nt":
+    if _ON_WINDOWS:
         return _windows_console_stdin()
     return True
 
