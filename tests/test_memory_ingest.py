@@ -208,6 +208,19 @@ def test_seed_scope_purpose_fills_the_placeholder(tmp_path: Path) -> None:
     assert "Seeded from README.md" in text
 
 
+def test_seed_scope_purpose_will_not_copy_a_credential_into_scope_md(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    readme = "Deploy with DEPLOY_TOKEN=sk-AbCdEfGhIjKlMnOpQrStUvWxYz0123 from the CI runner."
+
+    seeded, reason = memory_ingest.seed_scope_purpose(root, readme)
+
+    assert seeded is False
+    assert "credential" in reason
+    text = (root / ".agent-harness" / "scope.md").read_text(encoding="utf-8")
+    assert "sk-AbCd" not in text
+    assert memory_ingest.SCOPE_PURPOSE_PLACEHOLDER in text
+
+
 def test_seed_scope_purpose_never_overwrites_a_human_answer(tmp_path: Path) -> None:
     root = _project(tmp_path)
     scope_path = root / ".agent-harness" / "scope.md"

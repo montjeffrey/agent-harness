@@ -363,6 +363,11 @@ def seed_scope_purpose(
     purpose = _truncate(first_paragraph(text), 400)
     if len(purpose) < 20:
         return False, "README has no usable opening prose"
+    # scope.md is injected into every session, so it gets the same credential
+    # screen as a memory entry; a pointer entry was already refused for this
+    # README, but the prose written here bypassed that check.
+    if memory_store._find_secret(purpose):
+        return False, "README opening prose looks like a credential; not copied into scope.md"
 
     seeded = (
         purpose
