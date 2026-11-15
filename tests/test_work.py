@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from harness import mcp_server, work
+from harness import mcp_server, memory_store, work
 
 NOW = datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc)
 
@@ -34,6 +34,7 @@ def repo(tmp_path: Path) -> Path:
     (root / "README.md").write_text("# Test\n", encoding="utf-8")
     _run(root, "add", ".")
     _run(root, "commit", "-m", "initial")
+    memory_store.register_project(root)  # the MCP tools only act on enrolled projects
     return root
 
 
@@ -174,6 +175,7 @@ def clone(tmp_path: Path, repo: Path) -> Path:
     _run(tmp_path, "clone", "-q", str(remote), str(root))
     _run(root, "config", "user.name", "Test User")
     _run(root, "config", "user.email", "test@example.test")
+    memory_store.register_project(root)
     return root
 
 

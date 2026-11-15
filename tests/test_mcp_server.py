@@ -952,7 +952,7 @@ def test_memory_search_related_follows_accepted_machine_relationships(tmp_path: 
     assert f"[{gamma_id}]" not in related  # only accepted relationships count
 
 
-def test_memory_search_without_a_registry_stays_on_the_current_project(tmp_path: Path) -> None:
+def test_a_store_that_was_never_enrolled_is_not_read(tmp_path: Path) -> None:
     from harness import mcp_server, memory_store
 
     project = tmp_path / "unregistered"
@@ -964,8 +964,8 @@ def test_memory_search_without_a_registry_stays_on_the_current_project(tmp_path:
     out = mcp_server.dispatch_memory(
         "memory_search", {"project": str(project), "query": "local knowledge", "projects": "all"}
     )
-    assert "Only local knowledge" in out
-    assert "registry missing, unreadable, or empty" in out
+    assert "Only local knowledge" not in out
+    assert "refused" in out
 
 
 def test_a_tool_call_refreshes_last_seen_but_never_enrolls(tmp_path: Path) -> None:
@@ -1006,6 +1006,9 @@ def work_repo(tmp_path: Path) -> Path:
     (repo / "src" / "app.py").write_text("value = 1\n", encoding="utf-8")
     _git(repo, "add", ".")
     _git(repo, "commit", "-m", "initial")
+    from harness import memory_store
+
+    memory_store.register_project(repo)  # the MCP tools only act on enrolled projects
     return repo
 
 
@@ -1061,3 +1064,69 @@ def test_work_start_still_starts_when_the_packet_fails(
     assert "task-scoped packet unavailable (RuntimeError: index exploded)" in out
     assert "the task started anyway" in out
     assert [t.status for t in work.list_tasks(work_repo, active_only=True)] == [work.ACTIVE]
+
+
+# --- the `project` argument is not an arbitrary path ---------------------------
+
+
+def test_project_argument_must_be_enrolled_or_the_server_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from harness import mcp_server, memory_store
+
+    server_dir = tmp_path / "server"
+    server_dir.mkdir()
+    monkeypatch.chdir(server_dir)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+
+    out = mcp_server.dispatch_memory(
+        "memory_remember", {"project": str(elsewhere), "type": "lesson", "summary": "x"}
+    )
+    assert "refused" in out
+    assert not (elsewhere / ".agent-harness").exists()
+
+    out = mcp_server.dispatch_memory("memory_status", {"project": str(elsewhere)})
+    assert "refused" in out
+
+    memory_store.init_project(elsewhere)
+    out = mcp_server.dispatch_memory("memory_status", {"project": str(elsewhere)})
+    assert "refused" not in out
+
+
+def test_work_start_is_refused_for_a_repository_that_is_not_enrolled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from harness import mcp_server
+
+    here = tmp_path / "here"
+    here.mkdir()
+    monkeypatch.chdir(here)
+    other = tmp_path / "other"
+    other.mkdir()
+    _git(other, "init")
+
+    out = mcp_server.dispatch_work(
+        "work_start",
+        {"project": str(other), "summary": "Hijack", "session": "s-1", "paths": "a.py"},
+    )
+
+    assert out.startswith("status: error")
+    assert "not enrolled" in out
+    branches = subprocess.run(
+        ["git", "-C", str(other), "branch", "--all"], capture_output=True, text=True, check=False
+    ).stdout
+    assert "work-" not in branches
+
+
+def test_the_server_directory_may_be_used_without_naming_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from harness import mcp_server
+
+    here = tmp_path / "here"
+    here.mkdir()
+    monkeypatch.chdir(here)
+
+    out = mcp_server.dispatch_memory("memory_status", {})
+    assert "no memory recorded yet" in out
