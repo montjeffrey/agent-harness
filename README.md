@@ -5,7 +5,7 @@ Codex CLI, Antigravity/Gemini CLI, or others that read `AGENTS.md` -- the same
 portable capabilities inside any project:
 
 1. **Queryable code relations** -- search, inspect, and traverse a
-   [graphify](https://pypi.org/project/graphify/) `graph.json` without ever
+   [graphify](https://pypi.org/project/graphifyy/) `graph.json` without ever
    reading the whole file into context.
 2. **An advisory, human-in-the-loop blueprint gate** -- feature-scale changes
    get a Markdown blueprint (viewable natively in Obsidian if the project
@@ -36,8 +36,9 @@ Two steps: set up the machine once, then enroll each project you work in.
 > [!IMPORTANT]
 > **Do not run `pipx install agent-harness`.** The name `agent-harness` on
 > PyPI belongs to an unrelated project, so that command installs a stranger's
-> package. This project is not published yet; install it from a clone until
-> it ships under a name it owns.
+> package, and `agent-harness-kit` is likewise taken by a different author.
+> This project is not published on PyPI; install it from a clone or from its
+> git URL (see Requirements) until it ships under a name it owns.
 
 **Once per machine** — clone, then run the bootstrapper. It checks your
 Python, installs [pipx](https://pypa.github.io/pipx/) if missing, and
@@ -530,9 +531,10 @@ short pointer so the harness content lives in one place.
 
 - Python 3.11+
 - Standard library only for `harness/` and `install.py`
-- A `pipx install agent-harness` / `pip install agent-harness` install needs
-  no local git clone at all -- the source-checkout path above is only for
-  running from `main` or developing the harness itself
+- Install from a clone, or straight from git, for example
+  `pipx install "agent-harness-kit[mcp,graph,semantic] @ git+https://github.com/montjeffrey/agent-harness.git"`.
+  Do not `pip`/`pipx install` the names `agent-harness` or `agent-harness-kit`
+  from PyPI: both belong to unrelated projects (see the note in the Quickstart)
 - `pytest` for running the test suite (`pip install pytest`, or
   `pip install -e ".[dev]"`)
 - [graphify](https://pypi.org/project/graphify/) installed separately and
