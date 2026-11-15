@@ -325,17 +325,18 @@ def apply_review(
     unless the whole transition validates.
     """
     now = now or datetime.now(timezone.utc)
-    lines, index, original = locate_entry(directory, entry_id)
-    updated, created = _plan_transition(
-        original, action,
-        summary=summary, note=note, commit=commit, file=file,
-        now=now, allocate_id=_id_allocator(directory, now),
-    )
+    with memory_store.writer_lock(directory):
+        lines, index, original = locate_entry(directory, entry_id)
+        updated, created = _plan_transition(
+            original, action,
+            summary=summary, note=note, commit=commit, file=file,
+            now=now, allocate_id=_id_allocator(directory, now),
+        )
 
-    lines[index] = json.dumps(updated, ensure_ascii=False)
-    if created is not None:
-        lines.append(json.dumps(created, ensure_ascii=False))
-    memory_store.write_lines(lines, directory)
+        lines[index] = json.dumps(updated, ensure_ascii=False)
+        if created is not None:
+            lines.append(json.dumps(created, ensure_ascii=False))
+        memory_store.write_lines(lines, directory)
 
     return ReviewResult(action=action, entry=updated, created=created)
 
@@ -360,45 +361,46 @@ def apply_reviews(
     came from a decisions file).
     """
     now = now or datetime.now(timezone.utc)
-    lines = memory_store.read_lines(directory)
-    allocate = _id_allocator(directory, now)
+    with memory_store.writer_lock(directory):
+        lines = memory_store.read_lines(directory)
+        allocate = _id_allocator(directory, now)
 
-    seen: set[str] = set()
-    results: list[ReviewResult] = []
-    appended: list[str] = []
-    for decision in decisions:
-        if decision.is_skip:
-            continue
-        where = f" (line {decision.line})" if decision.line else ""
-        if decision.entry_id in seen:
-            raise ValueError(
-                f"{decision.entry_id} is decided more than once{where}; a batch "
-                f"may transition each entry only once"
-            )
-        seen.add(decision.entry_id)
-        index = _find_line(lines, decision.entry_id)
-        if index is None:
-            raise LookupError(
-                f"no entry with id {decision.entry_id!r} in this memory store{where}"
-            )
-        original = json.loads(lines[index])
-        try:
-            updated, created = _plan_transition(
-                original, decision.action,
-                summary=decision.summary, note=decision.note,
-                commit=decision.commit, file=decision.file,
-                now=now, allocate_id=allocate,
-            )
-        except ValueError as exc:
-            raise ValueError(f"{decision.action} {decision.entry_id}{where}: {exc}") from exc
-        lines[index] = json.dumps(updated, ensure_ascii=False)
-        if created is not None:
-            appended.append(json.dumps(created, ensure_ascii=False))
-        results.append(ReviewResult(action=decision.action, entry=updated, created=created))
+        seen: set[str] = set()
+        results: list[ReviewResult] = []
+        appended: list[str] = []
+        for decision in decisions:
+            if decision.is_skip:
+                continue
+            where = f" (line {decision.line})" if decision.line else ""
+            if decision.entry_id in seen:
+                raise ValueError(
+                    f"{decision.entry_id} is decided more than once{where}; a batch "
+                    f"may transition each entry only once"
+                )
+            seen.add(decision.entry_id)
+            index = _find_line(lines, decision.entry_id)
+            if index is None:
+                raise LookupError(
+                    f"no entry with id {decision.entry_id!r} in this memory store{where}"
+                )
+            original = json.loads(lines[index])
+            try:
+                updated, created = _plan_transition(
+                    original, decision.action,
+                    summary=decision.summary, note=decision.note,
+                    commit=decision.commit, file=decision.file,
+                    now=now, allocate_id=allocate,
+                )
+            except ValueError as exc:
+                raise ValueError(f"{decision.action} {decision.entry_id}{where}: {exc}") from exc
+            lines[index] = json.dumps(updated, ensure_ascii=False)
+            if created is not None:
+                appended.append(json.dumps(created, ensure_ascii=False))
+            results.append(ReviewResult(action=decision.action, entry=updated, created=created))
 
-    if results and not dry_run:
-        memory_store.write_lines(lines + appended, directory)
-    return results
+        if results and not dry_run:
+            memory_store.write_lines(lines + appended, directory)
+        return results
 
 
 def pending_entries(directory: Path) -> list[dict]:

@@ -922,38 +922,39 @@ def compact(project_root: Path, now: datetime | None = None) -> CompactResult:
     active_path = directory / "active.md"
 
     with compact_lock(directory, now=now):
-        raw_lines = memory_store.read_lines(directory)
-        entries = list(memory_store.iter_entries(directory))
+        with memory_store.writer_lock(directory):
+            raw_lines = memory_store.read_lines(directory)
+            entries = list(memory_store.iter_entries(directory))
 
-        duplicates, merged_survivors = resolve_duplicates(entries)
-        removed_ids = {str(e.get("id") or "") for e in entries if is_terminal(e)} | duplicates
-        removed_ids.discard("")
-        removed = [e for e in entries if str(e.get("id") or "") in removed_ids]
-        # Survivors carry their merged form onward, so `active.md` and the
-        # promotion pass describe the record the inbox will actually hold.
-        kept = [
-            merged_survivors.get(str(e.get("id") or ""), e)
-            for e in entries
-            if str(e.get("id") or "") not in removed_ids
-        ]
+            duplicates, merged_survivors = resolve_duplicates(entries)
+            removed_ids = {str(e.get("id") or "") for e in entries if is_terminal(e)} | duplicates
+            removed_ids.discard("")
+            removed = [e for e in entries if str(e.get("id") or "") in removed_ids]
+            # Survivors carry their merged form onward, so `active.md` and the
+            # promotion pass describe the record the inbox will actually hold.
+            kept = [
+                merged_survivors.get(str(e.get("id") or ""), e)
+                for e in entries
+                if str(e.get("id") or "") not in removed_ids
+            ]
 
-        already = promoted_ids(durable_path)
-        to_promote = [e for e in kept if is_promotable(e) and str(e.get("id") or "") not in already]
+            already = promoted_ids(durable_path)
+            to_promote = [e for e in kept if is_promotable(e) and str(e.get("id") or "") not in already]
 
-        snapshot = _snapshot((archive_path, durable_path, active_path, directory / "inbox.jsonl"))
-        try:
-            if removed:
-                _write_archive(archive_path, week, removed, now)
-            if to_promote:
-                _write_durable(durable_path, to_promote, now)
-            text, carried, omitted = render_active(kept, week, now)
-            _write_active(directory, text)
-            # Last, deliberately: see the module docstring on write ordering.
-            if removed_ids:
-                _splice_inbox(directory, raw_lines, removed_ids, merged_survivors)
-        except BaseException:
-            _restore(snapshot)
-            raise
+            snapshot = _snapshot((archive_path, durable_path, active_path, directory / "inbox.jsonl"))
+            try:
+                if removed:
+                    _write_archive(archive_path, week, removed, now)
+                if to_promote:
+                    _write_durable(durable_path, to_promote, now)
+                text, carried, omitted = render_active(kept, week, now)
+                _write_active(directory, text)
+                # Last, deliberately: see the module docstring on write ordering.
+                if removed_ids:
+                    _splice_inbox(directory, raw_lines, removed_ids, merged_survivors)
+            except BaseException:
+                _restore(snapshot)
+                raise
 
     return CompactResult(
         week=week,
