@@ -276,7 +276,7 @@ def install_claude(
     if dry_run:
         args.append("--dry-run")
     if bootstrap_register.main(args) != 0:
-        raise SetupError("Claude Code registration failed; see the diagnostic above")
+        raise SetupError("Claude Code registration failed or is incomplete; see the diagnostic above")
     return ["claude: hooks and MCP registration complete"] + install_memory_rules(
         home=home, dry_run=dry_run
     )
