@@ -934,3 +934,13 @@ def test_installed_harness_dirs_walks_distribution_metadata(tmp_path: Path, monk
     assert (theirs / "harness").resolve() not in found
     # The package this process imported is still reported alongside.
     assert Path(doctor.__file__).resolve().parent in found
+
+
+def test_help_prints_usage_and_exits_zero_without_running_checks(capsys, monkeypatch) -> None:
+    def boom(*_a, **_k):
+        raise AssertionError("--help must not run the checks")
+
+    monkeypatch.setattr(doctor, "run_checks", boom)
+    for flag in ("--help", "-h"):
+        assert doctor.main([flag]) == 0
+        assert "usage: agent-harness-doctor" in capsys.readouterr().out

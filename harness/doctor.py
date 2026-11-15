@@ -965,8 +965,21 @@ def format_report(results: list[CheckResult]) -> str:
     return "\n".join(lines)
 
 
+USAGE = (
+    "usage: agent-harness-doctor [PROJECT_DIR]\n"
+    "\n"
+    "Check the install, hooks, MCP registration and memory store for PROJECT_DIR\n"
+    "(default: the current directory). Exits 1 if any check fails.\n"
+    "\n"
+    "  -h, --help   show this message and exit\n"
+)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
+    if any(a in ("-h", "--help") for a in args):
+        print(USAGE, end="")
+        return 0
     project_dir = Path(args[0]) if args else None
     results = run_checks(project_dir)
     print(format_report(results))

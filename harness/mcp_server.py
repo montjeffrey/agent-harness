@@ -1265,10 +1265,26 @@ def _warm_optional_native_imports() -> str | None:
         return f"{type(exc).__name__}: {exc}"
 
 
+USAGE = (
+    "usage: agent-harness-mcp [--graph PATH]\n"
+    "\n"
+    "Serve the agent-harness memory, code-graph and work tools over MCP stdio.\n"
+    "Normally started by an agent client (see `agent-harness-setup`), not by hand.\n"
+    "\n"
+    "  --graph PATH   use this graph.json instead of the project's own\n"
+    "  -h, --help     show this message and exit\n"
+)
+
+
 def main(argv: list[str] | None = None) -> int:
     global _GRAPH_OVERRIDE
 
     args = sys.argv[1:] if argv is None else argv
+    if any(a in ("-h", "--help") for a in args):
+        # Before the mcp import and before serving: --help must not start a
+        # stdio server that waits on stdin forever.
+        print(USAGE, end="")
+        return 0
     _GRAPH_OVERRIDE = _parse_argv(args)
 
     try:

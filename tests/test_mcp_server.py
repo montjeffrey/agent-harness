@@ -1130,3 +1130,15 @@ def test_the_server_directory_may_be_used_without_naming_it(
 
     out = mcp_server.dispatch_memory("memory_status", {})
     assert "no memory recorded yet" in out
+
+
+def test_help_prints_usage_and_exits_zero_without_serving(capsys, monkeypatch) -> None:
+    from harness import mcp_server
+
+    def boom(*_a, **_k):
+        raise AssertionError("--help must not build or run the server")
+
+    monkeypatch.setattr(mcp_server, "_build_server", boom)
+    for flag in ("--help", "-h"):
+        assert mcp_server.main([flag]) == 0
+        assert "usage: agent-harness-mcp" in capsys.readouterr().out
