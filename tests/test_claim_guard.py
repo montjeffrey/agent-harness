@@ -73,6 +73,19 @@ def test_denies_a_path_claimed_by_another_sessions_active_task(repo: Path) -> No
     assert OTHER in verdict.reason  # tells the agent which id this session has
 
 
+def test_a_bracketed_path_under_a_claimed_directory_is_still_denied(repo: Path) -> None:
+    """`app/[id]/page.tsx` is a normal route path; the guard used to treat the
+    brackets as a wildcard claim, raise, and fail open."""
+    page = repo / "app" / "[id]" / "page.tsx"
+    page.parent.mkdir(parents=True)
+    page.write_text("export default 1" + chr(10), encoding="utf-8")
+    _run(repo, "add", ".")
+    _run(repo, "commit", "-m", "add route")
+    work.start(repo, "Rework app", OWNER, ["app"], now=NOW)
+
+    assert claim_guard.decide(_event(str(page))).allow is False
+
+
 def test_a_directory_claim_covers_files_beneath_it(repo: Path) -> None:
     work.start(repo, "Rework src", OWNER, ["src"], now=NOW)
     assert claim_guard.decide(_event(str(repo / "src" / "app.py"))).allow is False
@@ -201,11 +214,14 @@ def test_an_unexpected_harness_exception_allows(repo: Path, monkeypatch: pytest.
     assert claim_guard.decide(_event(str(repo / "src" / "app.py"))).allow
 
 
-def test_a_path_the_claim_grammar_rejects_allows(repo: Path) -> None:
-    """`normalize_paths` refuses wildcard characters; a real file named that
-    way is unusual but must not become an unexplained block."""
+def test_a_path_with_wildcard_characters_is_checked_like_any_other(repo: Path) -> None:
+    """`normalize_paths` refuses wildcard characters in a *claim*; a real file
+    named that way is still a file, and a claim over its directory covers it.
+    This used to allow the edit (fail open); the refusal names the owning task."""
     work.start(repo, "Rework src", OWNER, ["src"], now=NOW)
-    assert claim_guard.decide(_event(str(repo / "src" / "odd[1].py"))).allow
+    verdict = claim_guard.decide(_event(str(repo / "src" / "odd[1].py")))
+    assert verdict.allow is False
+    assert OWNER in verdict.reason
 
 
 @pytest.mark.parametrize(
