@@ -706,7 +706,7 @@ def test_a_stdin_that_isatty_but_is_not_a_console_is_refused(
     """On Windows `isatty()` is True for the NUL device, so `review accept ID
     < NUL` passed the gate. The console check must be the deciding one."""
     monkeypatch.setattr("harness.memory._windows_console_stdin", lambda: False)
-    monkeypatch.setattr("harness.memory.os.name", "nt")
+    monkeypatch.setattr("harness.memory._ON_WINDOWS", True)
 
     code = memory.main(["review", "accept", proposed_id, "--project", str(project)])
 
