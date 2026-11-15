@@ -395,7 +395,11 @@ def writer_lock(directory: Path) -> Iterator[None]:
     that reserves ids and then appends can hold it across both.
     """
     directory = Path(directory)
-    key = str(directory.resolve()) if directory.exists() else str(directory.absolute())
+    # Create first, then resolve: the key must be the same for the outer call
+    # and any nested one (`a/../store` resolves differently before and after it
+    # exists, and a second key would try to take the OS lock this process holds).
+    directory.mkdir(parents=True, exist_ok=True)
+    key = str(directory.resolve())
     with _process_locks_guard:
         thread_lock = _process_locks.setdefault(key, threading.RLock())
     with thread_lock:
@@ -407,8 +411,17 @@ def writer_lock(directory: Path) -> Iterator[None]:
             finally:
                 _lock_depth[key] -= 1
             return
-        directory.mkdir(parents=True, exist_ok=True)
-        fd = os.open(directory / WRITE_LOCK_NAME, os.O_RDWR | os.O_CREAT)
+        lock_path = directory / WRITE_LOCK_NAME
+        try:
+            fd = os.open(lock_path, os.O_RDWR | os.O_CREAT)
+        except OSError as exc:
+            # A store can ship `.write.lock` as a directory (or otherwise
+            # unopenable); say which path to remove rather than failing every
+            # write with a bare errno.
+            raise OSError(
+                f"cannot open the memory write lock at {lock_path} ({exc}); "
+                "remove or replace that path"
+            ) from exc
         try:
             _os_lock(fd)
             _lock_depth[key] = 1

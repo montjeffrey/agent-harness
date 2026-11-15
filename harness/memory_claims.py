@@ -103,33 +103,34 @@ def claim(
         raise ValueError(f"unknown owner {owner!r} (expected one of {KNOWN_AGENTS})")
 
     now = now or datetime.now(timezone.utc)
-    lines, index, original = memory_review.locate_entry(directory, entry_id)
+    with memory_store.writer_lock(directory):
+        lines, index, original = memory_review.locate_entry(directory, entry_id)
 
-    if original.get("type") not in memory_tasks.WORK_TYPES:
-        raise ValueError(
-            f"{entry_id} is a {original.get('type')}; only "
-            f"{sorted(memory_tasks.WORK_TYPES)} entries can be claimed"
-        )
-    if original.get("status") not in memory_tasks.OPEN_STATUSES:
-        raise ValueError(f"{entry_id} is {original.get('status')}; only open work can be claimed")
-
-    existing = original.get("claim")
-    reclaimed_from: str | None = None
-    if existing and existing.get("owner") != owner:
-        if not is_stale(existing, now):
+        if original.get("type") not in memory_tasks.WORK_TYPES:
             raise ValueError(
-                f"{entry_id} is already claimed by {existing.get('owner')!r} "
-                f"(since {existing.get('ts')}); wait for it to go stale "
-                f"(>{CLAIM_STALE_HOURS}h) or have that owner release it"
+                f"{entry_id} is a {original.get('type')}; only "
+                f"{sorted(memory_tasks.WORK_TYPES)} entries can be claimed"
             )
-        reclaimed_from = existing.get("owner")
+        if original.get("status") not in memory_tasks.OPEN_STATUSES:
+            raise ValueError(f"{entry_id} is {original.get('status')}; only open work can be claimed")
 
-    updated = dict(original)
-    updated["claim"] = {"owner": owner, "ts": memory_store.format_ts(now)}
-    updated = memory_store.validate_entry(updated, now=now)
+        existing = original.get("claim")
+        reclaimed_from: str | None = None
+        if existing and existing.get("owner") != owner:
+            if not is_stale(existing, now):
+                raise ValueError(
+                    f"{entry_id} is already claimed by {existing.get('owner')!r} "
+                    f"(since {existing.get('ts')}); wait for it to go stale "
+                    f"(>{CLAIM_STALE_HOURS}h) or have that owner release it"
+                )
+            reclaimed_from = existing.get("owner")
 
-    lines[index] = json.dumps(updated, ensure_ascii=False)
-    memory_store.write_lines(lines, directory)
+        updated = dict(original)
+        updated["claim"] = {"owner": owner, "ts": memory_store.format_ts(now)}
+        updated = memory_store.validate_entry(updated, now=now)
+
+        lines[index] = json.dumps(updated, ensure_ascii=False)
+        memory_store.write_lines(lines, directory)
     return ClaimResult(entry=updated, reclaimed_from=reclaimed_from)
 
 
@@ -147,23 +148,24 @@ def release(
     silently drop another agent's claim out from under it by accident.
     """
     now = now or datetime.now(timezone.utc)
-    lines, index, original = memory_review.locate_entry(directory, entry_id)
+    with memory_store.writer_lock(directory):
+        lines, index, original = memory_review.locate_entry(directory, entry_id)
 
-    existing = original.get("claim")
-    if not existing:
-        raise ValueError(f"{entry_id} is not currently claimed")
-    if existing.get("owner") != owner and not force:
-        raise ValueError(
-            f"{entry_id} is claimed by {existing.get('owner')!r}, not {owner!r}; "
-            f"pass force=True to release someone else's claim"
-        )
+        existing = original.get("claim")
+        if not existing:
+            raise ValueError(f"{entry_id} is not currently claimed")
+        if existing.get("owner") != owner and not force:
+            raise ValueError(
+                f"{entry_id} is claimed by {existing.get('owner')!r}, not {owner!r}; "
+                f"pass force=True to release someone else's claim"
+            )
 
-    updated = dict(original)
-    del updated["claim"]
-    updated = memory_store.validate_entry(updated, now=now)
+        updated = dict(original)
+        del updated["claim"]
+        updated = memory_store.validate_entry(updated, now=now)
 
-    lines[index] = json.dumps(updated, ensure_ascii=False)
-    memory_store.write_lines(lines, directory)
+        lines[index] = json.dumps(updated, ensure_ascii=False)
+        memory_store.write_lines(lines, directory)
     return updated
 
 

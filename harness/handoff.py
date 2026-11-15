@@ -541,25 +541,26 @@ def _replace_group(memory_dir: Path, session_id: str, entries: list[dict], now: 
     anything a human already reviewed (accepted, rejected) is kept.
     """
     tag = _session_tag(session_id)
-    keep, dropped = [], 0
-    for line in memory_store.read_lines(memory_dir):
-        try:
-            rec = json.loads(line)
-        except ValueError:
-            rec = None
-        if (
-            isinstance(rec, dict)
-            and HANDOFF_TAG in (rec.get("tags") or [])
-            and tag in (rec.get("tags") or [])
-            and (rec.get("source") or {}).get("session") == session_id.strip()
-            and rec.get("status") == "proposed"
-        ):
-            dropped += 1
-            continue
-        keep.append(line)
-    if dropped:
-        memory_store.write_lines(keep, memory_dir)
-    memory_store.append_entries(entries, directory=memory_dir, now=now)
+    with memory_store.writer_lock(memory_dir):
+        keep, dropped = [], 0
+        for line in memory_store.read_lines(memory_dir):
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                rec = None
+            if (
+                isinstance(rec, dict)
+                and HANDOFF_TAG in (rec.get("tags") or [])
+                and tag in (rec.get("tags") or [])
+                and (rec.get("source") or {}).get("session") == session_id.strip()
+                and rec.get("status") == "proposed"
+            ):
+                dropped += 1
+                continue
+            keep.append(line)
+        if dropped:
+            memory_store.write_lines(keep, memory_dir)
+        memory_store.append_entries(entries, directory=memory_dir, now=now)
     return dropped
 
 
