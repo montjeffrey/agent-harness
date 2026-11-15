@@ -333,7 +333,9 @@ local semantic index ranks remembered facts; it is not a source-code dump or
 a replacement for structural graph queries.
 
 Backend resolution: `--backend` flag, then `HARNESS_GRAPH_BACKEND` env var,
-then `"auto"`. API keys are read from the environment; if a backend's key
+then `"auto"`. With `"auto"` no model is ever called: a provider key that happens
+to be in your environment (for example `OPENAI_API_KEY` exported for another tool)
+does not select a backend. API keys are read from the environment; if a backend's key
 isn't set, `graph_refresh.py` will look for `~/.agent-harness/config.json`:
 
 ```json
@@ -967,11 +969,13 @@ Exit codes: `0` success, `1` nothing to do (e.g. `status` before `init`),
 
 ## Security model
 
-The only external command this toolkit ever executes on your behalf is the
+The only command this toolkit executes from *your* configuration is the
 `key_command` you write into your own `~/.agent-harness/config.json` -- it is
 run as your user, its output is exported into the named env var for the
-duration of a graph refresh, and it is never printed or logged. Nothing else
-reads credentials, and no telemetry leaves your machine on its own -- the
+duration of a graph refresh, and it is never printed or logged. Beyond that it
+runs `git` (local operations only), `python -m graphify` for graph builds,
+`codex mcp add` during `agent-harness-setup`, and, once a day, a detached local
+telemetry collector. Nothing else reads credentials, and no telemetry leaves your machine on its own -- the
 telemetry store above is written, read, and aggregated entirely locally,
 and `export` writes only to a directory you name.
 

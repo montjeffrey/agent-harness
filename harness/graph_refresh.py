@@ -219,12 +219,16 @@ def has_configured_label_backend(backend: str) -> bool:
     Graphify's AST ``update`` command is local and useful without a model.
     Community naming is not: calling it with no configured credential can
     either fail or prompt a client to select a paid provider.  Keep the
-    default lifecycle local-first and run the label pass only after an
-    explicit backend was selected or a harness-supported key is present.
+    default lifecycle local-first and run the label pass only after a backend
+    was chosen on purpose (`--backend` or `HARNESS_GRAPH_BACKEND`).
+
+    An API key in the environment is NOT a choice. Developers export
+    OPENAI_API_KEY or ANTHROPIC_API_KEY for their agents, and treating that as
+    consent sent community and symbol content to a hosted model whenever they
+    enrolled a repository, against the README's statement that the default
+    graph build does not call an LLM.
     """
-    if backend != AUTO_BACKEND:
-        return True
-    return any(os.environ.get(env_var) for env_var in BACKEND_ENV_VARS.values())
+    return backend != AUTO_BACKEND
 
 
 def build_graphify_command(subcommand: str, repo_root: Path, backend: str) -> list[str]:
