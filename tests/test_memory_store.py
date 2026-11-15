@@ -9,7 +9,9 @@ touches the real `~/.agent-harness/memory/` directory.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -781,3 +783,63 @@ def test_git_helpers_decode_output_as_utf8(monkeypatch: pytest.MonkeyPatch, tmp_
     graph_location.git_is_dirty(repo)
 
     assert seen and all(k.get("encoding") == "utf-8" for k in seen)
+
+
+_WRITER = (
+    "import sys\n"
+    "from datetime import datetime, timezone\n"
+    "from pathlib import Path\n"
+    "from harness import memory_store\n"
+    "d, n = Path(sys.argv[1]), int(sys.argv[2])\n"
+    "now = datetime(2026, 11, 14, tzinfo=timezone.utc)\n"
+    "for i in range(n):\n"
+    "    memory_store.append_entries([{'type': 'discovery', 'scope': 'project', "
+    "'summary': 'writer %s entry %d' % (sys.argv[3], i), "
+    "'source': {'manual': True}}], d, now=now)\n"
+)
+
+
+def test_parallel_writer_processes_never_share_an_id(tmp_path: Path) -> None:
+    """Each writer read the next id and appended in two unlocked steps, so
+    concurrent processes handed out the same `mem-...-NNN` id."""
+    store = tmp_path / "memory"
+    repo_root = Path(memory_store.__file__).resolve().parent.parent
+    env = {**os.environ, "PYTHONPATH": str(repo_root)}
+    writers, each = 4, 15
+    procs = [
+        subprocess.Popen(
+            [sys.executable, "-c", _WRITER, str(store), str(each), str(w)],
+            cwd=repo_root,
+            env=env,
+        )
+        for w in range(writers)
+    ]
+    assert [p.wait(timeout=120) for p in procs] == [0] * writers
+
+    ids = [rec["id"] for rec in memory_store.iter_entries(store)]
+    assert len(ids) == writers * each
+    assert len(set(ids)) == len(ids)
+
+
+def test_writer_lock_is_reentrant_and_released(tmp_path: Path) -> None:
+    store = tmp_path / "memory"
+    with memory_store.writer_lock(store):
+        with memory_store.writer_lock(store):
+            memory_store.append_entries(
+                [{"type": "discovery", "scope": "project", "summary": "inside", "source": {"manual": True}}],
+                store,
+                now=NOW,
+            )
+    # Released: a fresh lock is acquired at once, from another thread too.
+    import threading
+
+    done = []
+
+    def grab() -> None:
+        with memory_store.writer_lock(store):
+            done.append(True)
+
+    t = threading.Thread(target=grab)
+    t.start()
+    t.join(timeout=10)
+    assert done == [True]

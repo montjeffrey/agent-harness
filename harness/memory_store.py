@@ -53,7 +53,10 @@ import json
 import os
 import re
 import subprocess
+import threading
+import time
 from collections.abc import Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -333,6 +336,91 @@ def validate_entry(entry: dict, now: datetime | None = None) -> dict:
     return rec
 
 
+WRITE_LOCK_NAME = ".write.lock"
+WRITE_LOCK_TIMEOUT_SECONDS = 30.0
+
+# One entry per store this process has locked: (thread lock, holder depth).
+# The OS lock is per process (and on Windows per handle), so threads and
+# re-entrant callers are serialized here and only the outermost one touches it.
+_process_locks: dict[str, threading.RLock] = {}
+_process_locks_guard = threading.Lock()
+_lock_depth: dict[str, int] = {}
+
+
+def _os_lock(fd: int) -> None:
+    """Block until an exclusive lock on byte 0 of `fd` is held, or time out."""
+    deadline = time.monotonic() + WRITE_LOCK_TIMEOUT_SECONDS
+    while True:
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except OSError:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"timed out after {WRITE_LOCK_TIMEOUT_SECONDS:.0f}s waiting for the memory "
+                    f"write lock ({WRITE_LOCK_NAME}); another writer is holding it"
+                ) from None
+            time.sleep(0.01)
+
+
+def _os_unlock(fd: int) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+@contextmanager
+def writer_lock(directory: Path) -> Iterator[None]:
+    """Serialize id allocation and appends to one store, across processes.
+
+    `next_entry_id` reads the inbox and `append_entries` writes it, so two
+    writers that both read before either wrote handed out the same id. The
+    lock is an OS advisory lock on ``<directory>/.write.lock`` (`msvcrt` on
+    Windows, `fcntl` elsewhere), so a crashed holder frees it automatically and
+    there is no stale-lock cleanup. Re-entrant within a thread, so a caller
+    that reserves ids and then appends can hold it across both.
+    """
+    directory = Path(directory)
+    key = str(directory.resolve()) if directory.exists() else str(directory.absolute())
+    with _process_locks_guard:
+        thread_lock = _process_locks.setdefault(key, threading.RLock())
+    with thread_lock:
+        depth = _lock_depth.get(key, 0)
+        if depth:
+            _lock_depth[key] = depth + 1
+            try:
+                yield
+            finally:
+                _lock_depth[key] -= 1
+            return
+        directory.mkdir(parents=True, exist_ok=True)
+        fd = os.open(directory / WRITE_LOCK_NAME, os.O_RDWR | os.O_CREAT)
+        try:
+            _os_lock(fd)
+            _lock_depth[key] = 1
+            try:
+                yield
+            finally:
+                _lock_depth.pop(key, None)
+                _os_unlock(fd)
+        finally:
+            os.close(fd)
+
+
 def next_entry_id(directory: Path, now: datetime | None = None) -> str:
     """Return the next unused ``mem-YYYY-MM-DD-NNN`` id for `directory`.
 
@@ -368,20 +456,20 @@ def append_entries(
         return 0
 
     day = now.strftime("%Y-%m-%d")
-    seed = _ID_RE.match(next_entry_id(directory, now=now))
-    counter = int(seed.group(2)) if seed else 1
-    for rec in normalized:
-        if not rec.get("id"):
-            rec["id"] = f"mem-{day}-{counter:03d}"
-            counter += 1
-
     directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=True)
-    path = directory / "inbox.jsonl"
-    with path.open("a", encoding="utf-8") as fh:
+    with writer_lock(directory):
+        seed = _ID_RE.match(next_entry_id(directory, now=now))
+        counter = int(seed.group(2)) if seed else 1
         for rec in normalized:
-            fh.write(json.dumps(rec, ensure_ascii=False))
-            fh.write("\n")
+            if not rec.get("id"):
+                rec["id"] = f"mem-{day}-{counter:03d}"
+                counter += 1
+
+        path = directory / "inbox.jsonl"
+        with path.open("a", encoding="utf-8") as fh:
+            for rec in normalized:
+                fh.write(json.dumps(rec, ensure_ascii=False))
+                fh.write("\n")
     return len(normalized)
 
 
