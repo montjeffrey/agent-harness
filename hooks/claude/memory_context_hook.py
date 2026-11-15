@@ -400,6 +400,10 @@ def emit(project_root: Path, session_id: str | None = None) -> str:
     text = _emit_toc(project_root, session_id)
     if not text:
         return ""
+    if text in (UNENROLLED_NOTICE, TRACKED_NOTICE):
+        # Nothing else may follow a refusal: the hand-off block reads the same
+        # untrusted store the notice says was not loaded.
+        return text
     return text + handoff_block(project_root, session_id)
 
 
@@ -453,11 +457,11 @@ def _untrusted_store_notice(project_root: Path, memory_store: Any) -> str:
     `memory_store.is_enrolled`) and its memory files to be untracked. The
     text is a constant, never repository content.
     """
+    if memory_store.is_trusted_store(project_root):
+        return ""
     if not memory_store.is_enrolled(project_root):
         return UNENROLLED_NOTICE
-    if memory_store.tracked_memory_files(project_root):
-        return TRACKED_NOTICE
-    return ""
+    return TRACKED_NOTICE
 
 
 def _emit_toc(project_root: Path, session_id: str | None = None) -> str:
@@ -549,7 +553,7 @@ def record_session_start(project_root: Path, session_id: str, now: datetime | No
     _harness()  # puts a source checkout on sys.path before the import below
     from harness import memory_store, work
 
-    if not memory_store.is_enrolled(project_root):
+    if not memory_store.is_trusted_store(project_root):
         return None
 
     repo = work.repository_for(project_root)
@@ -579,7 +583,7 @@ def record_handoff_start(project_root: Path, session_id: str) -> bool:
         if not (project_root / ".agent-harness").is_dir():
             return False
         _, _, _, memory_store = _harness()
-        if not memory_store.is_enrolled(project_root):
+        if not memory_store.is_trusted_store(project_root):
             return False
         from harness import handoff
 
