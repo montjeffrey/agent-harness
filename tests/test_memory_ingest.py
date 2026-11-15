@@ -349,3 +349,52 @@ def test_ingest_respects_no_scope_flag(tmp_path: Path) -> None:
     assert result.scope_seeded is False
     text = (root / ".agent-harness" / "scope.md").read_text(encoding="utf-8")
     assert memory_ingest.SCOPE_PURPOSE_PLACEHOLDER in text
+
+
+# --- links that leave the repository -----------------------------------------
+
+
+def _link(link: Path, target: Path) -> None:
+    import pytest
+
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are not available here")
+
+
+def test_a_readme_symlinked_outside_the_repository_is_not_ingested(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    outside = tmp_path / "outside-secret.txt"
+    outside.write_text("OUTSIDE FILE CONTENT that must never reach memory\n" * 3, encoding="utf-8")
+    _link(root / "README.md", outside)
+
+    assert memory_ingest.discover(root) == []
+    result = memory_ingest.ingest(root)
+
+    assert result.scanned == 0
+    text = (root / ".agent-harness" / "scope.md").read_text(encoding="utf-8")
+    inbox = memory_store.project_memory_dir(root) / "inbox.jsonl"
+    assert "OUTSIDE FILE CONTENT" not in text
+    assert not inbox.exists() or "OUTSIDE FILE CONTENT" not in inbox.read_text(encoding="utf-8")
+
+
+def test_a_docs_directory_linked_outside_the_repository_is_not_ingested(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (outside / "notes.md").write_text("# Notes\n\nprivate\n", encoding="utf-8")
+    _link(root / "docs", outside)
+
+    assert memory_ingest.discover(root) == []
+
+
+def test_a_link_that_stays_inside_the_repository_is_still_followed(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    (root / "docs").mkdir()
+    (root / "docs" / "real.md").write_text("# Real\n\nbody text here\n", encoding="utf-8")
+    _link(root / "README.md", root / "docs" / "real.md")
+
+    found = memory_ingest.discover(root)
+
+    assert len(found) == 1  # the link and its target are one document
