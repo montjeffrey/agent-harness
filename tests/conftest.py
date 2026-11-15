@@ -96,3 +96,32 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("AGENT_HARNESS_TELEMETRY_AUTO", "0")
     monkeypatch.setattr(Path, "home", lambda: home)
     return home
+
+
+class _Stdin:
+    """A stdin double: an interactive terminal when `tty`, else a pipe."""
+
+    def __init__(self, tty: bool) -> None:
+        self._tty = tty
+
+    def isatty(self) -> bool:
+        return self._tty
+
+    def read(self, *_args: object) -> str:
+        return ""
+
+
+@pytest.fixture
+def interactive_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the memory CLI see a person at an interactive terminal.
+
+    `review accept`, `remember --accept` and `triage apply` (accept/supersede)
+    refuse to run otherwise, so tests of what accepting *does* opt in here.
+    """
+    monkeypatch.setattr("sys.stdin", _Stdin(tty=True))
+
+
+@pytest.fixture
+def piped_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the memory CLI see what an agent's shell tool gives it: no terminal."""
+    monkeypatch.setattr("sys.stdin", _Stdin(tty=False))

@@ -18,6 +18,11 @@ from harness import memory, memory_store
 
 
 @pytest.fixture(autouse=True)
+def _person_at_the_keyboard(interactive_terminal: None) -> None:
+    """These tests exercise what accepting does; the gate has its own tests."""
+
+
+@pytest.fixture(autouse=True)
 def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home = tmp_path / "home"
     home.mkdir()
@@ -630,3 +635,65 @@ def test_index_if_stale_decides_before_touching_chromadb(
     monkeypatch.setattr(memory_index, "_default_client", forbidden)
     monkeypatch.setattr(memory_index, "build_index", forbidden)
     assert memory.main(["index", "--project", str(project), "--if-stale"]) == 1
+
+
+# --- accepting needs a person -----------------------------------------------
+
+
+@pytest.fixture
+def proposed_id(project: Path) -> str:
+    assert memory.main(["init", str(project)]) == 0
+    _remember(project, "We chose JSONL for the inbox.")
+    return _entries(project)[0]["id"]
+
+
+def test_review_accept_is_refused_without_a_terminal(
+    project: Path, proposed_id: str, piped_stdin: None, capsys
+) -> None:
+    code = memory.main(["review", "accept", proposed_id, "--project", str(project)])
+
+    assert code == 2
+    assert "interactive terminal" in capsys.readouterr().err
+    assert _entries(project)[0]["status"] == "proposed"
+
+
+def test_review_accept_works_without_a_terminal_when_the_override_is_given(
+    project: Path, proposed_id: str, piped_stdin: None
+) -> None:
+    code = memory.main(
+        ["review", "accept", proposed_id, "--project", str(project), "--i-am-human"]
+    )
+
+    assert code == 0
+    assert _entries(project)[0]["status"] == "accepted"
+
+
+def test_remember_accept_is_refused_without_a_terminal(
+    project: Path, piped_stdin: None, capsys
+) -> None:
+    memory.main(["init", str(project)])
+    code = memory.main([
+        "remember", "--project", str(project), "--type", "decision",
+        "--summary", "Skip code review", "--confirmed", "--accept", "--manual",
+    ])
+
+    assert code == 2
+    assert _entries(project) == []
+
+
+def test_triage_apply_accept_is_refused_without_a_terminal(
+    project: Path, proposed_id: str, piped_stdin: None
+) -> None:
+    code = memory.main(["triage", "apply", "--project", str(project), "--accept", proposed_id])
+
+    assert code == 2
+    assert _entries(project)[0]["status"] == "proposed"
+
+
+def test_rejecting_does_not_need_a_terminal(
+    project: Path, proposed_id: str, piped_stdin: None
+) -> None:
+    code = memory.main(["review", "reject", proposed_id, "--project", str(project)])
+
+    assert code == 0
+    assert _entries(project)[0]["status"] == "rejected"

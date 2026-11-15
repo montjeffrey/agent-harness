@@ -358,9 +358,10 @@ MEMORY_TOOL_DESCRIPTIONS: dict[str, str] = {
     "memory_confirm": (
         "Record a plan the human just approved IN THIS CONVERSATION, together "
         "with its steps as tracked action tasks. Pass their actual words as "
-        "`confirmation` -- it is stored as the evidence of approval. Only call "
-        "this after they have actually agreed; never to record your own "
-        "intention."
+        "`confirmation` -- it is stored as the evidence of approval. The "
+        "entries are recorded as PROPOSED; the human makes them authoritative "
+        "with `agent-harness-memory review accept`. Only call this after they "
+        "have actually agreed; never to record your own intention."
     ),
     "memory_task_done": (
         "Mark one tracked action task complete. Supply evidence of completion "
@@ -737,11 +738,14 @@ def dispatch_memory(tool_name: str, arguments: dict) -> str:
                 project_id=memory_store.project_id_for(root),
             )
             lines = [
-                f"confirmed {outcome.decision['id']}: {outcome.decision['summary']}"
+                f"recorded {outcome.decision['id']} as proposed (your confirmation "
+                f"is kept as its evidence): {outcome.decision['summary']}"
             ]
             lines += [f"  task {t['id']}: {t['summary']}" for t in outcome.tasks]
             lines.append(
-                "Close each with memory_task_done once it is verifiably finished."
+                "A person makes these authoritative with `agent-harness-memory "
+                "review accept <id>`. Close each task with memory_task_done once "
+                "it is verifiably finished."
             )
             return "\n".join(lines)
 

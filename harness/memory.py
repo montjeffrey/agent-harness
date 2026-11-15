@@ -112,6 +112,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="attest that you confirmed this by hand (counts as a source)",
     )
 
+    rem_p.add_argument(
+        "--i-am-human", action="store_true",
+        help="override: allow accepting without an interactive terminal "
+             "(for scripts a person runs; an agent must never pass this)",
+    )
+
     status_p = sub.add_parser("status", help="report memory freshness, counts, and scope warnings")
     status_p.add_argument("--project", default=".", help="project root (default: current directory)")
 
@@ -165,6 +171,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     rev_p.add_argument("--note", default=None, help="reviewer note; counts as resolve evidence")
     rev_p.add_argument("--commit", default=None, help="evidence commit SHA")
     rev_p.add_argument("--file", default=None, help="evidence path, repository-relative")
+    rev_p.add_argument(
+        "--i-am-human", action="store_true",
+        help="override: allow accepting without an interactive terminal "
+             "(for scripts a person runs; an agent must never pass this)",
+    )
 
     tri_p = sub.add_parser(
         "triage",
@@ -203,6 +214,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="apply: supersede one entry with --summary",
     )
     tri_p.add_argument("--summary", default=None, help="apply: replacement statement for --supersede")
+    tri_p.add_argument(
+        "--i-am-human", action="store_true",
+        help="override: allow accepting without an interactive terminal "
+             "(for scripts a person runs; an agent must never pass this)",
+    )
     tri_p.add_argument("--note", default=None, help="apply: reviewer note for every flag decision")
     tri_p.add_argument("--commit", default=None, help="apply: evidence commit SHA for every flag decision")
     tri_p.add_argument("--file", default=None, help="apply: evidence path for every flag decision")
@@ -376,7 +392,34 @@ def cmd_init(args: argparse.Namespace) -> int:
     return 0
 
 
+ACCEPTING_ACTIONS = frozenset({"accept", "supersede"})
+
+
+def _require_human(args: argparse.Namespace, what: str) -> bool:
+    """Whether a person is present for an act that creates accepted memory.
+
+    "Everything an agent records stays proposed until a human accepts it" is
+    only true if the accepting commands cannot be run by the agent itself. An
+    agent's shell tool runs with stdin detached from any terminal, so an
+    interactive stdin is the cheap, honest signal of a person at the keyboard.
+    A script the person runs on purpose passes `--i-am-human`. This stops
+    accidental and injection-driven promotion; an agent with shell access can
+    still edit the JSONL directly, which no CLI check can prevent.
+    """
+    if getattr(args, "i_am_human", False) or sys.stdin.isatty():
+        return True
+    print(
+        f"{what} creates accepted memory, which needs a person: run it from an "
+        "interactive terminal, or pass --i-am-human from a script you run yourself. "
+        "Nothing was changed.",
+        file=sys.stderr,
+    )
+    return False
+
+
 def cmd_remember(args: argparse.Namespace) -> int:
+    if args.accept and not _require_human(args, "remember --accept"):
+        return 2
     root = Path(args.project).expanduser()
     directory = (
         memory_store.machine_memory_dir()
@@ -587,6 +630,9 @@ def cmd_review(args: argparse.Namespace) -> int:
         print(f"review {args.action} needs an entry id", file=sys.stderr)
         return 2
 
+    if args.action in ACCEPTING_ACTIONS and not _require_human(args, f"review {args.action}"):
+        return 2
+
     try:
         result = memory_review.apply_review(
             directory,
@@ -733,6 +779,10 @@ def cmd_triage(args: argparse.Namespace) -> int:
             return 2
         print("nothing to apply -- every decision is `skip`")
         return 1
+
+    if not args.dry_run and any(d.action in ACCEPTING_ACTIONS for d in live):
+        if not _require_human(args, "triage apply with accept/supersede"):
+            return 2
 
     try:
         results = memory_review.apply_reviews(directory, live, dry_run=args.dry_run)
