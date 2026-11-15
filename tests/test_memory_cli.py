@@ -9,6 +9,7 @@ touches the real `~/.agent-harness/memory/` directory.
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -697,3 +698,32 @@ def test_rejecting_does_not_need_a_terminal(
 
     assert code == 0
     assert _entries(project)[0]["status"] == "rejected"
+
+
+def test_a_stdin_that_isatty_but_is_not_a_console_is_refused(
+    project: Path, proposed_id: str, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """On Windows `isatty()` is True for the NUL device, so `review accept ID
+    < NUL` passed the gate. The console check must be the deciding one."""
+    monkeypatch.setattr("harness.memory._windows_console_stdin", lambda: False)
+    monkeypatch.setattr("harness.memory.os.name", "nt")
+
+    code = memory.main(["review", "accept", proposed_id, "--project", str(project)])
+
+    assert code == 2
+    assert "interactive terminal" in capsys.readouterr().err
+    assert _entries(project)[0]["status"] == "proposed"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="GetConsoleMode is Windows-only")
+def test_the_real_nul_device_is_not_a_console() -> None:
+    import subprocess
+    import sys
+
+    root = Path(memory.__file__).resolve().parent.parent
+    with open(os.devnull, "rb") as nul:
+        out = subprocess.run(
+            [sys.executable, "-c", "from harness import memory; print(memory._windows_console_stdin())"],
+            stdin=nul, capture_output=True, text=True, cwd=root, check=True,
+        )
+    assert out.stdout.strip() == "False"
