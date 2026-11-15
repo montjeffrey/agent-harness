@@ -944,3 +944,51 @@ def test_help_prints_usage_and_exits_zero_without_running_checks(capsys, monkeyp
     for flag in ("--help", "-h"):
         assert doctor.main([flag]) == 0
         assert "usage: agent-harness-doctor" in capsys.readouterr().out
+
+
+def _key_config(tmp_path: Path, monkeypatch, command: str = "exit 0") -> Path:
+    monkeypatch.setenv("HARNESS_GRAPH_BACKEND", "nvidia-nim")
+    monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
+    config = tmp_path / "config.json"
+    config.write_text(
+        json.dumps({"key_command": command, "key_env": "NVIDIA_API_KEY"}), encoding="utf-8"
+    )
+    return config
+
+
+def test_check_backend_key_does_not_run_a_command_from_an_untrusted_config(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """The real refresh refuses a group-writable or foreign-owned config; the
+    doctor used to run its key_command regardless."""
+    from harness import graph_refresh
+
+    marker = tmp_path / "ran"
+    config = _key_config(tmp_path, monkeypatch, f'python -c "open(r\'{marker}\', \'w\')"')
+
+    def untrusted(path: Path) -> None:
+        raise SystemExit(f"{path} is group- or world-writable; refusing to read it")
+
+    monkeypatch.setattr(graph_refresh, "_check_config_file_trust", untrusted)
+    result = doctor.check_backend_key(config_path=config)
+
+    assert result.level == "FAIL"
+    assert "refusing to read" in result.detail
+    assert not marker.exists()
+
+
+def test_check_backend_key_times_out_a_hanging_key_command(monkeypatch, tmp_path: Path) -> None:
+    import subprocess
+
+    config = _key_config(tmp_path, monkeypatch)
+    seen: dict = {}
+
+    def hang(*args, **kwargs):  # noqa: ANN002, ANN003
+        seen.update(kwargs)
+        raise subprocess.TimeoutExpired(args[0], kwargs.get("timeout"))
+
+    monkeypatch.setattr(doctor.subprocess, "run", hang)
+    result = doctor.check_backend_key(config_path=config)
+
+    assert result.level == "FAIL"
+    assert seen["timeout"] == 30

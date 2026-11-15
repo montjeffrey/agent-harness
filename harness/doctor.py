@@ -574,10 +574,11 @@ def check_mcp() -> CheckResult:
 def check_backend_key(config_path: Path = DEFAULT_CONFIG_PATH) -> CheckResult:
     """Verify a graph-refresh LLM backend is resolvable without printing any key."""
     try:
-        from harness.graph_refresh import BACKEND_ENV_VARS
+        from harness import graph_refresh
     except ImportError:
         sys.path.insert(0, str(HARNESS_ROOT))
-        from harness.graph_refresh import BACKEND_ENV_VARS
+        from harness import graph_refresh
+    BACKEND_ENV_VARS = graph_refresh.BACKEND_ENV_VARS
 
     backend = os.environ.get("HARNESS_GRAPH_BACKEND") or "auto"
     env_var = BACKEND_ENV_VARS.get(backend)
@@ -598,6 +599,12 @@ def check_backend_key(config_path: Path = DEFAULT_CONFIG_PATH) -> CheckResult:
             f"'{backend}' selected but {env_var} unset and {config_path} absent -- "
             f'create it with {{"key_command": "...", "key_env": "{env_var}"}}',
         )
+    # key_command runs through a shell, so apply the same ownership and
+    # permission gate the real refresh uses before executing anything.
+    try:
+        graph_refresh._check_config_file_trust(config_path)
+    except SystemExit as exc:
+        return CheckResult("FAIL", "graph backend", str(exc))
     try:
         config = config_validation.load_json_object(config_path)
     except config_validation.ConfigValidationError as exc:
@@ -610,7 +617,12 @@ def check_backend_key(config_path: Path = DEFAULT_CONFIG_PATH) -> CheckResult:
             f"{config_path} has no key_command matching key_env={env_var}",
         )
 
-    result = subprocess.run(key_command, shell=True, capture_output=True, text=True, check=False)
+    try:
+        result = subprocess.run(
+            key_command, shell=True, capture_output=True, text=True, check=False, timeout=30
+        )
+    except subprocess.TimeoutExpired:
+        return CheckResult("FAIL", "graph backend", "key_command did not finish within 30s")
     if result.returncode != 0:
         return CheckResult(
             "FAIL", "graph backend",
