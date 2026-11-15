@@ -840,7 +840,8 @@ def dispatch_memory(tool_name: str, arguments: dict) -> str:
 
             lines = [f"{len(ranked)} open, in priority order:"]
             lines += [
-                f"  {e['id']} [{e.get('type')}] {e.get('summary')} -- {_claim_tag(e)}"
+                f"  {memory_store.one_line(e['id'])} [{memory_store.one_line(e.get('type'))}] "
+                f"{memory_store.one_line(e.get('summary'))} -- {_claim_tag(e)}"
                 for e in ranked
             ]
             if stuck:

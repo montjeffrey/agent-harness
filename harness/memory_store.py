@@ -336,6 +336,21 @@ def validate_entry(entry: dict, now: datetime | None = None) -> dict:
     return rec
 
 
+# Control characters and line separators, plus the invisible direction and
+# zero-width marks (U+200B-200F, U+202A-202E, U+2066-2069, U+FEFF) that can hide
+# or reorder text in a rendered line.
+_CONTROL_RE = re.compile(
+    "[" + chr(0) + "-" + chr(31) + chr(127) + "-" + chr(159)
+    + chr(0x2028) + chr(0x2029) + chr(0x200B) + "-" + chr(0x200F)
+    + chr(0x202A) + "-" + chr(0x202E) + chr(0x2066) + "-" + chr(0x2069) + chr(0xFEFF) + "]"
+)
+
+
+def one_line(value: object) -> str:
+    """Stored text folded onto a single line (see `memory_context`)."""
+    return " ".join(_CONTROL_RE.sub(" ", str(value)).split())
+
+
 WRITE_LOCK_NAME = ".write.lock"
 WRITE_LOCK_TIMEOUT_SECONDS = 30.0
 

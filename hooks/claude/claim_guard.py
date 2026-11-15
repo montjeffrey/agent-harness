@@ -153,11 +153,14 @@ def _decide(payload: dict, work) -> Verdict:
         task_worktree = Path(task.worktree)
         if primary is not None and repo.root != primary and task_worktree.resolve() == repo.root:
             continue  # inside that task's private worktree: it is that task's work
+        from harness import memory_store  # path set by `_import_work`
+
+        summary = memory_store.one_line(task.summary)
         return Verdict(
             allow=False,
             reason=(
                 f"agent-harness: `{claimed[0]}` is claimed by active task {task.id} "
-                f"(session {task.session_id}, branch {task.branch}): {task.summary}\n"
+                f"(session {task.session_id}, branch {task.branch}): {summary}\n"
                 f"This session ({session_id}) does not own that task, so the edit was "
                 "refused to prevent two agents changing the same file. Choose a path "
                 "outside that claim, or wait until the owner calls work_finish; "
