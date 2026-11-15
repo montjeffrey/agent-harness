@@ -130,44 +130,47 @@ def confirm(
 
     now = now or datetime.now(timezone.utc)
     steps = [s.strip() for s in tasks if s and s.strip()]
-    ids = _allocate_ids(directory, 1 + len(steps), now)
-    tag_list = [t for t in (tags or []) if t]
+    # Hold the store's write lock from reserving the ids to appending them, or
+    # a concurrent writer can be handed the same ids in between.
+    with memory_store.writer_lock(directory):
+        ids = _allocate_ids(directory, 1 + len(steps), now)
+        tag_list = [t for t in (tags or []) if t]
 
-    source: dict = {"manual": True, "confirmation": confirmation}
-    if project_id:
-        source["project"] = project_id
+        source: dict = {"manual": True, "confirmation": confirmation}
+        if project_id:
+            source["project"] = project_id
 
-    decision: dict = {
-        "id": ids[0],
-        "type": "decision",
-        "scope": "project",
-        "status": "proposed",
-        "confidence": "confirmed",
-        "summary": summary.strip(),
-        "source": dict(source),
-    }
-    if tag_list:
-        decision["tags"] = tag_list
-
-    task_entries: list[dict] = []
-    for entry_id, step in zip(ids[1:], steps):
-        rec: dict = {
-            "id": entry_id,
-            "type": "task",
+        decision: dict = {
+            "id": ids[0],
+            "type": "decision",
             "scope": "project",
             "status": "proposed",
             "confidence": "confirmed",
-            "summary": step,
+            "summary": summary.strip(),
             "source": dict(source),
-            # Links the step back to the plan it came from, so completing a
-            # step and superseding a plan stay connected in the archive.
-            "plan": ids[0],
         }
         if tag_list:
-            rec["tags"] = tag_list
-        task_entries.append(rec)
+            decision["tags"] = tag_list
 
-    memory_store.append_entries([decision, *task_entries], directory=directory, now=now)
+        task_entries: list[dict] = []
+        for entry_id, step in zip(ids[1:], steps):
+            rec: dict = {
+                "id": entry_id,
+                "type": "task",
+                "scope": "project",
+                "status": "proposed",
+                "confidence": "confirmed",
+                "summary": step,
+                "source": dict(source),
+                # Links the step back to the plan it came from, so completing a
+                # step and superseding a plan stay connected in the archive.
+                "plan": ids[0],
+            }
+            if tag_list:
+                rec["tags"] = tag_list
+            task_entries.append(rec)
+
+        memory_store.append_entries([decision, *task_entries], directory=directory, now=now)
     return ConfirmResult(decision=decision, tasks=tuple(task_entries))
 
 
