@@ -92,7 +92,7 @@ def detect_graphify() -> GraphifyStatus:
         # subprocess fakes in tests/test_graph_refresh_lifecycle.py pin this
         # exact signature and must be widened in the same change).
         result = subprocess.run(
-            [sys.executable, "-m", "graphify", "--version"],
+            [sys.executable, "-P", "-m", "graphify", "--version"],
             capture_output=True, text=True, timeout=30, check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -236,7 +236,7 @@ def build_graphify_command(subcommand: str, repo_root: Path, backend: str) -> li
     own auto-selection default); `--backend auto` is never emitted, per the
     supported CLI contract.
     """
-    cmd = [sys.executable, "-m", "graphify", subcommand, str(repo_root)]
+    cmd = [sys.executable, "-P", "-m", "graphify", subcommand, str(repo_root)]
     if backend != AUTO_BACKEND:
         cmd.extend(["--backend", backend])
     return cmd

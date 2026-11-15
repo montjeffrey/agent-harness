@@ -159,7 +159,7 @@ class TestMergeMcp:
 
         entry = merged["mcpServers"][br.MCP_SERVER_NAME]
         assert entry["command"] == "/py"
-        assert entry["args"] == ["-m", "harness.mcp_server"]
+        assert entry["args"] == ["-P", "-m", "harness.mcp_server"]
         assert entry["env"]["PYTHONPATH"] == harness_root.as_posix()
         assert actions == [f"mcp/{br.MCP_SERVER_NAME}: registered"]
 

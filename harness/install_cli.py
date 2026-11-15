@@ -493,7 +493,7 @@ def install_mcp_registration(
 
     server_entry = {
         "command": python_display,
-        "args": ["-m", "harness.mcp_server"],
+        "args": ["-P", "-m", "harness.mcp_server"],
         "env": {"PYTHONPATH": harness_display},
     }
 

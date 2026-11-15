@@ -23,12 +23,12 @@ from harness import graph_refresh
 
 def test_build_graphify_command_extract() -> None:
     cmd = graph_refresh.build_graphify_command("extract", Path("/repo"), "openai")
-    assert cmd == [sys.executable, "-m", "graphify", "extract", str(Path("/repo")), "--backend", "openai"]
+    assert cmd == [sys.executable, "-P", "-m", "graphify", "extract", str(Path("/repo")), "--backend", "openai"]
 
 
 def test_build_graphify_command_update() -> None:
     cmd = graph_refresh.build_graphify_command("update", Path("/repo"), "openai")
-    assert cmd == [sys.executable, "-m", "graphify", "update", str(Path("/repo")), "--backend", "openai"]
+    assert cmd == [sys.executable, "-P", "-m", "graphify", "update", str(Path("/repo")), "--backend", "openai"]
 
 
 def test_full_refresh_invokes_extract_then_update_then_label(monkeypatch, tmp_path: Path) -> None:
@@ -44,7 +44,7 @@ def test_full_refresh_invokes_extract_then_update_then_label(monkeypatch, tmp_pa
 
     graph_refresh.refresh(tmp_path, "openai", full=True)
 
-    subcommands = [c[3] for c in calls]
+    subcommands = [c[4] for c in calls]
     assert subcommands == ["extract", "update", "label"]
 
 
@@ -63,9 +63,9 @@ def test_fast_refresh_invokes_update_then_label_only(monkeypatch, tmp_path: Path
 
     graph_refresh.refresh(tmp_path, "auto", full=False)
 
-    subcommands = [c[3] for c in calls]
+    subcommands = [c[4] for c in calls]
     assert subcommands == ["update"]
-    assert not any(c[3] == "extract" for c in calls)
+    assert not any(c[4] == "extract" for c in calls)
 
 
 # --- auto backend never emits --backend / --backend auto -------------------
@@ -109,7 +109,7 @@ def test_auto_backend_labels_when_a_supported_key_is_present(monkeypatch, tmp_pa
 
     graph_refresh.refresh(tmp_path, "auto", full=False)
 
-    assert [command[3] for command in calls] == ["update", "label"]
+    assert [command[4] for command in calls] == ["update", "label"]
 
 
 # --- graphify presence/version compatibility --------------------------------
@@ -353,4 +353,4 @@ def test_refresh_never_performs_a_real_graphify_or_network_call(monkeypatch, tmp
     assert len(seen) == 3
     for cmd in seen:
         assert cmd[0] == sys.executable
-        assert cmd[1:3] == ["-m", "graphify"]
+        assert cmd[1:4] == ["-P", "-m", "graphify"]
