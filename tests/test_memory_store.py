@@ -843,3 +843,20 @@ def test_writer_lock_is_reentrant_and_released(tmp_path: Path) -> None:
     t.start()
     t.join(timeout=10)
     assert done == [True]
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["a" * 20000, "a." * 10000, "password" * 3000, "x://" + "a:" * 10000],
+)
+def test_secret_scan_is_not_quadratic_on_long_words(text: str) -> None:
+    import time
+
+    started = time.perf_counter()
+    memory_store._find_secret(text)
+    assert time.perf_counter() - started < 1.0
+
+
+def test_secret_scan_still_finds_prefixed_and_quoted_names() -> None:
+    assert memory_store._find_secret("my_api_key = abcdef123456")
+    assert memory_store._find_secret('{"db-password": "hunter2hunter2"}')
