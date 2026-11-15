@@ -245,11 +245,20 @@ def discover(project_root: Path) -> list[tuple[Path, str]]:
     root = Path(project_root)
     found: list[tuple[Path, str]] = []
     seen: set[Path] = set()
+    try:
+        root_resolved = root.resolve()
+    except OSError:
+        return found
 
     def add(path: Path, kind: str) -> None:
         try:
             resolved = path.resolve()
         except OSError:
+            return
+        # A link that leaves the repository would have its target's text
+        # copied into memory and scope.md, and so into every context packet
+        # sent to the model provider. Links that stay inside are harmless.
+        if resolved != root_resolved and root_resolved not in resolved.parents:
             return
         if resolved in seen or not path.is_file():
             return
