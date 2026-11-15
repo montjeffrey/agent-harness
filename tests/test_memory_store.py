@@ -847,14 +847,25 @@ def test_writer_lock_is_reentrant_and_released(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "text",
-    ["a" * 20000, "a." * 10000, "password" * 3000, "x://" + "a:" * 10000],
+    [
+        "a" * 200000,
+        "a." * 100000,
+        "a-" * 100000,
+        "password" * 30000,
+        "x://" + "a:" * 100000,
+        "eyJaaaaa-" * 20000,
+        "machine " + "a " * 100000,
+    ],
 )
 def test_secret_scan_is_not_quadratic_on_long_words(text: str) -> None:
+    """Inputs are sized so a quadratic scan cannot hide behind a fast machine:
+    the uncapped URL-scheme pattern took over a minute on 200k characters of
+    `a.`, and a linear scan takes well under a second even on a slow runner."""
     import time
 
     started = time.perf_counter()
     memory_store._find_secret(text)
-    assert time.perf_counter() - started < 1.0
+    assert time.perf_counter() - started < 5.0
 
 
 def test_secret_scan_still_finds_prefixed_and_quoted_names() -> None:

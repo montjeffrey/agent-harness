@@ -133,9 +133,15 @@ _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"hooks\.slack\.com/services/[A-Za-z0-9/]{10,}"),
     re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{20,}", re.IGNORECASE),
     # A JWT: three base64url segments, the first two starting `eyJ` ({"...).
-    re.compile(r"\beyJ[A-Za-z0-9_-]{5,}\.eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}"),
-    # Credentials embedded in a URL: scheme://user:password@host
-    re.compile(r"\b[a-z][a-z0-9+.-]*://[^/\s:@]+:[^/\s@]+@", re.IGNORECASE),
+    # The header run is capped: `-` is in the class and is also a word
+    # boundary, so an uncapped run restarted at every `-eyJ` and rescanned the
+    # rest of the text each time (quadratic on `eyJaaaaa-` repeated).
+    re.compile(r"\beyJ[A-Za-z0-9_-]{5,512}\.eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}"),
+    # Credentials embedded in a URL: scheme://user:password@host. The scheme is
+    # capped for the same reason: `.` and `-` are in the class and are word
+    # boundaries, so `a.a.a.` restarted at every letter (20k characters took
+    # about a second, 200k over a minute).
+    re.compile(r"\b[a-z][a-z0-9+.-]{0,40}://[^/\s:@]+:[^/\s@]+@", re.IGNORECASE),
     # .netrc: machine <host> login <user> password <secret>
     re.compile(r"\bmachine\s+\S+\s+login\s+\S+\s+password\s+\S+", re.IGNORECASE),
     # name=value, name: value and JSON "name": "value". An optional closing
