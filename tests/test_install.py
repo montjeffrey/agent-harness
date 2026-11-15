@@ -331,7 +331,7 @@ def test_mcp_flag_creates_mcp_json(tmp_path: Path) -> None:
     mcp_json_path = project / ".mcp.json"
     config = json.loads(mcp_json_path.read_text(encoding="utf-8"))
     server = config["mcpServers"]["agent-harness"]
-    assert server["args"] == ["-m", "harness.mcp_server"]
+    assert server["args"] == ["-P", "-m", "harness.mcp_server"]
     assert "enableAllProjectMcpServers" not in config
 
 

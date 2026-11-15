@@ -220,7 +220,7 @@ def render_mcp_entry(harness_root: Path, python_exe: str) -> dict:
     """
     return {
         "command": str(Path(python_exe)).replace("\\", "/"),
-        "args": ["-m", "harness.mcp_server"],
+        "args": ["-P", "-m", "harness.mcp_server"],
         "env": {"PYTHONPATH": str(harness_root).replace("\\", "/")},
     }
 

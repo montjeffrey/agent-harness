@@ -19,7 +19,7 @@ def test_rendered_antigravity_plugin_is_complete_and_uses_stdio_mcp(tmp_path: Pa
     hooks = json.loads(files["hooks.json"])
 
     assert manifest["name"] == "agent-harness"
-    assert mcp["mcpServers"]["agent-harness"]["args"] == ["-m", "harness.mcp_server"]
+    assert mcp["mcpServers"]["agent-harness"]["args"] == ["-P", "-m", "harness.mcp_server"]
     assert "PYTHONPATH" in mcp["mcpServers"]["agent-harness"]["env"]
     pre_invocation = hooks["agent-harness-memory"]["PreInvocation"]
     assert pre_invocation[0]["type"] == "command"
