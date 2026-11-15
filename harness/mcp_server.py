@@ -423,6 +423,46 @@ WORK_TOOL_DESCRIPTIONS: dict[str, str] = {
 }
 
 
+class ProjectNotAllowed(ValueError):
+    """The `project` argument names a directory this server may not act on."""
+
+
+def _require_known_project(root: Path, *, explicit: bool) -> None:
+    """Refuse a `project` that is neither registered nor the server's own.
+
+    Every memory and work tool takes a `project` path, so an unconstrained one
+    lets a prompt-injected agent working in repository A write a store into any
+    directory, switch another client's checkout onto a new branch, or read
+    another project's memory, all through one tool the client's per-directory
+    permission prompts never see. The path must be enrolled on this machine
+    (the registry lives in the user's home) or be the directory the server was
+    started in. A store in the current directory that was never enrolled is
+    refused as well: it came from the repository, not from this machine's
+    reviews (see `memory_store.is_enrolled`).
+    """
+    from harness import memory_store
+
+    try:
+        resolved = root.resolve()
+        enrolled = memory_store.is_enrolled(resolved)
+        is_current = resolved == Path.cwd().resolve()
+    except OSError as exc:
+        raise ProjectNotAllowed(f"cannot resolve project {str(root)!r}: {exc}") from exc
+    if enrolled:
+        return
+    if explicit and not is_current:
+        raise ProjectNotAllowed(
+            f"project {str(root)!r} is not enrolled on this machine and is not the "
+            "directory this server runs in; run `agent-harness-enroll` for it first"
+        )
+    if (resolved / ".agent-harness").exists():
+        raise ProjectNotAllowed(
+            f"{str(root)!r} has a .agent-harness/ directory that was never enrolled "
+            "on this machine, so it is not trusted; run `agent-harness-enroll` if you "
+            "trust this repository"
+        )
+
+
 def _resolve_project(arguments: dict) -> Path:
     """The project root a tool call targets, with its registry stamp refreshed.
 
@@ -437,6 +477,7 @@ def _resolve_project(arguments: dict) -> Path:
     from harness import memory_store
 
     root = Path(arguments.get("project") or ".").expanduser()
+    _require_known_project(root, explicit=bool(arguments.get("project")))
     try:
         memory_store.touch_project(root)
     except Exception:  # noqa: BLE001 -- registry upkeep must never fail a tool call
@@ -540,7 +581,18 @@ def dispatch_memory(tool_name: str, arguments: dict) -> str:
     """
     from harness import memory_context, memory_curation, memory_index, memory_store
 
-    root = _resolve_project(arguments)
+    try:
+        root = _resolve_project(arguments)
+    except ProjectNotAllowed as exc:
+        return f"memory tool refused: {exc}"
+
+    if tool_name in ("memory_remember", "memory_confirm") and not memory_store.is_enrolled(root):
+        # A write through this path must not conjure a store in a directory the
+        # operator never enrolled (it would then read as an untrusted store).
+        return (
+            f"memory tool refused: {str(root)!r} is not enrolled on this machine; "
+            "run `agent-harness-enroll` there first"
+        )
 
     try:
         curation = memory_curation.curate(root) if tool_name == "memory_context" else None
@@ -891,7 +943,10 @@ def dispatch_work(tool_name: str, arguments: dict) -> str:
     """Run one local task-workspace action without requiring the MCP SDK."""
     from harness import work
 
-    project = _resolve_project(arguments)
+    try:
+        project = _resolve_project(arguments)
+    except ProjectNotAllowed as exc:
+        return f"status: error\nsummary: {exc}\nnext_actions: enroll the project or run the server from it\nartifacts:"
     try:
         if tool_name == "work_start":
             paths = [line.strip() for line in str(arguments.get("paths") or "").splitlines() if line.strip()]
