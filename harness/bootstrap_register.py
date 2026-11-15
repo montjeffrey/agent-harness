@@ -32,7 +32,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -277,8 +279,26 @@ def _save(path: Path, data: dict) -> None:
     # Atomic replace, so a crash mid-write cannot leave Claude Code holding a
     # truncated `~/.claude.json` -- that file also carries live session state,
     # not just our one key.
+    #
+    # A symlinked dotfile (a profile kit, a dotfiles repo) must stay a symlink:
+    # `os.replace` on the link itself would swap it for a plain file and leave
+    # the real one stale. Write to the file it points at.
+    if path.is_symlink():
+        path = path.resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     from harness.install_cli import _atomic_write_text
+
+    # These files hold the user's own settings and live session state, and the
+    # rewrite is whole-file, so keep the previous content beside it.
+    if path.is_file():
+        stamp = time.strftime("%Y%m%dT%H%M%S")
+        backup = path.with_name(f"{path.name}.bak-{stamp}")
+        n = 1
+        while backup.exists():
+            backup = path.with_name(f"{path.name}.bak-{stamp}-{n}")
+            n += 1
+        shutil.copy2(path, backup)
+        print(f"    backed up {path.name} to {backup.name}")
 
     _atomic_write_text(path, json.dumps(data, indent=2) + "\n")
 
