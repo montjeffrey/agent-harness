@@ -322,7 +322,7 @@ def record_start(project_root: Path, session_id: str, now: datetime | None = Non
 
 
 def _flatten(text: str) -> str:
-    return " ".join(str(text).split())
+    return memory_store.one_line(text)
 
 
 def _clip(text: str, limit: int) -> str:
