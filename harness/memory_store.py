@@ -828,7 +828,13 @@ def _git_stdout(directory: Path, *args: str) -> str | None:
             ["git", "-C", str(directory), *args],
             stdin=subprocess.DEVNULL,
             capture_output=True,
+            # Git prints paths as UTF-8. `text=True` alone decodes with the
+            # locale codec (cp1252 on Windows), which turned a non-ASCII
+            # project path into mojibake and pointed the exclude write at a
+            # directory that does not exist.
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=False,
             timeout=30,
         )

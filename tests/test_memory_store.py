@@ -747,3 +747,37 @@ def test_tracked_memory_files_lists_what_git_holds(tmp_path: Path, project: Path
     tracked = memory_store.tracked_memory_files(repo)
     assert ".agent-harness/scope.md" in tracked
     assert all(p.startswith(".agent-harness/") for p in tracked)
+
+
+def test_exclusion_works_for_a_project_with_a_non_ascii_path(tmp_path: Path) -> None:
+    """Git prints UTF-8; decoding it with the locale codec wrote the exclude
+    to a mojibake path next to the project and left `.agent-harness/` showing
+    up in `git status`."""
+    repo = _repo(tmp_path / "proj sé ü漢")
+    siblings_before = {p.name for p in tmp_path.iterdir()}
+
+    result = memory_store.init_project(repo, now=NOW)
+
+    assert memory_store.EXCLUDE_LINE in _exclude_lines(repo)
+    assert {p.name for p in tmp_path.iterdir()} == siblings_before
+    assert result is not None
+    status = _git(repo, "status", "--porcelain", "-uall")
+    assert ".agent-harness" not in status
+
+
+def test_git_helpers_decode_output_as_utf8(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from harness import graph_location
+
+    seen: list[dict] = []
+    real_run = subprocess.run
+
+    def spy(cmd, **kwargs):  # noqa: ANN001
+        seen.append(kwargs)
+        return real_run(cmd, **kwargs)
+
+    repo = _repo(tmp_path / "r")
+    monkeypatch.setattr(subprocess, "run", spy)
+    memory_store._git_stdout(repo, "rev-parse", "--git-dir")
+    graph_location.git_is_dirty(repo)
+
+    assert seen and all(k.get("encoding") == "utf-8" for k in seen)

@@ -172,7 +172,8 @@ def git_head(repo_root: Path) -> str | None:
             # nothing) until this timeout fires, turning a 0.03 s call into a
             # 10 s one. See git_is_dirty for the same reason.
             cwd=repo_root, stdin=subprocess.DEVNULL,
-            capture_output=True, text=True, timeout=10, check=False,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=10, check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -197,7 +198,8 @@ def git_is_dirty(repo_root: Path) -> bool | None:
             # child holding it hangs at startup until the timeout below --
             # 10 s per call, 20 s per memory_context.
             cwd=repo_root, stdin=subprocess.DEVNULL,
-            capture_output=True, text=True, timeout=10, check=False,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=10, check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
