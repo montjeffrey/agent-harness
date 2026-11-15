@@ -454,7 +454,20 @@ def start_with_base(
             worktree.parent.mkdir(parents=True, exist_ok=True)
             # Always a SHA, never a remote ref: `-b <branch> origin/main`
             # would make the task branch track origin/main.
-            _git(repo.root, "worktree", "add", "-b", branch, str(worktree), choice.sha)
+            try:
+                _git(repo.root, "worktree", "add", "-b", branch, str(worktree), choice.sha)
+            except WorkError:
+                # `worktree add -b` creates the branch before it populates the
+                # checkout, so a failure there (long path, disk, hook) leaves a
+                # branch no task record points at. The name is unique to this
+                # invocation, so removing it is safe.
+                with contextlib.suppress(WorkError):
+                    _git(repo.root, "worktree", "remove", "--force", str(worktree))
+                with contextlib.suppress(WorkError):
+                    _git(repo.root, "worktree", "prune")
+                with contextlib.suppress(WorkError):
+                    _git(repo.root, "branch", "-D", branch)
+                raise
         else:
             if repo.current_branch is None:
                 raise WorkError("cannot switch the primary checkout from a detached HEAD; use --worktree always")

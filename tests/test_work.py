@@ -506,3 +506,26 @@ def test_primary_root_is_the_same_from_a_linked_worktree(repo: Path) -> None:
     assert work.primary_root(from_primary) == repo.resolve()
     assert work.primary_root(from_worktree) == repo.resolve()
     assert from_worktree.root != from_primary.root
+
+
+def test_failed_worktree_add_does_not_leave_its_branch_behind(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`git worktree add -b` creates the branch before it populates the
+    checkout; a failure after that left an orphan `codex/work-*` branch."""
+    real_git = work._git
+
+    def failing_git(directory: Path, *args: str) -> str:
+        if args[:2] == ("worktree", "add"):
+            real_git(directory, "branch", args[3], args[-1])  # what git did before failing
+            raise work.WorkError("git worktree add failed: simulated checkout failure")
+        return real_git(directory, *args)
+
+    monkeypatch.setattr(work, "_git", failing_git)
+    branches_before = _run(repo, "branch", "--list")
+
+    with pytest.raises(work.WorkError, match="simulated checkout failure"):
+        work.start(repo, "Change app", "codex-chat-a", ["src/app.py"], worktree_mode="always", now=NOW)
+
+    assert _run(repo, "branch", "--list") == branches_before
+    assert work.list_tasks(repo) == []
