@@ -75,7 +75,9 @@ def test_a_confirmed_plan_is_proposed_with_the_confirmation_as_evidence(project:
     )
     for entry in (result.decision, *result.tasks):
         assert entry["status"] == "proposed"
-        assert entry["confidence"] == "confirmed"
+        # An agent can call confirm: no human-evidence flag, no top rank.
+        assert entry["confidence"] == "inferred"
+        assert "manual" not in entry["source"]
         assert entry["source"]["confirmation"] == SAID
 
 
