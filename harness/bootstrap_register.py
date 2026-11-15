@@ -334,6 +334,18 @@ def main(argv: list[str] | None = None) -> int:
             _save(path, data)
             print(f"    wrote {path}")
 
+    # A hook whose script is missing is skipped, not registered. The rest were
+    # still written, but reporting success would leave the user believing every
+    # hook is live, so say so and exit non-zero.
+    skipped = [a for a in actions if "skipped (script not found)" in a]
+    if skipped:
+        print(
+            f"[WARN] partial setup: {len(skipped)} hook(s) were not registered because "
+            f"their script is missing from {harness_root}; reinstall the harness",
+            file=sys.stderr,
+        )
+        return 1
+
     return 0
 
 

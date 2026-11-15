@@ -207,6 +207,23 @@ class TestMain:
         assert "SessionStart" in settings["hooks"]
         assert br.MCP_SERVER_NAME in mcp["mcpServers"]
 
+    def test_a_missing_hook_script_is_reported_and_exits_nonzero(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        import shutil
+
+        root = tmp_path / "harness"
+        shutil.copytree(REPO_ROOT / "hooks", root / "hooks")
+        (root / "hooks" / "claude" / "claim_guard.py").unlink()
+
+        assert br.main(["--harness-root", str(root), "--python", "/py"]) == 1
+
+        err = capsys.readouterr().err
+        assert "partial setup" in err
+        # The hooks that do exist were still registered.
+        settings = json.loads(br.user_settings_path().read_text(encoding="utf-8"))
+        assert "SessionStart" in settings["hooks"]
+
     def test_skip_mcp_leaves_the_mcp_config_alone(self, harness_root: Path) -> None:
         assert (
             br.main(["--harness-root", str(harness_root), "--python", "/py", "--skip-mcp"]) == 0

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -394,6 +395,9 @@ def test_one_setup_run_lands_the_same_root_in_every_client_config(
     """
     checkout = tmp_path / "checkout"
     checkout.mkdir()
+    # A complete checkout: with the hook scripts missing, setup now reports a
+    # partial install and exits non-zero (see test_bootstrap_register).
+    shutil.copytree(Path(__file__).resolve().parent.parent / "hooks", checkout / "hooks")
     calls = _fake_codex(monkeypatch)
 
     assert agent_setup.main(["--harness-root", str(checkout), "--python", sys.executable]) == 0
