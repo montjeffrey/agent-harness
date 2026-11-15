@@ -300,6 +300,8 @@ def record_start(project_root: Path, session_id: str, now: datetime | None = Non
     """
     if not memory_store.project_memory_dir(project_root).is_dir():
         return None
+    if not memory_store.is_enrolled(project_root):
+        return None
     repo = work.repository_for(project_root)
     if load_state(repo, session_id).get("start_tree"):
         return None
@@ -582,7 +584,7 @@ def _capture(project_root, session_id, transcript_path, last_message, now, resul
         result.skipped = "no session id"
         return
     memory_dir = memory_store.project_memory_dir(project_root)
-    if not memory_dir.is_dir():
+    if not memory_dir.is_dir() or not memory_store.is_enrolled(project_root):
         result.skipped = "project is not enrolled"
         return
     now = now or datetime.now(timezone.utc)

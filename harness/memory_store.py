@@ -554,6 +554,19 @@ def project_id_for(project_root: Path) -> str:
     return f"{slug}-{digest}"
 
 
+def is_enrolled(project_root: Path) -> bool:
+    """Whether this machine's registry lists `project_root`.
+
+    A ``.agent-harness/`` directory proves nothing: it lives inside the
+    project tree, so a cloned repository can ship one holding any text and
+    any ``status``. The registry lives under the user's home, which a
+    repository cannot write, so membership is the only evidence that *this
+    machine's operator* ran init/enroll for this checkout. Anything that
+    injects stored memory into a session must ask this first.
+    """
+    return project_id_for(project_root) in load_registry()["projects"]
+
+
 def register_project(project_root: Path, now: datetime | None = None) -> str:
     """Record `project_root` in the machine registry and return its id.
 

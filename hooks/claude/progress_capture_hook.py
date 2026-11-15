@@ -170,7 +170,7 @@ def _scan(project_root: Path, session_id: str, result: Scan, now) -> None:
         result.skipped = "no session id"
         return
     memory_dir = memory_store.project_memory_dir(project_root)
-    if not memory_dir.is_dir():
+    if not memory_dir.is_dir() or not memory_store.is_enrolled(project_root):
         result.skipped = "project is not enrolled"
         return
 

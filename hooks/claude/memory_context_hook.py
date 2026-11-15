@@ -431,6 +431,35 @@ def _handoff_ids(project_root: Path, memory_store: Any) -> frozenset[str]:
         return frozenset()
 
 
+UNENROLLED_NOTICE = (
+    "_agent-harness: this repository contains a `.agent-harness/` directory "
+    "that was never enrolled on this machine, so its contents were NOT loaded "
+    "(a cloned repo can ship memory that claims to be reviewed). Run "
+    "`agent-harness-enroll` here if you trust it._\n"
+)
+
+TRACKED_NOTICE = (
+    "_agent-harness: `.agent-harness/` files are tracked by git in this "
+    "repository, so they came from the repository rather than from this "
+    "machine's reviews and were NOT loaded. Memory is meant to stay out of "
+    "git (see ADR 0004)._\n"
+)
+
+
+def _untrusted_store_notice(project_root: Path, memory_store: Any) -> str:
+    """A fixed notice when the store must not be injected, else "".
+
+    Requires the project to be in the machine registry (see
+    `memory_store.is_enrolled`) and its memory files to be untracked. The
+    text is a constant, never repository content.
+    """
+    if not memory_store.is_enrolled(project_root):
+        return UNENROLLED_NOTICE
+    if memory_store.tracked_memory_files(project_root):
+        return TRACKED_NOTICE
+    return ""
+
+
 def _emit_toc(project_root: Path, session_id: str | None = None) -> str:
     memory_context, memory_curation, memory_index, memory_store = _harness()
 
@@ -442,6 +471,10 @@ def _emit_toc(project_root: Path, session_id: str | None = None) -> str:
         # front of every session start, the same trap that keeps `auto`
         # selection out of this hook. `agent-harness-enroll` does those.
         memory_store.init_project(project_root)
+
+    notice = _untrusted_store_notice(project_root, memory_store)
+    if notice:
+        return notice
 
     # Curate before selection so a newly verified document pointer is visible
     # as accepted in this very packet. A curation failure must not suppress a
@@ -516,6 +549,9 @@ def record_session_start(project_root: Path, session_id: str, now: datetime | No
     _harness()  # puts a source checkout on sys.path before the import below
     from harness import memory_store, work
 
+    if not memory_store.is_enrolled(project_root):
+        return None
+
     repo = work.repository_for(project_root)
     if work.load_session_marker(repo, session_id) is not None:
         return None
@@ -542,7 +578,9 @@ def record_handoff_start(project_root: Path, session_id: str) -> bool:
     try:
         if not (project_root / ".agent-harness").is_dir():
             return False
-        _harness()
+        _, _, _, memory_store = _harness()
+        if not memory_store.is_enrolled(project_root):
+            return False
         from harness import handoff
 
         return handoff.record_start(project_root, session_id) is not None
