@@ -194,7 +194,9 @@ pushed tag `vX.Y.Z` doesn't match) before anything is published.
   `harness.install_cli`'s public names, kept for `./setup.sh` / `.\setup.ps1`
   and any existing `python install.py ...` muscle memory in a source
   checkout.
-- `README.md` Quickstart: leads with `pipx install agent-harness` +
+- `README.md` Quickstart: led with a PyPI install (`pipx install agent-harness`;
+  that name, and `agent-harness-kit`, belong to unrelated projects, so it was
+  later replaced with install-from-a-clone or from the git URL) +
   `agent-harness-install`; the git-clone + `setup.sh`/`setup.ps1` flow moves
   to an "Install from source" subsection.
 - `MANIFEST.in`: `install.py` is no longer excluded from the sdist (it's the

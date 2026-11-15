@@ -211,10 +211,12 @@ test that runs console scripts from outside the source tree.
 
 Open:
 
-- **Not actually published.** Install guidance now correctly points at the
-  local checkout precisely *because* the PyPI name is unclaimed. Publishing is
-  the step that makes `pip install "agent-harness-kit[semantic]"` true, and
-  `tests/test_semantic_install_guidance.py` is the test to invert when it is.
+- **Not actually published, and the PyPI name is not ours.** Install guidance
+  points at a local checkout or the git URL because `agent-harness-kit` on PyPI
+  is already owned by an unrelated project (as is `agent-harness`), so
+  `pip install agent-harness-kit` installs someone else's code. Publishing needs
+  a new distribution name first (and `release.yml` retargeted to it); after
+  that, `tests/test_semantic_install_guidance.py` is the test to invert.
 - CI already exists and is broad -- `.github/workflows/ci.yml` runs the full
   suite on ubuntu/windows/macos across Python 3.11-3.14, then builds the wheel
   and sdist and smoke-tests the installed console scripts from outside the
