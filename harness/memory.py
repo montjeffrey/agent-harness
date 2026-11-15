@@ -40,6 +40,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -395,6 +396,35 @@ def cmd_init(args: argparse.Namespace) -> int:
 ACCEPTING_ACTIONS = frozenset({"accept", "supersede"})
 
 
+def _windows_console_stdin() -> bool:
+    """Whether the process's stdin handle is a real console (Windows only).
+
+    `isatty()` is True for the NUL device on Windows, so `cmd < NUL` read as a
+    person at the keyboard. `GetConsoleMode` succeeds only on a console handle.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetStdHandle.restype = wintypes.HANDLE
+    kernel32.GetStdHandle.argtypes = [wintypes.DWORD]
+    kernel32.GetConsoleMode.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.GetConsoleMode.restype = wintypes.BOOL
+    handle = kernel32.GetStdHandle(wintypes.DWORD(-10))  # STD_INPUT_HANDLE
+    if handle in (None, wintypes.HANDLE(-1).value):
+        return False
+    mode = wintypes.DWORD()
+    return bool(kernel32.GetConsoleMode(handle, ctypes.byref(mode)))
+
+
+def _stdin_is_console() -> bool:
+    if not sys.stdin.isatty():
+        return False
+    if os.name == "nt":
+        return _windows_console_stdin()
+    return True
+
+
 def _require_human(args: argparse.Namespace, what: str) -> bool:
     """Whether a person is present for an act that creates accepted memory.
 
@@ -406,7 +436,7 @@ def _require_human(args: argparse.Namespace, what: str) -> bool:
     accidental and injection-driven promotion; an agent with shell access can
     still edit the JSONL directly, which no CLI check can prevent.
     """
-    if getattr(args, "i_am_human", False) or sys.stdin.isatty():
+    if getattr(args, "i_am_human", False) or _stdin_is_console():
         return True
     print(
         f"{what} creates accepted memory, which needs a person: run it from an "

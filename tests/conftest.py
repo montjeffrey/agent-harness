@@ -119,6 +119,8 @@ def interactive_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
     refuse to run otherwise, so tests of what accepting *does* opt in here.
     """
     monkeypatch.setattr("sys.stdin", _Stdin(tty=True))
+    # On Windows the CLI also asks the OS whether stdin is a console.
+    monkeypatch.setattr("harness.memory._windows_console_stdin", lambda: True)
 
 
 @pytest.fixture
