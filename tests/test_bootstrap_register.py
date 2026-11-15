@@ -232,10 +232,23 @@ class TestMain:
 
         assert br.main(["--harness-root", str(harness_root), "--python", "/py"]) == 0
 
-        backups = list(settings_path.parent.glob("settings.json.bak-*"))
+        backups = list(br.backup_dir().glob("settings.json.bak-*"))
         assert len(backups) == 1
+        assert not list(settings_path.parent.glob("*.bak-*"))
         assert backups[0].read_text(encoding="utf-8") == original
         assert json.loads(settings_path.read_text(encoding="utf-8"))["theme"] == "dark"
+
+    def test_backups_are_pruned_to_the_last_five(self, harness_root: Path) -> None:
+        settings_path = br.user_settings_path()
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        for i in range(8):
+            settings_path.write_text(json.dumps({"n": i}), encoding="utf-8")
+            br._backup_config(settings_path)
+
+        kept = sorted(br.backup_dir().glob("settings.json.bak-*"))
+        assert len(kept) == br.BACKUPS_KEPT
+        newest = max(kept, key=lambda p: p.stat().st_mtime_ns)
+        assert json.loads(newest.read_text(encoding="utf-8")) == {"n": 7}
 
     def test_a_symlinked_config_stays_a_symlink(self, harness_root: Path, tmp_path: Path) -> None:
         settings_path = br.user_settings_path()
@@ -251,6 +264,7 @@ class TestMain:
         assert br.main(["--harness-root", str(harness_root), "--python", "/py"]) == 0
 
         assert settings_path.is_symlink()
+        assert not list(real.parent.glob("*.bak-*"))  # nothing dropped into the dotfiles repo
         assert "SessionStart" in json.loads(real.read_text(encoding="utf-8"))["hooks"]
 
     def test_skip_mcp_leaves_the_mcp_config_alone(self, harness_root: Path) -> None:

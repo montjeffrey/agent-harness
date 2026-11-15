@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 import time
@@ -275,6 +276,41 @@ def _load(path: Path) -> dict:
         raise RegistrationError(f"{path} is invalid; refusing to modify it ({exc})") from exc
 
 
+BACKUPS_KEPT = 5
+
+
+def backup_dir() -> Path:
+    return Path.home() / ".agent-harness" / "backups"
+
+
+def _backup_config(path: Path) -> Path:
+    directory = backup_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    if os.name != "nt":
+        directory.chmod(0o700)
+    stamp = time.strftime("%Y%m%dT%H%M%S")
+    backup = directory / f"{path.name}.bak-{stamp}"
+    n = 1
+    while backup.exists():
+        backup = directory / f"{path.name}.bak-{stamp}-{n}"
+        n += 1
+    shutil.copyfile(path, backup)
+    if os.name != "nt":
+        backup.chmod(0o600)
+    # Newest first by mtime, then name; the counter suffix breaks same-second ties.
+    mine = sorted(
+        directory.glob(f"{path.name}.bak-*"),
+        key=lambda p: (p.stat().st_mtime_ns, p.name),
+        reverse=True,
+    )
+    for old in mine[BACKUPS_KEPT:]:
+        try:
+            old.unlink()
+        except OSError:
+            pass
+    return backup
+
+
 def _save(path: Path, data: dict) -> None:
     # Atomic replace, so a crash mid-write cannot leave Claude Code holding a
     # truncated `~/.claude.json` -- that file also carries live session state,
@@ -289,16 +325,13 @@ def _save(path: Path, data: dict) -> None:
     from harness.install_cli import _atomic_write_text
 
     # These files hold the user's own settings and live session state, and the
-    # rewrite is whole-file, so keep the previous content beside it.
+    # rewrite is whole-file, so keep the previous content -- under the
+    # harness's own data directory, not beside the file: a symlinked dotfile
+    # points into a repository, and a copy of `.claude.json` must not land in
+    # one. Owner-only where the OS has modes; only the last BACKUPS_KEPT stay.
     if path.is_file():
-        stamp = time.strftime("%Y%m%dT%H%M%S")
-        backup = path.with_name(f"{path.name}.bak-{stamp}")
-        n = 1
-        while backup.exists():
-            backup = path.with_name(f"{path.name}.bak-{stamp}-{n}")
-            n += 1
-        shutil.copy2(path, backup)
-        print(f"    backed up {path.name} to {backup.name}")
+        backup = _backup_config(path)
+        print(f"    backed up {path.name} to {backup}")
 
     _atomic_write_text(path, json.dumps(data, indent=2) + "\n")
 
