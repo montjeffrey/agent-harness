@@ -20,6 +20,11 @@ NOW = datetime(2026, 8, 7, 12, 0, 0, tzinfo=timezone.utc)
 
 
 @pytest.fixture(autouse=True)
+def _person_at_the_keyboard(interactive_terminal: None) -> None:
+    """These tests exercise what accepting does; the gate has its own tests."""
+
+
+@pytest.fixture(autouse=True)
 def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home = tmp_path / "home"
     home.mkdir()

@@ -731,10 +731,11 @@ exception queue; that is the only memory review that needs human judgment.
 
 You do not have to open a file to approve a plan. An agent presents it in
 chat; you agree (or object) in chat; the agent calls `memory_confirm`, which
-records the plan as an accepted `decision` plus one tracked `task` per step
-— and stores **your actual words** as `source.confirmation`. That text is
-the audit trail: it is what makes the entry accepted, and what you can read
-back later to disagree with.
+records the plan as a `proposed` `decision` plus one tracked `task` per step
+— and stores **your actual words** as `source.confirmation`. An agent can
+never mint accepted memory, so you make the plan authoritative with
+`agent-harness-memory review accept <id>`, and that quote is what you read to
+decide. The tasks count as open work straight away.
 
 ```bash
 agent-harness-memory review list         # what an agent proposed on its own
@@ -747,10 +748,12 @@ items are open, how many are blocking, and how long they have sat. Those
 surface automatically in the context packet's *Priorities and bottlenecks*
 section, so the next session opens already knowing what keeps stalling.
 
-The honest caveat: an agent that called `memory_confirm` without you having
-agreed would be recording an approval that never happened, and nothing can
-detect that mechanically. Storing your words verbatim is what makes it
-reviewable after the fact.
+An agent that called `memory_confirm` without you having agreed leaves only a
+proposal, not an accepted fact. `review accept`, `remember --accept` and
+`triage apply` with accept/supersede decisions refuse to run without an
+interactive terminal; pass `--i-am-human` from a script you run yourself.
+This stops accidental and injection-driven promotion. It cannot stop an agent
+with shell access from editing the JSONL directly.
 
 `review` remains the path from `proposed` to `accepted` for anything an
 agent recorded on its own initiative via `memory_remember`. Accepting stamps

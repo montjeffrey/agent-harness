@@ -3,17 +3,18 @@
 This is the in-session approval path. Instead of an agent writing a
 blueprint file and a human opening it to tick a box, the agent presents a
 plan in chat, the human accepts or objects in chat, and `confirm()` records
-that exchange as durable memory: one `decision` entry for the plan plus one
-`task` entry per step, all `accepted`/`confirmed`.
+that exchange as memory: one `decision` entry for the plan plus one `task`
+entry per step, all `proposed`/`confirmed`.
 
-What makes those entries authoritative is the human's own words, stored
-verbatim on every entry as `source.confirmation`. That satisfies the entry
-contract's accepted-needs-evidence rule with something better than a bare
-`manual: true` flag -- it leaves an audit trail you can read back and
-disagree with later. The trade is deliberate and worth naming: an agent
-that called `confirm()` without actually being told to would be recording
-an approval that never happened, and nothing here can detect that. The
-stored text is what makes it reviewable after the fact.
+The entries are PROPOSED, not accepted, on purpose. `confirm()` is reachable
+from an agent (the `memory_confirm` MCP tool), and the guarantee is that
+nothing an agent writes becomes accepted until a human accepts it with
+`agent-harness-memory review accept`. The human's own words are stored
+verbatim on every entry as `source.confirmation`, so that review is one
+glance at the quote. An agent that called `confirm()` without being told to
+leaves a proposal a person has not yet accepted, not an authoritative fact.
+Proposed tasks are still open work (`OPEN_STATUSES`), so they show up in
+`memory_tasks` and the priorities section straight away.
 
 Tasks are closed with `complete()`, which routes through the same
 `memory_review.apply_review(..., "resolve")` path as any other resolution,
@@ -115,7 +116,8 @@ def confirm(
     `confirmation` is what the human actually said. It is stored on every
     entry as the evidence for accepting it, so an empty one is refused --
     an approval with no record of the approving is exactly what this design
-    will not create.
+    will not create. The entries are written `proposed`; see the module
+    docstring for why.
     """
     confirmation = (confirmation or "").strip()
     if not confirmation:
@@ -139,7 +141,7 @@ def confirm(
         "id": ids[0],
         "type": "decision",
         "scope": "project",
-        "status": "accepted",
+        "status": "proposed",
         "confidence": "confirmed",
         "summary": summary.strip(),
         "source": dict(source),
@@ -153,7 +155,7 @@ def confirm(
             "id": entry_id,
             "type": "task",
             "scope": "project",
-            "status": "accepted",
+            "status": "proposed",
             "confidence": "confirmed",
             "summary": step,
             "source": dict(source),

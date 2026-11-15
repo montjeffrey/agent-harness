@@ -68,10 +68,15 @@ def test_confirm_records_the_plan_and_its_steps(project: Path) -> None:
     assert len(_entries(project)) == 3
 
 
-def test_a_confirmed_plan_is_accepted_and_confirmed(project: Path) -> None:
-    result = memory_tasks.confirm(_dir(project), "Do the thing.", SAID, now=NOW)
-    assert result.decision["status"] == "accepted"
-    assert result.decision["confidence"] == "confirmed"
+def test_a_confirmed_plan_is_proposed_with_the_confirmation_as_evidence(project: Path) -> None:
+    """`confirm` is reachable from an agent, so it must never write `accepted`."""
+    result = memory_tasks.confirm(
+        _dir(project), "Do the thing.", SAID, tasks=["step one"], now=NOW
+    )
+    for entry in (result.decision, *result.tasks):
+        assert entry["status"] == "proposed"
+        assert entry["confidence"] == "confirmed"
+        assert entry["source"]["confirmation"] == SAID
 
 
 def test_the_humans_own_words_are_stored_as_the_evidence(project: Path) -> None:
@@ -274,9 +279,10 @@ def test_memory_confirm_tool_round_trips(project: Path) -> None:
         {"project": str(project), "summary": "Split the index.",
          "confirmation": SAID, "tasks": "step one\nstep two", "tags": "memory"},
     )
-    assert "confirmed" in out
+    assert "proposed" in out
     assert out.count("task mem-") == 2
     assert len(_entries(project)) == 3
+    assert {e["status"] for e in _entries(project)} == {"proposed"}
 
 
 def test_memory_confirm_refuses_without_the_humans_words(project: Path) -> None:
