@@ -96,7 +96,7 @@ def test_full_refresh_without_backend_fails_before_any_subprocess(monkeypatch, t
         graph_refresh.refresh(tmp_path, "auto", full=True)
 
 
-def test_auto_backend_labels_when_a_supported_key_is_present(monkeypatch, tmp_path: Path) -> None:
+def test_auto_backend_never_calls_the_label_backend_just_because_a_key_is_set(monkeypatch, tmp_path: Path) -> None:
     calls: list[list[str]] = []
 
     def fake_run(cmd, check=False, **kwargs):  # noqa: ANN001
@@ -107,9 +107,36 @@ def test_auto_backend_labels_when_a_supported_key_is_present(monkeypatch, tmp_pa
     monkeypatch.setattr(graph_refresh.subprocess, "run", fake_run)
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
 
+    for env_var in graph_refresh.BACKEND_ENV_VARS.values():
+        monkeypatch.setenv(env_var, "test-key")
+
     graph_refresh.refresh(tmp_path, "auto", full=False)
 
+    assert [command[4] for command in calls] == ["update"]
+
+
+def test_an_explicit_backend_still_labels(monkeypatch, tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, check=False, **kwargs):  # noqa: ANN001
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(graph_refresh, "detect_graphify", lambda: graph_refresh.GraphifyStatus(True, "1.0"))
+    monkeypatch.setattr(graph_refresh.subprocess, "run", fake_run)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    graph_refresh.refresh(tmp_path, "openai", full=False)
+
     assert [command[4] for command in calls] == ["update", "label"]
+
+
+def test_full_refresh_with_only_a_key_in_the_environment_is_refused(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(graph_refresh, "detect_graphify", lambda: graph_refresh.GraphifyStatus(True, "1.0"))
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    with pytest.raises(SystemExit, match="full semantic extraction"):
+        graph_refresh.refresh(tmp_path, "auto", full=True)
 
 
 # --- graphify presence/version compatibility --------------------------------
@@ -349,7 +376,7 @@ def test_refresh_never_performs_a_real_graphify_or_network_call(monkeypatch, tmp
 
     monkeypatch.setattr(graph_refresh.subprocess, "run", fake_run)
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    graph_refresh.refresh(tmp_path, "auto", full=True)
+    graph_refresh.refresh(tmp_path, "openai", full=True)
     assert len(seen) == 3
     for cmd in seen:
         assert cmd[0] == sys.executable
