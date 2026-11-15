@@ -78,9 +78,21 @@ def find_graph_path(start: Path | None = None) -> Path:
     raise SystemExit(_no_graph_message(current))
 
 
+# A real graph for a large repository is tens of MB. json.load reads the whole
+# file into memory, and this runs inside the long-lived MCP server, so an
+# oversized or planted graph.json must be refused rather than loaded.
+MAX_GRAPH_BYTES = 200 * 1024 * 1024
+
+
 def load_graph(graph_path: Path) -> dict:
     if not graph_path.exists():
         raise SystemExit(f"graph.json not found at {graph_path}")
+    size = graph_path.stat().st_size
+    if size > MAX_GRAPH_BYTES:
+        raise SystemExit(
+            f"graph.json at {graph_path} is {size // (1024 * 1024)} MiB, over the "
+            f"{MAX_GRAPH_BYTES // (1024 * 1024)} MiB limit; refusing to load it"
+        )
     with graph_path.open(encoding="utf-8") as fh:
         return json.load(fh)
 

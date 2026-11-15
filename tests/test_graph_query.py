@@ -601,3 +601,15 @@ def test_impact_not_bounded_by_a_fixed_depth_cap() -> None:
     found = graph_query.traverse(f"n{chain_len - 1}", index.in_edges, "source", None)
     assert len(found) == chain_len - 1
     assert found[f"n0"] == chain_len - 1
+
+
+def test_load_graph_refuses_a_file_over_the_size_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    graph = tmp_path / "graph.json"
+    graph.write_text(json.dumps({"nodes": [], "links": []}), encoding="utf-8")
+    assert graph_query.load_graph(graph) == {"nodes": [], "links": []}
+
+    monkeypatch.setattr(graph_query, "MAX_GRAPH_BYTES", 5)
+    with pytest.raises(SystemExit, match="over the .* limit"):
+        graph_query.load_graph(graph)
