@@ -133,7 +133,12 @@ def _decide(payload: dict, work) -> Verdict:
         relative = target.relative_to(repo.root)
     except ValueError:
         return ALLOW
-    claimed = work.normalize_paths([relative.as_posix()])
+    # Not `work.normalize_paths`: that validates a claim a person types and
+    # rejects `[`, `]`, `*`, `?` as wildcard ambiguity. This is a real path on
+    # disk (`app/[id]/page.tsx`), and rejecting it raised into `decide`'s
+    # catch-all, which allowed the edit -- the guard failed open on exactly the
+    # files Next.js and similar routers put in brackets.
+    claimed = (relative.as_posix(),)
 
     tasks = work.active_tasks(repo)
     if not tasks:
