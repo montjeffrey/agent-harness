@@ -188,6 +188,39 @@ def test_validate_entry_rejects_probable_secrets(summary: str) -> None:
         memory_store.validate_entry(_entry(summary=summary), now=NOW)
 
 
+_FILLER = "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0"  # synthetic, not a real credential
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        "stripe key sk_live_" + _FILLER[:24],
+        "google key AIza" + _FILLER[:35],
+        "gitlab glpat-" + _FILLER[:20],
+        "npm npm_" + _FILLER[:36],
+        "hugging face hf_" + _FILLER[:34],
+        "webhook https://hooks.slack.com/services/T000/B000/" + _FILLER[:24],
+        "Authorization: Bearer " + _FILLER,
+        "jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0." + _FILLER[:20],
+        "postgres://admin:" + _FILLER[:16] + "@db.internal:5432/app",
+        "machine api.example.com login bob password " + _FILLER[:16],
+        '{"api_key": "' + _FILLER[:24] + '"}',
+        "{'client_secret': '" + _FILLER[:24] + "'}",
+    ],
+)
+def test_validate_entry_rejects_the_wider_set_of_credential_shapes(summary: str) -> None:
+    with pytest.raises(ValueError, match="secret"):
+        memory_store.validate_entry(_entry(summary=summary), now=NOW)
+
+
+def test_validate_entry_still_allows_urls_without_credentials() -> None:
+    rec = memory_store.validate_entry(
+        _entry(summary="Docs live at https://example.com/guide and the key is in the vault."),
+        now=NOW,
+    )
+    assert "https://example.com/guide" in rec["summary"]
+
+
 def test_validate_entry_allows_ordinary_prose_about_keys() -> None:
     """The secret scan must not be so eager that normal sentences trip it."""
     rec = memory_store.validate_entry(

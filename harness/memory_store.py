@@ -122,9 +122,24 @@ _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}"),
     re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}"),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(r"\bsk_(?:live|test)_[A-Za-z0-9]{10,}"),
+    re.compile(r"\bAIza[0-9A-Za-z_-]{35}"),
+    re.compile(r"\bglpat-[A-Za-z0-9_-]{20,}"),
+    re.compile(r"\bnpm_[A-Za-z0-9]{20,}"),
+    re.compile(r"\bhf_[A-Za-z0-9]{30,}"),
+    re.compile(r"hooks\.slack\.com/services/[A-Za-z0-9/]{10,}"),
+    re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{20,}", re.IGNORECASE),
+    # A JWT: three base64url segments, the first two starting `eyJ` ({"...).
+    re.compile(r"\beyJ[A-Za-z0-9_-]{5,}\.eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}"),
+    # Credentials embedded in a URL: scheme://user:password@host
+    re.compile(r"\b[a-z][a-z0-9+.-]*://[^/\s:@]+:[^/\s@]+@", re.IGNORECASE),
+    # .netrc: machine <host> login <user> password <secret>
+    re.compile(r"\bmachine\s+\S+\s+login\s+\S+\s+password\s+\S+", re.IGNORECASE),
+    # name=value, name: value and JSON "name": "value". An optional closing
+    # quote after the name lets the JSON and quoted-YAML forms through.
     re.compile(
         r"[\w-]*(?:password|passwd|secret|token|api[ _-]?key|access[ _-]?key"
-        r"|private[ _-]?key)[\w-]*\s*[=:]\s*\S{6,}",
+        r"|private[ _-]?key)[\w-]*[\"']?\s*[=:]\s*[\"']?\S{6,}",
         re.IGNORECASE,
     ),
 )
