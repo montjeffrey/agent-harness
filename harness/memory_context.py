@@ -1003,6 +1003,12 @@ def resolve_search_projects(
             # The current project, registered under its own id.
             continue
         seen_paths.add(resolved)
+        if memory_store.tracked_memory_files(resolved):
+            notes.append(
+                f"project {pid}: its .agent-harness/ files are tracked by git, so "
+                "they are not trusted; skipped"
+            )
+            continue
         chosen.append((pid, path))
     return SearchScope(tuple(chosen), tuple(notes))
 

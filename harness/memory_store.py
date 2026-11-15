@@ -670,6 +670,17 @@ def is_enrolled(project_root: Path) -> bool:
     return project_id_for(project_root) in load_registry()["projects"]
 
 
+def is_trusted_store(project_root: Path) -> bool:
+    """Enrolled on this machine AND not committed to git.
+
+    The one question every reader of stored memory must ask: enrollment says
+    this machine's operator set the project up, and "not tracked" says the
+    store's contents were not shipped by the repository (a tracked
+    `.agent-harness/` arrives with a clone and can hold any text and status).
+    """
+    return is_enrolled(project_root) and not tracked_memory_files(project_root)
+
+
 def register_project(project_root: Path, now: datetime | None = None) -> str:
     """Record `project_root` in the machine registry and return its id.
 
@@ -1039,9 +1050,11 @@ def tracked_files(project_root: Path, relative_dir: str) -> tuple[str, ...]:
     """Paths under `relative_dir` (relative to `project_root`) that git
     currently tracks or has staged; empty when none or not a repo."""
     root = Path(project_root)
-    if not (root / ".git").exists():
-        return ()
-    out = _git_stdout(root, "ls-files", "-z", "--", relative_dir)
+    # `:(icase)`: a clone on a case-insensitive filesystem can ship
+    # `.AGENT-HARNESS/` and still be read as `.agent-harness/`; a literal
+    # pathspec would not list it. No `.git` pre-check either -- a project
+    # enrolled from a subdirectory has none of its own, and git finds the repo.
+    out = _git_stdout(root, "ls-files", "-z", "--", f":(icase){relative_dir}")
     if not out:
         return ()
     return tuple(p for p in out.split("\0") if p)

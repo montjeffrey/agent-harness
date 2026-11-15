@@ -300,7 +300,7 @@ def record_start(project_root: Path, session_id: str, now: datetime | None = Non
     """
     if not memory_store.project_memory_dir(project_root).is_dir():
         return None
-    if not memory_store.is_enrolled(project_root):
+    if not memory_store.is_trusted_store(project_root):
         return None
     repo = work.repository_for(project_root)
     if load_state(repo, session_id).get("start_tree"):
@@ -584,7 +584,7 @@ def _capture(project_root, session_id, transcript_path, last_message, now, resul
         result.skipped = "no session id"
         return
     memory_dir = memory_store.project_memory_dir(project_root)
-    if not memory_dir.is_dir() or not memory_store.is_enrolled(project_root):
+    if not memory_dir.is_dir() or not memory_store.is_trusted_store(project_root):
         result.skipped = "project is not enrolled"
         return
     now = now or datetime.now(timezone.utc)
@@ -676,6 +676,11 @@ def render_block(project_root: Path, session_id: str | None = None, max_chars: i
     """
     budget = _max_chars() if max_chars is None else max_chars
     if budget <= 0:
+        return ""
+    # Same gate as every other reader of stored memory: a store the repository
+    # shipped (or that was never enrolled) must not reach a session through
+    # the hand-off block either.
+    if not memory_store.is_trusted_store(project_root):
         return ""
     groups = _groups(memory_store.project_memory_dir(project_root), session_id)
     if not groups:

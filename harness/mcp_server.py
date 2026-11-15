@@ -449,6 +449,12 @@ def _require_known_project(root: Path, *, explicit: bool) -> None:
     except OSError as exc:
         raise ProjectNotAllowed(f"cannot resolve project {str(root)!r}: {exc}") from exc
     if enrolled:
+        if memory_store.tracked_memory_files(resolved):
+            raise ProjectNotAllowed(
+                f"{str(root)!r} has .agent-harness/ files tracked by git, so they came "
+                "from the repository rather than from this machine's reviews; run "
+                "`git rm -r --cached .agent-harness` if they are yours"
+            )
         return
     if explicit and not is_current:
         raise ProjectNotAllowed(
