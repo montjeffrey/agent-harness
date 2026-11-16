@@ -25,6 +25,6 @@ releases them. Not for read-only work.
 slice the work into single-purpose PRs under about 500 changed lines, tests and
 fixtures counted. Every PR body carries a `Testing` section with the commands
 run and what they returned; a fix lands as a failing test, then the fix. Never
-stack a PR on another open PR -- wait for it to merge. Advisory: nothing
-measures PR size yet.
+stack a PR on another open PR -- wait for it to merge. Before opening one,
+run `agent-harness-pr size`. Advisory: nothing blocks an oversized PR yet.
 <!-- agent-harness:end -->
