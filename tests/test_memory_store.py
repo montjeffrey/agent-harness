@@ -856,6 +856,9 @@ def test_writer_lock_is_reentrant_and_released(tmp_path: Path) -> None:
         "eyJaaaaa-" * 20000,
         "machine " + "a " * 100000,
     ],
+    # Named, because pytest puts the id in an environment variable and Windows
+    # refuses one longer than 32767 characters.
+    ids=["letters", "dots", "dashes", "password", "url-scheme", "jwt-header", "machine"],
 )
 def test_secret_scan_is_not_quadratic_on_long_words(text: str) -> None:
     """Inputs are sized so a quadratic scan cannot hide behind a fast machine:
