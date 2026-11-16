@@ -13,7 +13,9 @@ so every write here lands in the sandbox and not in the real `~/.claude`.
 from __future__ import annotations
 
 import json
+import os
 import shlex
+import shutil
 from pathlib import Path
 
 import pytest
@@ -245,10 +247,29 @@ class TestMain:
             settings_path.write_text(json.dumps({"n": i}), encoding="utf-8")
             br._backup_config(settings_path)
 
-        kept = sorted(br.backup_dir().glob("settings.json.bak-*"))
-        assert len(kept) == br.BACKUPS_KEPT
-        newest = max(kept, key=lambda p: p.stat().st_mtime_ns)
-        assert json.loads(newest.read_text(encoding="utf-8")) == {"n": 7}
+        kept = br.backup_dir().glob("settings.json.bak-*")
+        assert sorted(json.loads(p.read_text(encoding="utf-8"))["n"] for p in kept) == [3, 4, 5, 6, 7]
+
+    def test_pruning_keeps_the_newest_when_timestamps_tie(
+        self, harness_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A coarse clock (Windows) can give several backups the same mtime."""
+        real_copy = shutil.copyfile
+        one_time = 1_700_000_000_000_000_000
+
+        def copy_with_one_mtime(src: Path, dst: Path) -> None:
+            real_copy(src, dst)
+            os.utime(dst, ns=(one_time, one_time))
+
+        monkeypatch.setattr(br.shutil, "copyfile", copy_with_one_mtime)
+        settings_path = br.user_settings_path()
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        for i in range(14):
+            settings_path.write_text(json.dumps({"n": i}), encoding="utf-8")
+            br._backup_config(settings_path)
+
+        kept = br.backup_dir().glob("settings.json.bak-*")
+        assert sorted(json.loads(p.read_text(encoding="utf-8"))["n"] for p in kept) == [9, 10, 11, 12, 13]
 
     def test_a_symlinked_config_stays_a_symlink(self, harness_root: Path, tmp_path: Path) -> None:
         settings_path = br.user_settings_path()

@@ -283,24 +283,39 @@ def backup_dir() -> Path:
     return Path.home() / ".agent-harness" / "backups"
 
 
+def _backup_stamp(backup: Path) -> str:
+    """The timestamp in a backup's name ("" when the name has none)."""
+    return backup.name.rpartition(".bak-")[2].partition("-")[0]
+
+
+def _backup_counter(backup: Path) -> int:
+    """The counter after the timestamp in a backup's name (0 when there is none)."""
+    counter = backup.name.rpartition(".bak-")[2].partition("-")[2]
+    return int(counter) if counter.isdecimal() else 0
+
+
 def _backup_config(path: Path) -> Path:
     directory = backup_dir()
     directory.mkdir(parents=True, exist_ok=True)
     if os.name != "nt":
         directory.chmod(0o700)
     stamp = time.strftime("%Y%m%dT%H%M%S")
-    backup = directory / f"{path.name}.bak-{stamp}"
-    n = 1
+    prefix = f"{path.name}.bak-{stamp}"
+    # Within one second the counter only grows: a name freed by pruning is never
+    # handed out again, so the counter says which of two backups is newer.
+    n = max((_backup_counter(p) for p in directory.glob(f"{prefix}*")), default=-1) + 1
+    backup = directory / (prefix if n == 0 else f"{prefix}-{n}")
     while backup.exists():
-        backup = directory / f"{path.name}.bak-{stamp}-{n}"
         n += 1
+        backup = directory / f"{prefix}-{n}"
     shutil.copyfile(path, backup)
     if os.name != "nt":
         backup.chmod(0o600)
-    # Newest first by mtime, then name; the counter suffix breaks same-second ties.
+    # Newest first by mtime. A coarse clock can give several backups one mtime,
+    # so ties fall back to the name's timestamp and then its counter.
     mine = sorted(
         directory.glob(f"{path.name}.bak-*"),
-        key=lambda p: (p.stat().st_mtime_ns, p.name),
+        key=lambda p: (p.stat().st_mtime_ns, _backup_stamp(p), _backup_counter(p)),
         reverse=True,
     )
     for old in mine[BACKUPS_KEPT:]:
