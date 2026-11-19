@@ -129,9 +129,11 @@ def _identity(start: Path) -> tuple[Path, Path, str]:
     exactly where the separate calls did: outside a worktree, and on an unborn
     HEAD, which prints ``HEAD`` and exits 128.
     """
+    # Split on "\n" only: ``str.splitlines`` also breaks on U+2028, U+0085 and
+    # other characters that are legal in a directory name.
     lines = _git(
         start, "rev-parse", "--show-toplevel", "--path-format=absolute", "--git-common-dir", "HEAD"
-    ).splitlines()
+    ).split("\n")
     if len(lines) != 3:
         raise WorkError(f"git rev-parse returned an unexpected answer: {lines!r}")
     root, common, head = (line.strip() for line in lines)

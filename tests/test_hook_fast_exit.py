@@ -210,3 +210,20 @@ def test_repository_root_for_matches_repository_for_in_a_subdirectory_and_a_work
 def test_repository_root_for_raises_work_error_outside_a_repository(tmp_path: Path) -> None:
     with pytest.raises(work.WorkError):
         work.repository_root_for(tmp_path)
+
+
+@pytest.mark.parametrize("separator", [" ", " ", "\x85", "\x0c", "\x0b"])
+def test_repository_root_for_keeps_line_separator_characters_in_a_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, separator: str
+) -> None:
+    # These are legal in a directory name. Splitting the rev-parse answer on
+    # anything but "\n" would turn one path into two lines, raise, and make the
+    # claim guard allow an edit it should have checked.
+    root = tmp_path / f"odd{separator}name"
+    answer = "\n".join([root.as_posix(), (root / ".git").as_posix(), "0" * 40])
+    monkeypatch.setattr(work, "_git", lambda *_args, **_kwargs: answer)
+
+    found = work.repository_root_for(tmp_path)
+
+    assert separator in str(found.root)
+    assert found.head == "0" * 40
