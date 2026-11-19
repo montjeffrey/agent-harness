@@ -17,6 +17,15 @@ pushed tag `vX.Y.Z` doesn't match) before anything is published.
 
 ## [Unreleased]
 
+### Changed
+
+- The MCP server imports the semantic stack (chromadb, onnxruntime, numpy) at
+  startup only when its project has an active objective and enough entries for
+  semantic ranking to matter, using the SessionStart hook's adaptive rule.
+  Other servers stay small, and a semantic request to one of them falls back to
+  the deterministic selector with a note rather than importing off the main
+  thread. `AGENT_HARNESS_MCP_SEMANTIC=always` restores always-warm.
+
 ### Added
 
 - Review policy in the user-scope memory rules (`templates/MEMORY.protocol.md`,
