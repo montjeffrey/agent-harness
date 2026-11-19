@@ -183,6 +183,7 @@ def test_no_work_directory_means_allow_without_touching_git(
         raise AssertionError("git must not be consulted")
 
     monkeypatch.setattr(work, "repository_for", boom)
+    monkeypatch.setattr(work, "repository_root_for", boom)
     assert not (Path.home() / ".agent-harness" / "work").exists()
     assert claim_guard.decide(_event(str(repo / "src" / "app.py"))).allow
 

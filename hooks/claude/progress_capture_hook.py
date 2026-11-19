@@ -22,8 +22,8 @@ Why `Stop` (and `SessionEnd` as a final sweep), not `PostToolUse`:
 
 - `Stop` fires once per assistant turn, so the frequency is bounded by the
   conversation, not by tool calls, and the common case -- HEAD unchanged,
-  no task finished -- costs one repository resolution (four `rev-parse`-class
-  git calls, no `status`) and two small JSON reads.
+  no task finished -- costs one repository resolution (two git
+  calls, no `status`) and two small JSON reads.
 - It fires after *every* turn, so progress survives a session that is later
   killed by a quota limit or a crash, which `SessionEnd` alone would miss
   (that is exactly how the previous attempt at this hook was lost).
@@ -52,6 +52,13 @@ COMMIT_LIMIT = 20
 SUBJECTS_IN_TASK_ENTRY = 5
 FILES_IN_COMMIT_ENTRY = 8
 PROGRESS_TAG = "progress"
+
+
+def _enrolled_marker_exists(project_root: Path) -> bool:
+    # `memory_store.project_memory_dir`, spelled out so the common "not a
+    # project of ours" exit costs no harness import. The full enrollment and
+    # trust check still runs below once the harness is loaded.
+    return (project_root / ".agent-harness" / "memory").is_dir()
 
 
 def _import_harness():
@@ -165,10 +172,13 @@ def scan(project_root: Path, session_id: str, now=None) -> Scan:
 
 
 def _scan(project_root: Path, session_id: str, result: Scan, now) -> None:
-    memory_store, work = _import_harness()
     if not session_id.strip():
         result.skipped = "no session id"
         return
+    if not _enrolled_marker_exists(project_root):
+        result.skipped = "project is not enrolled"
+        return
+    memory_store, work = _import_harness()
     memory_dir = memory_store.project_memory_dir(project_root)
     if not memory_dir.is_dir() or not memory_store.is_trusted_store(project_root):
         result.skipped = "project is not enrolled"
