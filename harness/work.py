@@ -121,12 +121,36 @@ def _git(directory: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
+def _identity(start: Path) -> tuple[Path, Path, str]:
+    """Worktree root, common Git directory and HEAD, in one Git process.
+
+    ``rev-parse`` answers all three in one call (``--show-toplevel`` is always
+    absolute; ``--path-format`` applies to the arguments after it). It fails
+    exactly where the separate calls did: outside a worktree, and on an unborn
+    HEAD, which prints ``HEAD`` and exits 128.
+    """
+    lines = _git(
+        start, "rev-parse", "--show-toplevel", "--path-format=absolute", "--git-common-dir", "HEAD"
+    ).splitlines()
+    if len(lines) != 3:
+        raise WorkError(f"git rev-parse returned an unexpected answer: {lines!r}")
+    root, common, head = (line.strip() for line in lines)
+    return Path(root).resolve(), Path(common).resolve(), head
+
+
+def repository_root_for(directory: Path) -> Repository:
+    """``repository_for`` without the branch lookup: ``current_branch`` is None.
+
+    For a hot path that needs only the root and the repository identity (the
+    claim guard), one Git process instead of two.
+    """
+    root, common, head = _identity(Path(directory).expanduser().resolve())
+    return Repository(root=root, common_git_dir=common, head=head, current_branch=None)
+
+
 def repository_for(directory: Path) -> Repository:
     """Resolve the Git repository and common Git directory for ``directory``."""
-    start = Path(directory).expanduser().resolve()
-    root = Path(_git(start, "rev-parse", "--show-toplevel")).resolve()
-    common = Path(_git(root, "rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
-    head = _git(root, "rev-parse", "HEAD")
+    root, common, head = _identity(Path(directory).expanduser().resolve())
     # ``symbolic-ref`` exits 1 on a detached HEAD, which is valid task input.
     try:
         branch_result = subprocess.run(

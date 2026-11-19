@@ -24,8 +24,8 @@ deny message says which id this session has and how to proceed. A file
 inside a task's own private worktree is always that task's, whatever id the
 tool call carries, because the worktree is the isolation boundary.
 
-Cost: one repository resolution (four `git rev-parse`-class calls, no
-`status`) and one JSON read of the task state. Nothing is written.
+Cost: one repository resolution (a single `git rev-parse`, no `status`) and
+one JSON read of the task state. Nothing is written.
 """
 
 from __future__ import annotations
@@ -130,7 +130,7 @@ def _decide(payload: dict, work=None) -> Verdict:
     cwd = payload.get("cwd")
     target = resolve_target(raw, cwd if isinstance(cwd, str) else None)
     try:
-        repo = work.repository_for(_existing_ancestor(target))
+        repo = work.repository_root_for(_existing_ancestor(target))
     except work.WorkError:
         return ALLOW  # not inside a git repository
 

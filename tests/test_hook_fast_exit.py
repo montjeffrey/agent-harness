@@ -105,6 +105,22 @@ def test_guard_with_work_directory_but_no_task_state_imports_nothing(
     assert out == {"exit": 0, "git": 0, "harness": []}
 
 
+def test_guard_resolves_the_repository_with_one_git_launch(repo: Path, isolated_home: Path) -> None:
+    work.start(repo, "Change a", "owner", ["a.txt"], now=NOW)
+    out, err = _hook(GUARD, _edit(repo / "a.txt"), isolated_home, repo)
+    assert out["exit"] == 2
+    assert "claimed by active task" in err
+    assert out["git"] == 1
+
+
+def test_guard_allows_with_one_git_launch_when_the_path_is_unclaimed(repo: Path, isolated_home: Path) -> None:
+    work.start(repo, "Change a", "owner", ["a.txt"], now=NOW)
+    (repo / "b.txt").write_text("b\n", encoding="utf-8")
+    out, _ = _hook(GUARD, _edit(repo / "b.txt"), isolated_home, repo)
+    assert out["exit"] == 0
+    assert out["git"] == 1
+
+
 # --- claim guard: the decision does not depend on how the repository is found
 
 
@@ -166,3 +182,31 @@ def test_progress_with_a_blank_session_imports_nothing(repo: Path, isolated_home
     memory_store.init_project(repo, now=NOW)
     out, _ = _hook(PROGRESS, {"session_id": "  ", "cwd": str(repo)}, isolated_home, repo)
     assert out == {"exit": 0, "git": 0, "harness": []}
+
+
+def test_progress_in_an_enrolled_project_launches_three_git_processes(
+    repo: Path, isolated_home: Path
+) -> None:
+    """One `ls-files` for the trusted-store check plus two to resolve the repository."""
+    memory_store.init_project(repo, now=NOW)
+    out, _ = _hook(PROGRESS, {"session_id": "s1", "cwd": str(repo)}, isolated_home, repo)
+    assert out["exit"] == 0
+    assert out["git"] == 3
+
+
+# --- repository_for / repository_root_for -----------------------------------
+
+
+def test_repository_root_for_matches_repository_for_in_a_subdirectory_and_a_worktree(repo: Path) -> None:
+    (repo / "sub").mkdir()
+    task = work.start(repo, "Other work", "session-b", ["b.txt"], agent="claude", now=NOW)
+    for where in (repo, repo / "sub", Path(task.worktree)):
+        full = work.repository_for(where)
+        narrow = work.repository_root_for(where)
+        assert (narrow.root, narrow.common_git_dir, narrow.id) == (full.root, full.common_git_dir, full.id)
+        assert narrow.head == full.head
+
+
+def test_repository_root_for_raises_work_error_outside_a_repository(tmp_path: Path) -> None:
+    with pytest.raises(work.WorkError):
+        work.repository_root_for(tmp_path)

@@ -22,8 +22,8 @@ Why `Stop` (and `SessionEnd` as a final sweep), not `PostToolUse`:
 
 - `Stop` fires once per assistant turn, so the frequency is bounded by the
   conversation, not by tool calls, and the common case -- HEAD unchanged,
-  no task finished -- costs one repository resolution (four `rev-parse`-class
-  git calls, no `status`) and two small JSON reads.
+  no task finished -- costs one repository resolution (two git
+  calls, no `status`) and two small JSON reads.
 - It fires after *every* turn, so progress survives a session that is later
   killed by a quota limit or a crash, which `SessionEnd` alone would miss
   (that is exactly how the previous attempt at this hook was lost).
