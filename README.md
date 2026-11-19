@@ -808,6 +808,16 @@ objective and a real store gets semantic ranking without opting in.
 `AGENT_HARNESS_ADAPTIVE_MIN_ENTRIES` moves the size threshold;
 `AGENT_HARNESS_HOOK_STRATEGY` overrides the hook's choice entirely.
 
+The MCP server applies the same rule once, at startup: it imports the semantic
+stack (about 70 MB resident per server process) only when the project it was
+started in has an active objective and at least
+`AGENT_HARNESS_ADAPTIVE_MIN_ENTRIES` entries. The import happens on the main
+thread before the server serves; importing it from inside a tool call hangs. A
+server that skipped it answers any later semantic request deterministically and
+says so in the result. `AGENT_HARNESS_MCP_SEMANTIC=always` forces the old
+always-warm behaviour; `AGENT_HARNESS_HOOK_STRATEGY=deterministic` also skips
+it.
+
 ```bash
 python -m pip install -e ".[semantic]"   # run from this checkout
 agent-harness-memory index
