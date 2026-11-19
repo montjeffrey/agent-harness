@@ -54,6 +54,13 @@ FILES_IN_COMMIT_ENTRY = 8
 PROGRESS_TAG = "progress"
 
 
+def _enrolled_marker_exists(project_root: Path) -> bool:
+    # `memory_store.project_memory_dir`, spelled out so the common "not a
+    # project of ours" exit costs no harness import. The full enrollment and
+    # trust check still runs below once the harness is loaded.
+    return (project_root / ".agent-harness" / "memory").is_dir()
+
+
 def _import_harness():
     # The harness beside this file (<root>/hooks/claude/ -> <root>), never a
     # stale install found first on sys.path; see memory_context_hook._harness.
@@ -165,10 +172,13 @@ def scan(project_root: Path, session_id: str, now=None) -> Scan:
 
 
 def _scan(project_root: Path, session_id: str, result: Scan, now) -> None:
-    memory_store, work = _import_harness()
     if not session_id.strip():
         result.skipped = "no session id"
         return
+    if not _enrolled_marker_exists(project_root):
+        result.skipped = "project is not enrolled"
+        return
+    memory_store, work = _import_harness()
     memory_dir = memory_store.project_memory_dir(project_root)
     if not memory_dir.is_dir() or not memory_store.is_trusted_store(project_root):
         result.skipped = "project is not enrolled"

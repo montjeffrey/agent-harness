@@ -95,12 +95,12 @@ def _existing_ancestor(path: Path) -> Path:
 def decide(payload: dict, work=None) -> Verdict:
     """Compute the verdict for one tool-call payload. Never raises."""
     try:
-        return _decide(payload, work or _import_work())
+        return _decide(payload, work)
     except Exception:  # noqa: BLE001 -- a harness error must never block an edit
         return ALLOW
 
 
-def _decide(payload: dict, work) -> Verdict:
+def _decide(payload: dict, work=None) -> Verdict:
     if not isinstance(payload, dict):
         return ALLOW
     tool_name = payload.get("tool_name")
@@ -117,10 +117,15 @@ def _decide(payload: dict, work) -> Verdict:
     session_id = session_id.strip()
 
     # A repository with no task state has no claims; skip git entirely. The
-    # work directory is created by the first `work_start` on this machine.
+    # work directory is created by the first `work_start` on this machine, and
+    # holds a `tasks.json` per repository that has ever had a task. Without
+    # one anywhere, `active_tasks` would return nothing for every repository.
+    # Checked before the harness import: this is the common case, and the
+    # import is most of the hook's cost.
     work_root = Path.home() / ".agent-harness" / "work"
-    if not work_root.is_dir():
+    if not work_root.is_dir() or next(work_root.glob("*/tasks.json"), None) is None:
         return ALLOW
+    work = work or _import_work()
 
     cwd = payload.get("cwd")
     target = resolve_target(raw, cwd if isinstance(cwd, str) else None)
