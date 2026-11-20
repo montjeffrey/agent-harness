@@ -251,18 +251,103 @@ def test_a_human_can_still_confirm_an_auto_accepted_entry_by_superseding(tmp_pat
     assert result.created["source"]["manual"] is True
 
 
+def _git_answers(monkeypatch: pytest.MonkeyPatch, root: Path, answer: str | None) -> None:
+    """Put `root` in a repository whose `git` replies `answer` (None = git failed)."""
+    (root / ".git").mkdir(exist_ok=True)
+    monkeypatch.setattr(memory_store, "_git_stdout", lambda *_args, **_kwargs: answer)
+
+
 def test_auto_policy_does_not_apply_to_a_store_committed_to_git(tmp_path: Path, monkeypatch) -> None:
     root = _project(tmp_path)
     _set_policy("auto")
     _remember(root, {"type": "discovery", "summary": "Arrived in a commit."})
-    monkeypatch.setattr(
-        memory_store, "tracked_memory_files", lambda _root: (".agent-harness/memory/inbox.jsonl",)
-    )
+    _git_answers(monkeypatch, root, ".agent-harness/memory/inbox.jsonl\0")
 
     result = memory_curation.curate(root, now=NOW)
 
     assert result.auto_accepted == ()
     assert _entries(root)[0]["status"] == "proposed"
+
+
+def test_auto_policy_waits_when_git_cannot_say_whether_the_store_is_committed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = _project(tmp_path)
+    _set_policy("auto")
+    _remember(root, {"type": "lesson", "summary": "Quote Windows paths."})
+    _git_answers(monkeypatch, root, None)
+
+    result = memory_curation.curate(root, now=NOW)
+    [entry] = _entries(root)
+
+    assert result.auto_accepted == ()
+    assert entry["status"] == "proposed"
+
+
+def test_auto_policy_accepts_in_a_repository_that_tracks_nothing_under_the_store(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = _project(tmp_path)
+    _set_policy("auto")
+    _remember(root, {"type": "lesson", "summary": "Quote Windows paths."})
+    _git_answers(monkeypatch, root, "")
+
+    result = memory_curation.curate(root, now=NOW)
+    [entry] = _entries(root)
+
+    assert result.auto_accepted == (entry["id"],)
+
+
+def test_policy_falls_back_to_review_when_the_config_is_not_utf8() -> None:
+    path = memory_policy.config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b'{"memory_acceptance": "auto", "note": "\xff"}')
+
+    assert memory_policy.acceptance_policy() == "review"
+
+
+def _add_progress_tag(directory: Path) -> None:
+    [line] = memory_store.read_lines(directory)
+    memory_store.write_lines([json.dumps({**json.loads(line), "tags": ["progress"]})], directory)
+
+
+def test_the_auto_transition_refuses_an_entry_changed_since_it_was_checked(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    _remember(root, {"type": "lesson", "summary": "Quote Windows paths."})
+    directory = memory_store.project_memory_dir(root)
+    [checked] = _entries(root)
+    _add_progress_tag(directory)
+
+    with pytest.raises(ValueError, match="changed since"):
+        memory_review.apply_review(
+            directory, checked["id"], "accept", now=NOW, auto=True, expected=checked
+        )
+
+    [after] = _entries(root)
+    assert after["status"] == "proposed"
+
+
+def test_curation_leaves_pending_an_entry_rewritten_after_its_snapshot(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = _project(tmp_path)
+    _remember(root, {"type": "lesson", "summary": "Quote Windows paths."})
+    directory = memory_store.project_memory_dir(root)
+
+    # The policy is read lazily, after curation has taken its snapshot: the
+    # one moment a concurrent writer can slip in between check and write.
+    def auto_after_a_concurrent_write() -> str:
+        _add_progress_tag(directory)
+        return memory_policy.AUTO
+
+    monkeypatch.setattr(memory_policy, "acceptance_policy", auto_after_a_concurrent_write)
+
+    result = memory_curation.curate(root, now=NOW)
+    [entry] = _entries(root)
+
+    assert result.auto_accepted == ()
+    assert entry["status"] == "proposed"
+    assert result.pending == ((entry["id"], memory_curation.AUTO_ACCEPT_REFUSED),)
 
 
 def test_auto_policy_accepts_entries_that_follow_one_it_must_leave_pending(tmp_path: Path) -> None:
