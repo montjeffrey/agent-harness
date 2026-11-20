@@ -57,7 +57,10 @@ def acceptance_policy() -> str:
         return REVIEW
     try:
         config = load_json_object(path)
-    except ConfigValidationError:
+    except (ConfigValidationError, UnicodeDecodeError):
+        # The loader turns unreadable and malformed files into
+        # ConfigValidationError, but text that is not UTF-8 surfaces as
+        # UnicodeDecodeError. Either way the operator did not say "auto".
         return REVIEW
     value = config.get(ACCEPTANCE_KEY)
     return AUTO if isinstance(value, str) and value == AUTO else REVIEW

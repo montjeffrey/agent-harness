@@ -352,6 +352,7 @@ def apply_review(
     file: str | None = None,
     now: datetime | None = None,
     auto: bool = False,
+    expected: dict | None = None,
 ) -> ReviewResult:
     """Apply `action` to `entry_id` in the store at `directory`.
 
@@ -365,10 +366,19 @@ def apply_review(
     changes `accept`: the entry is marked `source.auto` and keeps its recorded
     confidence instead of being stamped as confirmed by a person. No CLI or
     MCP surface passes it.
+
+    `expected` is the record as the caller saw it when deciding to act. When
+    given, the transition is refused unless the entry still reads exactly
+    that way under the lock, so a decision made on a snapshot is never
+    applied to a record someone has since rewritten.
     """
     now = now or datetime.now(timezone.utc)
     with memory_store.writer_lock(directory):
         lines, index, original = locate_entry(directory, entry_id)
+        if expected is not None and original != expected:
+            raise ValueError(
+                f"{entry_id} changed since it was checked; leaving it for the next pass"
+            )
         updated, created = _plan_transition(
             original, action,
             summary=summary, note=note, commit=commit, file=file,

@@ -744,6 +744,20 @@ def is_trusted_store(project_root: Path) -> bool:
     return is_enrolled(project_root) and not tracked_memory_files(project_root)
 
 
+def trust_established(project_root: Path) -> bool:
+    """`is_trusted_store`, but failing closed when git cannot answer.
+
+    `is_trusted_store` reads a failed git call (timeout, missing binary,
+    non-zero exit) as "nothing tracked": right for deciding whether to show
+    stored notes, where the worst case is a note the operator can see came
+    from the store. Accepting entries without a person is different -- a
+    store that may have arrived in a commit must not be promoted because git
+    happened not to reply. A project outside any repository is still
+    trusted: there is nothing git could be tracking.
+    """
+    return is_enrolled(project_root) and inspect_tracked_files(project_root, ".agent-harness") == ()
+
+
 def register_project(project_root: Path, now: datetime | None = None) -> str:
     """Record `project_root` in the machine registry and return its id.
 
@@ -1120,4 +1134,27 @@ def tracked_files(project_root: Path, relative_dir: str) -> tuple[str, ...]:
     out = _git_stdout(root, "ls-files", "-z", "--", f":(icase){relative_dir}")
     if not out:
         return ()
+    return tuple(p for p in out.split("\0") if p)
+
+
+def _inside_git_repository(directory: Path) -> bool:
+    """Whether `directory` or one of its parents has a ``.git`` entry (a
+    directory, or the file a linked worktree or submodule carries)."""
+    current = Path(directory).resolve()
+    return any((candidate / ".git").exists() for candidate in (current, *current.parents))
+
+
+def inspect_tracked_files(project_root: Path, relative_dir: str) -> tuple[str, ...] | None:
+    """`tracked_files`, except that it says when it could not find out.
+
+    Returns ``()`` when the project is outside any repository or git lists
+    nothing, the tracked paths when it lists some, and None when the project
+    is inside a repository and git gave no answer.
+    """
+    root = Path(project_root)
+    if not _inside_git_repository(root):
+        return ()
+    out = _git_stdout(root, "ls-files", "-z", "--", f":(icase){relative_dir}")
+    if out is None:
+        return None
     return tuple(p for p in out.split("\0") if p)

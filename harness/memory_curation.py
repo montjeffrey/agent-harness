@@ -163,7 +163,7 @@ def curate(project_root: Path, now: datetime | None = None) -> CurationResult:
         if auto_allowed is None:
             auto_allowed = (
                 memory_policy.acceptance_policy() == memory_policy.AUTO
-                and memory_store.is_trusted_store(root)
+                and memory_store.trust_established(root)
             )
         return auto_allowed
 
@@ -215,6 +215,7 @@ def curate(project_root: Path, now: datetime | None = None) -> CurationResult:
                     note=AUTO_ACCEPT_NOTE,
                     now=now,
                     auto=True,
+                    expected=entry,
                 )
             except (LookupError, ValueError):
                 # Reviewed, removed, or rewritten by someone else since the
