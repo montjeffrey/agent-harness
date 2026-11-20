@@ -1,10 +1,17 @@
 """Review: the explicit gate that turns proposals into durable memory.
 
-Nothing else in the harness may promote an entry. Collectors and
-`remember` write `proposed` records; review is the only path from there to
-`accepted`, and it always represents a deliberate human act -- which is why
-accepting stamps `confidence: confirmed` and, absent a commit or file,
-attaches `source.manual = True` as the operator's attestation.
+Collectors and `remember` write `proposed` records; review is the path from
+there to `accepted`, and a review always represents a deliberate human act --
+which is why accepting stamps `confidence: confirmed` and, absent a commit or
+file, attaches `source.manual = True` as the operator's attestation.
+
+Curation is the only other thing that promotes an entry, in two bounded
+cases: an ingested document pointer whose file still matches its digest, and
+-- only when the operator has set the `auto` acceptance policy in
+`~/.agent-harness/config.json` -- agent-recorded proposals in a trusted
+store. The second case goes through `apply_review(..., auto=True)`, which
+marks the entry `source.auto` and stamps none of the human marks above, so
+an unreviewed entry stays distinguishable from a reviewed one.
 
 Four transitions, all terminal except `accept`:
 
@@ -38,8 +45,16 @@ after `triage template` wrote it. The `skip` action is what an untouched
 template line says: leave the entry proposed, decide later.
 
 Triage never runs inside an agent. There is no MCP surface for any of this,
-and there must not be: an agent that could accept its own inference would
-make the `proposed` status meaningless.
+and there must not be: an agent that could choose to accept its own inference
+would make the `proposed` status meaningless.
+
+The `auto` policy is a different trade and should be read as one. The switch
+is the operator's: it lives under the home directory, which a repository
+cannot write (see `memory_policy` for what that does and does not cover).
+But once it is on, a note an agent records is accepted at the next curation
+pass, with no person in between. What the policy keeps is the label, not the
+gate: such an entry is `source.auto`, stays `inferred`, renders as `(auto)`,
+and is never promoted into `durable.md`.
 """
 
 from __future__ import annotations
@@ -163,6 +178,9 @@ def _with_evidence(
     already on the entry is preserved either way.
     """
     result = dict(source or {})
+    # A person is now vouching for the entry, so the acceptance-by-policy
+    # label no longer describes it.
+    result.pop("auto", None)
     if commit:
         result["commit"] = commit
     if file:
@@ -199,6 +217,7 @@ def _plan_transition(
     file: str | None,
     now: datetime,
     allocate_id: Callable[[], str],
+    auto: bool = False,
 ) -> tuple[dict, dict | None]:
     """Compute the (updated, created) records for one transition.
 
@@ -227,7 +246,24 @@ def _plan_transition(
         updated["review_note"] = note
     created: dict | None = None
 
-    if action == "accept":
+    if action == "accept" and auto:
+        # Acceptance by the operator's policy, not by a person: the status
+        # changes and nothing else is claimed. Confidence is left as recorded
+        # and no `manual` attestation is attached.
+        # Curation snapshots the proposals before it takes the lock, so a
+        # person may have accepted this entry in between. Their review stands;
+        # relabelling it `auto` would contradict the marks they left.
+        if status != "proposed":
+            raise ValueError(
+                f"{entry_id} is {status}; only a proposed entry can be accepted by policy"
+            )
+        # A hand-edited line can carry any `source`; one malformed entry must
+        # not abort the pass for the whole store.
+        recorded = original.get("source")
+        updated["status"] = "accepted"
+        updated["source"] = {**(recorded if isinstance(recorded, dict) else {}), "auto": True}
+
+    elif action == "accept":
         updated["status"] = "accepted"
         updated["confidence"] = "confirmed"
         updated["source"] = _with_evidence(original.get("source"), commit, file)
@@ -315,6 +351,8 @@ def apply_review(
     commit: str | None = None,
     file: str | None = None,
     now: datetime | None = None,
+    auto: bool = False,
+    expected: dict | None = None,
 ) -> ReviewResult:
     """Apply `action` to `entry_id` in the store at `directory`.
 
@@ -323,14 +361,28 @@ def apply_review(
     `summary` on supersede, resolution without evidence, or any entry-
     contract violation the transition would introduce. Nothing is written
     unless the whole transition validates.
+
+    `auto` is for curation under the `auto` acceptance policy only, and only
+    changes `accept`: the entry is marked `source.auto` and keeps its recorded
+    confidence instead of being stamped as confirmed by a person. No CLI or
+    MCP surface passes it.
+
+    `expected` is the record as the caller saw it when deciding to act. When
+    given, the transition is refused unless the entry still reads exactly
+    that way under the lock, so a decision made on a snapshot is never
+    applied to a record someone has since rewritten.
     """
     now = now or datetime.now(timezone.utc)
     with memory_store.writer_lock(directory):
         lines, index, original = locate_entry(directory, entry_id)
+        if expected is not None and original != expected:
+            raise ValueError(
+                f"{entry_id} changed since it was checked; leaving it for the next pass"
+            )
         updated, created = _plan_transition(
             original, action,
             summary=summary, note=note, commit=commit, file=file,
-            now=now, allocate_id=_id_allocator(directory, now),
+            now=now, allocate_id=_id_allocator(directory, now), auto=auto,
         )
 
         lines[index] = json.dumps(updated, ensure_ascii=False)
