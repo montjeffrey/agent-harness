@@ -264,6 +264,25 @@ def has_evidence(source: Mapping | None) -> bool:
     return any(source.get(key) for key in ("commit", "file"))
 
 
+def is_auto_accepted(source: object) -> bool:
+    """Whether `source` carries the mark of acceptance by policy, not review."""
+    return isinstance(source, Mapping) and source.get("auto") is True
+
+
+def status_flag(entry: Mapping) -> str:
+    """The marker a rendered entry must carry, or "" when it needs none.
+
+    A reviewed, accepted entry is the unmarked case. Anything else says what it
+    is: its status when not accepted, and ``auto`` when it was accepted by
+    policy. One function for every renderer, so an unreviewed entry cannot be
+    labelled in the context packet and unlabelled in the session-start list.
+    """
+    status = str(entry.get("status") or "")
+    if status != "accepted":
+        return status
+    return "auto" if is_auto_accepted(entry.get("source")) else ""
+
+
 def validate_entry(entry: dict, now: datetime | None = None) -> dict:
     """Validate one entry against the schema-1 contract and return a
     normalized copy (never mutates the input).
@@ -324,7 +343,13 @@ def validate_entry(entry: dict, now: datetime | None = None) -> dict:
 
     # Trust rules. Order matters: an inferred entry is refused before we ever
     # ask whether it has a source, so the diagnostic names the real problem.
-    if status == "accepted":
+    #
+    # `source.auto` is the one exception, and it is a label rather than
+    # evidence: curation writes it when the operator's acceptance policy is
+    # `auto` (see `memory_policy`). Such an entry is accepted while staying
+    # `inferred`, so nothing downstream can mistake it for one a human
+    # confirmed, and `has_evidence` still answers False for it.
+    if status == "accepted" and not is_auto_accepted(source):
         if confidence == "inferred":
             raise ValueError(
                 "an inferred entry cannot be accepted directly; it stays "

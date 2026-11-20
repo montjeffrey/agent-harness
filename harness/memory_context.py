@@ -347,9 +347,9 @@ def render_entry(entry: dict, impacts: Sequence[dict] = ()) -> str:
     evidence silently vanished reads exactly like one that never had any.
     """
     parts = [f"- `{_one_line(entry.get('id', '?'))}` [{_one_line(entry.get('type', '?'))}]"]
-    status = entry.get("status")
-    if status and status != "accepted":
-        parts.append(f"({_one_line(status)})")
+    flag = memory_store.status_flag(entry)
+    if flag:
+        parts.append(f"({_one_line(flag)})")
     parts.append(_one_line(entry.get("summary", "")))
     tags = entry.get("tags")
     if tags:
