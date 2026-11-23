@@ -24,6 +24,27 @@ access all follow from that; none of them survive an opaque store.
 
 ---
 
+## Current direction (2026-11-23)
+
+Two plans set where the memory and coordination work goes next. Both are
+plans: nothing in them is built unless the document says so.
+
+- **Automatic trust and synced memory** --
+  `docs/superpowers/specs/2026-11-23-automatic-trust-and-synced-memory-design.md`.
+  Agent notes become usable without per-entry human review; one project has
+  one memory on every device and in every worktree, carried by per-device
+  append-only logs in a folder the operator syncs; plans stay plain Markdown
+  and Obsidian stays optional. This answers the "Cross-machine sync" and
+  "Concurrent writes" items under Objective 4, and will supersede ADR 0003 and
+  ADR 0004 when its later steps land.
+- **Cross-device path claims** --
+  `docs/superpowers/specs/2026-11-23-cross-device-claims-assessment.md`.
+  An assessment, not a design: whether a session on one device should see
+  claims held on another, the four ways to carry them, and the three
+  experiments that decide it. It follows the memory work and does not block it.
+
+---
+
 ## Phase 1 -- Portable harness (done)
 
 - Generalized code-relations query CLI (`harness/graph_query.py`) with
