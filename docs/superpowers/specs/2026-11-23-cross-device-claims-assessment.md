@@ -58,6 +58,8 @@ single-machine claims too:
 One small file per device per repository, listing that device's active claims.
 
 - For: no new infrastructure; same transport as memory; works offline.
+- Claimed paths go wherever the operator's sync tool sends the folder. With a
+  cloud drive that is the provider's servers, the same as memory.
 - Against: delay of seconds to minutes, so two devices can both start inside the
   window. Good enough to notice overlap after the fact, not to prevent it.
 
@@ -110,7 +112,7 @@ A managed key-value store or realtime database.
 | Prevents a simultaneous start | no | mostly | yes | yes |
 | Works offline | yes, stale | no, falls back | no, falls back | no, falls back |
 | Extra infrastructure | none | none | always-on device | external account |
-| Data leaves the operator's machines | no | to the git remote | no | yes |
+| Data leaves the operator's machines | depends on the sync tool: no for device-to-device sync, yes for a cloud drive | to the git remote | no | yes |
 | Others can adopt it | trivially | if they have a remote | only with a host | only with an account |
 
 ## Preliminary recommendation
@@ -121,8 +123,12 @@ Not a decision. The order that risks least:
    stable repository identity). They are needed by every option and fix the
    stuck-claim problem on a single machine.
 2. **Ship L1 as visibility only.** Other devices' claims appear in `work_status`
-   and in the `work_start` reply as a warning. Nothing is refused. Record every
-   case where a claim from another device overlapped.
+   and in the `work_start` reply as a warning. Nothing is refused. Each device
+   appends a start event and a finish event for every claim, with paths and
+   times, and keeps them after the claim ends. Overlap is then computed from
+   the intervals once the logs have synced. A list of currently active claims
+   would miss two tasks that both started and finished before either device
+   synced, and would make overlap look rarer than it is.
 3. **Decide enforcement from that record.** If cross-device overlap is rare,
    stop here. If it is common, add L2 as the enforcing transport where a remote
    exists. Consider L3 only if L2's race is observed in practice, or if the
@@ -133,7 +139,8 @@ L4 is not recommended.
 ## Experiments that decide it
 
 1. **How often does it happen?** Two weeks of L1 visibility on real work, and a
-   count of overlapping claims between devices. This is the number the whole
+   count of claim intervals that overlapped between devices, taken from the
+   retained start and finish events. This is the number the whole
    decision turns on, and nobody has it.
 2. **Does the git host accept claim refs?** Push, list and delete a ref under a
    custom namespace on the hosting service in use; confirm no CI run starts and

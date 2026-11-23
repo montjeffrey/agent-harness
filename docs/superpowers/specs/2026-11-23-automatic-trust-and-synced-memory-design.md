@@ -183,6 +183,13 @@ tool never has to merge, and a conflict copy cannot be produced by the harness.
 Appending is the only write to a live log; a reader skips a torn final line, as
 `iter_entries` already does for malformed lines.
 
+One file per device is not one writer per device: several agents and hooks run
+on the same machine. Id allocation and the append that uses it happen under one
+local lock per log, held for that single write. The lock file lives under
+`~/.agent-harness/`, never in the synced folder, so a sync tool cannot carry a
+stale lock to another device. A lock older than its timeout is recoverable, as
+the task store's lock already is.
+
 ### Entries are immutable; changes are events
 
 Today a review, a claim, a hand-off refresh or a compaction rewrites a line in
@@ -193,7 +200,16 @@ another device wrote. So:
 - A change is a new line in the changing device's own log:
   `{"event": "status", "target": "<entry id>", "status": "superseded", "reason": ..., "ts": ...}`.
 - The current state of a store is the fold of every log: entries, with the
-  events that target them applied in timestamp order, ties broken by device id.
+  events that target them applied in order.
+- Order comes from what each writer had seen, not from wall clocks. Every event
+  carries a per-target sequence number: one more than the highest sequence the
+  writer had observed for that entry when it wrote. An event written after
+  seeing another always sorts after it, whatever either device's clock says.
+- Two events with the same sequence number were written without seeing each
+  other. Between those, an operator's review outranks an agent's event; then
+  the timestamp decides, then the device id. A fast clock on one device
+  therefore cannot push an agent's change past a human correction that was
+  made knowing about it, and cannot beat a concurrent human correction either.
 - Two devices changing the same entry both keep their event. The fold picks one
   winner deterministically and the loser stays readable in the log.
 
@@ -220,8 +236,19 @@ In order:
 3. For a folder that is not a git repository: today's folder-name-and-path hash,
    which stays local to that machine until an explicit key is set.
 
-A repository with more than one root commit uses the oldest. A fork shares its
-parent's key, which is harmless because stores belong to one operator.
+A repository with more than one root commit uses the oldest.
+
+A shallow clone does not contain the root commit; git reports its oldest
+fetched commit as parentless, which would give a different key. The harness
+detects a shallow repository (`git rev-parse --is-shallow-repository`) and does
+not derive a key from it. Each project folder in the store records the remote
+URLs it has been seen with, so a shallow clone whose remote matches a known
+project joins that project. With no match it gets a key local to the machine
+and `doctor` says how to join: set the explicit key, or deepen the clone.
+
+A fork shares its parent's key. That is right only while the fork is the same
+project to the operator. To keep a fork's memory separate, set an explicit key
+in the fork's `scope.md` before recording anything in it.
 
 ### Compaction
 
@@ -253,15 +280,31 @@ lands after the log format, and only with a benchmark that shows it paying.
 ### Migration
 
 A one-time, repeatable import per machine: each existing `inbox.jsonl` is
-appended to this device's log for the project key its folder resolves to, ids
-unchanged. Stores that belonged to worktrees of one repository merge into one.
-The old files are left in place and no longer read.
+appended to this device's log for the project key its folder resolves to.
+Stores that belonged to worktrees of one repository merge into one. The old
+files are left in place.
+
+Ids are not carried over unchanged. Every old store numbered its entries from
+001 each day, so two worktree stores of one repository routinely hold different
+entries under the same id. On import:
+
+- each entry gets a new device-qualified id and keeps the old one as
+  `legacy_id`, with the old store's project id as `legacy_store`;
+- references inside one old store (`supersedes`, `superseded_by`, task and
+  claim targets) are rewritten to the new ids in the same pass, using that
+  store's own old-to-new map, so a reference never crosses into another store's
+  entry that happened to share the id;
+- a lookup by an old id still works when it matches one entry, and lists the
+  candidates when it matches several;
+- the import records which stores it has taken, so running it again adds
+  nothing.
 
 ### Known risks
 
 - **Sync delay.** Another device sees a new entry when the file-sync tool
   delivers it, typically seconds to minutes. Acceptable for knowledge.
-- **Clock skew** affects only the order of two events on the same entry.
+- **Clock skew** can only decide between two events on the same entry that
+  were written without seeing each other and by the same kind of writer.
 - **Placeholder files.** Some sync tools leave files as online-only stubs. The
   store folder must be kept fully on disk; `doctor` should check and say so.
 - **Private text in a synced folder.** The store holds whatever agents recorded.
@@ -286,10 +329,18 @@ policy.
 2. Stop the progress hook writing entries; add the read-time "Recent work"
    section.
 3. Backlog migration command with a dry run.
-4. Storage layer: device id, per-device logs, event fold, root-commit project
-   key, import of existing stores. Readers switch to the fold; behaviour is
-   otherwise unchanged.
-5. Move every in-place writer to events (one pull request per module).
+4. Storage layer in shadow: device id, per-device logs, event fold, root-commit
+   project key, import of existing stores. `inbox.jsonl` stays the store of
+   record and every reader keeps reading it. The fold is built beside it and a
+   parity check compares the two on every read in tests and on demand from
+   `doctor`. Nothing an agent sees changes.
+5. Move every in-place writer to events, one pull request per module. During
+   this step each moved writer writes both the event and the old in-place
+   change, so `inbox.jsonl` remains complete and parity holds after every
+   pull request.
+5a. Cut over: readers switch to the fold and the in-place writes stop, in one
+   pull request, only once parity has held across all six writers. Until this
+   lands no write can be visible in one place and missing from the other.
 6. `store_root` setting, `doctor` checks for the store folder, and a documented
    two-device walkthrough.
 7. Aging, `memory_retract`, `source.session` / `source.agent` / `source.device`.
@@ -299,7 +350,7 @@ policy.
 10. Remove the Obsidian sentence from the vault README template.
 
 Steps 2 and 3 do not depend on the storage layer and can ship first. Step 5
-depends on 4. Step 8 depends on 7.
+depends on 4, and 5a on 5. Step 6 depends on 5a. Step 8 depends on 7.
 
 ## Open questions
 
