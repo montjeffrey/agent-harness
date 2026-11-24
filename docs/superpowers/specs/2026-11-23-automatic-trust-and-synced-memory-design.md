@@ -211,8 +211,12 @@ another device wrote. So:
   through an event B had seen. Otherwise the two are concurrent. A single
   counter cannot say this: an agent that writes twice offline would otherwise
   sort its second event after a review it never saw.
-- The fold drops every event that some other event is after, and is left with
-  the events nothing has seen. If one remains, it is the state. If several
+- The fold works one field at a time. An event sets named fields only: a
+  review sets `status`, a claim sets `claim`, and so on. For each field the
+  fold takes the events that set it and drops every one that another event
+  setting the same field is after. A later claim therefore never removes an
+  earlier review, because it does not set `status`.
+- If one event remains for a field, it gives that field's value. If several
   remain they are concurrent, and an operator's review outranks an agent's
   event; then the timestamp decides, then the device id.
 - An agent's event therefore replaces an operator's review only when the agent
@@ -261,8 +265,11 @@ reports its oldest fetched commit as parentless, which would give a different
 key. The harness detects a shallow repository
 (`git rev-parse --is-shallow-repository`) and does not derive a key from it.
 Each project folder records the remote URLs it has been seen with, so a shallow
-clone whose remote matches a known project joins that project. With no match it
-gets a key local to the machine and `doctor` says how to join: set the explicit
+clone whose remote matches exactly one known project joins that project. A
+remote can match more than one, because a fork's folder may have recorded its
+parent's URL. Then, as with roots, no project is selected: the checkout gets a
+key local to the machine and `doctor` names every match. With no match it also
+gets a local key. In both cases `doctor` says how to join: set the explicit
 key, or deepen the clone.
 
 **Joining.** A checkout that recorded memory under a local key and later
@@ -390,13 +397,18 @@ Design documents are held to the same gate as code.
    `doctor`. Nothing an agent sees changes.
 
    The import is not a one-time copy. Until cut-over a *reconcile* pass keeps
-   the fold equal to `inbox.jsonl`: it compares the two under the writer lock
-   and, for every difference, appends to this device's log the entry or the
-   event that removes it, marked `"origin": "reconcile"`. That covers a new
-   entry, and a changed status, claim or text on an existing one. Reconcile
-   runs before every parity check, so a writer that has not moved yet cannot
-   leave the fold stale. It only ever changes the fold: `inbox.jsonl` is the
-   store of record until 5a.
+   the fold current. It runs once per old store, under that store's writer
+   lock, and compares that store's `inbox.jsonl` with only the fold entries
+   whose `legacy_store` names it. Entries that came from another worktree's
+   store, or from another device, are outside the comparison and are never
+   touched. For every difference inside it, reconcile appends to this device's
+   log what brings the fold up to date, marked `"origin": "reconcile"`: the
+   entry, when `inbox.jsonl` has one the fold lacks, or an event, when a
+   status, claim or text differs. An entry the old store dropped in compaction
+   becomes a closing event, never a deletion from the log. Reconcile runs
+   before every parity check, and parity is checked per old store in the same
+   scope, so a writer that has not moved yet cannot leave the fold stale. It
+   only ever changes the fold: `inbox.jsonl` is the store of record until 5a.
 5. Move every in-place writer to events, one pull request per module. During
    this step each moved writer writes both the old in-place change and the
    event, in that order and under the one writer lock. If the in-place write
@@ -407,12 +419,17 @@ Design documents are held to the same gate as code.
    A module's pull request is done when, in its tests, reconcile writes
    nothing for that module's kind of change: every such change already reached
    the fold through the module's own event.
-5a. Cut over: readers switch to the fold and the in-place writes stop, in one
-   pull request. The condition is a reconcile pass over every store on the
-   machine that writes nothing, taken after all six writers have moved. A pass
-   that writes something has repaired a gap; it is run again until it is
-   clean. Until this lands no write can be visible in one place and missing
-   from the other for longer than one reconcile pass.
+5a. Cut over: readers switch to the fold and the in-place writes stop. The
+   code ships in one pull request after all six writers have moved, but the
+   switch itself happens per old store, at run time, and is atomic: the
+   harness takes that store's writer lock, runs reconcile, repeats it until a
+   pass writes nothing, and then writes a cut-over marker for the store, all
+   without releasing the lock. Every writer and reader checks the marker
+   under the same lock. Without it, a writer writes both forms and a reader
+   reads `inbox.jsonl`; with it, a writer writes the event only and a reader
+   reads the fold. No write can fall between the clean pass and the switch,
+   because both are inside one lock hold. A store whose reconcile cannot come
+   clean stays on `inbox.jsonl` and `doctor` reports it.
 6. `store_root` setting, `doctor` checks for the store folder, and a documented
    two-device walkthrough.
 7. Aging, `memory_retract`, `source.session` / `source.agent` / `source.device`.

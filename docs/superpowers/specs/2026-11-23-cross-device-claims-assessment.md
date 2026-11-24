@@ -128,7 +128,11 @@ Not a decision. The order that risks least:
    times, and keeps them after the claim ends. Overlap is then computed from
    the intervals once the logs have synced: two claims from different devices
    overlap only when their intervals intersect and their paths overlap, by the
-   same path rule `work_start` uses. A list of currently active claims
+   same path rule `work_start` uses. Each renewal is appended too, with the
+   time-to-live in force, so a claim whose session died still has an end: its
+   last renewal plus the time-to-live. A session that takes over an expired
+   claim appends an expiry event naming it. Times are UTC from the device's
+   own clock. A list of currently active claims
    would miss two tasks that both started and finished before either device
    synced, and would make overlap look rarer than it is.
 3. **Decide enforcement from that record.** If cross-device overlap is rare,
@@ -143,7 +147,11 @@ L4 is not recommended.
 1. **How often does it happen?** Two weeks of L1 visibility on real work, and a
    count of claims that overlapped between devices in both time and paths,
    taken from the retained start and finish events. Two devices working at the
-   same time on different files do not count. This is the number the whole
+   same time on different files do not count. Device clocks are not assumed
+   to agree: the count is reported with a stated skew bound, as overlaps
+   longer than the bound (certain), and overlaps or near misses within it
+   (uncertain). If the decision would differ between the two ends of that
+   range, the clocks are measured before deciding. This is the number the whole
    decision turns on, and nobody has it.
 2. **Does the git host accept claim refs?** Push, list and delete a ref under a
    custom namespace on the hosting service in use; confirm no CI run starts and
