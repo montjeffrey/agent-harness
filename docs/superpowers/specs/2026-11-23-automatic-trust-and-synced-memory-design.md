@@ -202,14 +202,22 @@ another device wrote. So:
 - The current state of a store is the fold of every log: entries, with the
   events that target them applied in order.
 - Order comes from what each writer had seen, not from wall clocks. Every event
-  carries a per-target sequence number: one more than the highest sequence the
-  writer had observed for that entry when it wrote. An event written after
-  seeing another always sorts after it, whatever either device's clock says.
-- Two events with the same sequence number were written without seeing each
-  other. Between those, an operator's review outranks an agent's event; then
-  the timestamp decides, then the device id. A fast clock on one device
-  therefore cannot push an agent's change past a human correction that was
-  made knowing about it, and cannot beat a concurrent human correction either.
+  has an id, `<device>:<n>`, where `n` counts the lines that device has written
+  to that log. Every event also carries `seen`: for each device, the highest
+  `n` among the events on the same entry that the writer had folded when it
+  wrote. A log is append-only and a sync tool delivers whole files, so a device
+  always holds a prefix of every other log and `seen` is well defined.
+- Event A is *before* event B only when B's `seen` covers A, directly or
+  through an event B had seen. Otherwise the two are concurrent. A single
+  counter cannot say this: an agent that writes twice offline would otherwise
+  sort its second event after a review it never saw.
+- The fold drops every event that some other event is after, and is left with
+  the events nothing has seen. If one remains, it is the state. If several
+  remain they are concurrent, and an operator's review outranks an agent's
+  event; then the timestamp decides, then the device id.
+- An agent's event therefore replaces an operator's review only when the agent
+  had that review in `seen`. No clock setting, and no number of offline writes,
+  moves an agent's change past a human correction it had not seen.
 - Two devices changing the same entry both keep their event. The fold picks one
   winner deterministically and the loser stays readable in the log.
 
@@ -229,26 +237,52 @@ The device id is a short random string created once per machine and stored in
 
 In order:
 
-1. An explicit key in the project's `scope.md` front matter, for the cases
-   below that need an override.
-2. The repository's root commit SHA. It is the same in every clone, on every
-   device and in every worktree, needs no remote and no network.
+1. An explicit key in the clone's own git configuration
+   (`git config agent-harness.projectKey <key>`), for the cases below that need
+   an override. It is read before any project folder is opened, is never
+   committed, and is shared by every worktree of that clone.
+2. The repository's root commit SHA. It is the same in every full clone, on
+   every device and in every worktree, needs no remote and no network.
 3. For a folder that is not a git repository: today's folder-name-and-path hash,
    which stays local to that machine until an explicit key is set.
 
-A repository with more than one root commit uses the oldest.
+**More than one root commit.** A new project takes the lexicographically
+smallest root SHA as its key. The rule reads commit ids only, never author or
+committer dates, which can be skewed or forged. Each project folder also
+records every root SHA it has been seen with. A checkout resolves to an
+existing project when any of its roots is recorded there, so a clone that
+fetched only some branches, and holds only some of the roots, still lands in
+the same project. If a checkout's roots match two different projects, the
+harness picks neither: `doctor` names both and the operator joins them or sets
+an explicit key.
 
-A shallow clone does not contain the root commit; git reports its oldest
-fetched commit as parentless, which would give a different key. The harness
-detects a shallow repository (`git rev-parse --is-shallow-repository`) and does
-not derive a key from it. Each project folder in the store records the remote
-URLs it has been seen with, so a shallow clone whose remote matches a known
-project joins that project. With no match it gets a key local to the machine
-and `doctor` says how to join: set the explicit key, or deepen the clone.
+**Shallow clones.** A shallow clone does not contain the root commit; git
+reports its oldest fetched commit as parentless, which would give a different
+key. The harness detects a shallow repository
+(`git rev-parse --is-shallow-repository`) and does not derive a key from it.
+Each project folder records the remote URLs it has been seen with, so a shallow
+clone whose remote matches a known project joins that project. With no match it
+gets a key local to the machine and `doctor` says how to join: set the explicit
+key, or deepen the clone.
 
-A fork shares its parent's key. That is right only while the fork is the same
-project to the operator. To keep a fork's memory separate, set an explicit key
-in the fork's `scope.md` before recording anything in it.
+**Joining.** A checkout that recorded memory under a local key and later
+resolves to a shared project (the clone was deepened, a remote was added, an
+explicit key was set, or `doctor` found two folders for one repository) does
+not leave that memory behind. The device carries its own log from the local-key
+folder into its own log in the resolved project, by the same rules as the
+migration below: new ids with the old one kept as `legacy_id`, references
+rewritten in the same pass, and a record of what was taken so that a second run
+adds nothing. Only the device that wrote a log carries it, so one writer per
+file still holds. The old folder is left in place with a marker naming where
+its entries went.
+
+**Forks.** A fork shares its parent's roots, and so its parent's key. That is
+right only while the fork is the same project to the operator. To keep a fork's
+memory separate, set `agent-harness.projectKey` in the fork's clone before
+recording anything in it. The setting lives in the clone, so it cannot change
+the parent's project, and each device with a clone of the fork sets it once.
+`doctor` warns when a checkout's remote URL is not one the resolved project has
+been seen with, which is how an unmarked fork shows up.
 
 ### Compaction
 
@@ -279,7 +313,8 @@ lands after the log format, and only with a benchmark that shows it paying.
 
 ### Migration
 
-A one-time, repeatable import per machine: each existing `inbox.jsonl` is
+A repeatable import per machine, kept current by the reconcile pass of build
+step 4 until cut-over: each existing `inbox.jsonl` is
 appended to this device's log for the project key its folder resolves to.
 Stores that belonged to worktrees of one repository merge into one. The old
 files are left in place.
@@ -325,6 +360,25 @@ entries under the same id. On import:
 Each step is its own pull request, tests first, under the repository's review
 policy.
 
+### Review gate for every step
+
+A step merges only when all of these hold:
+
+- CI is green on the head commit.
+- Every finding from the automated reviewers on the pull request has an answer
+  on its thread: fixed, with the commit, or declined, with the reason. This
+  includes findings that arrive after the last push; the threads are re-read
+  immediately before merging.
+- A finding about data integrity or security is fixed in that pull request, or
+  the step does not merge. It is not carried forward as a follow-up.
+- A step that touches a trust decision, the store's write path, a hook, or
+  configuration loading also gets the maintainer's own security review, run
+  beside the automated one. Neither replaces the other.
+
+Design documents are held to the same gate as code.
+
+### Steps
+
 1. Land the acceptance policy (PR #16).
 2. Stop the progress hook writing entries; add the read-time "Recent work"
    section.
@@ -334,13 +388,31 @@ policy.
    record and every reader keeps reading it. The fold is built beside it and a
    parity check compares the two on every read in tests and on demand from
    `doctor`. Nothing an agent sees changes.
+
+   The import is not a one-time copy. Until cut-over a *reconcile* pass keeps
+   the fold equal to `inbox.jsonl`: it compares the two under the writer lock
+   and, for every difference, appends to this device's log the entry or the
+   event that removes it, marked `"origin": "reconcile"`. That covers a new
+   entry, and a changed status, claim or text on an existing one. Reconcile
+   runs before every parity check, so a writer that has not moved yet cannot
+   leave the fold stale. It only ever changes the fold: `inbox.jsonl` is the
+   store of record until 5a.
 5. Move every in-place writer to events, one pull request per module. During
-   this step each moved writer writes both the event and the old in-place
-   change, so `inbox.jsonl` remains complete and parity holds after every
-   pull request.
+   this step each moved writer writes both the old in-place change and the
+   event, in that order and under the one writer lock. If the in-place write
+   fails, no event is written. If the process stops between the two,
+   `inbox.jsonl` is ahead and the next reconcile pass writes the missing
+   event. The fold can therefore never hold a change that `inbox.jsonl` lacks.
+
+   A module's pull request is done when, in its tests, reconcile writes
+   nothing for that module's kind of change: every such change already reached
+   the fold through the module's own event.
 5a. Cut over: readers switch to the fold and the in-place writes stop, in one
-   pull request, only once parity has held across all six writers. Until this
-   lands no write can be visible in one place and missing from the other.
+   pull request. The condition is a reconcile pass over every store on the
+   machine that writes nothing, taken after all six writers have moved. A pass
+   that writes something has repaired a gap; it is run again until it is
+   clean. Until this lands no write can be visible in one place and missing
+   from the other for longer than one reconcile pass.
 6. `store_root` setting, `doctor` checks for the store folder, and a documented
    two-device walkthrough.
 7. Aging, `memory_retract`, `source.session` / `source.agent` / `source.device`.

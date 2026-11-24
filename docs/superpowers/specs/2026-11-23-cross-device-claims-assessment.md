@@ -126,7 +126,9 @@ Not a decision. The order that risks least:
    and in the `work_start` reply as a warning. Nothing is refused. Each device
    appends a start event and a finish event for every claim, with paths and
    times, and keeps them after the claim ends. Overlap is then computed from
-   the intervals once the logs have synced. A list of currently active claims
+   the intervals once the logs have synced: two claims from different devices
+   overlap only when their intervals intersect and their paths overlap, by the
+   same path rule `work_start` uses. A list of currently active claims
    would miss two tasks that both started and finished before either device
    synced, and would make overlap look rarer than it is.
 3. **Decide enforcement from that record.** If cross-device overlap is rare,
@@ -139,8 +141,9 @@ L4 is not recommended.
 ## Experiments that decide it
 
 1. **How often does it happen?** Two weeks of L1 visibility on real work, and a
-   count of claim intervals that overlapped between devices, taken from the
-   retained start and finish events. This is the number the whole
+   count of claims that overlapped between devices in both time and paths,
+   taken from the retained start and finish events. Two devices working at the
+   same time on different files do not count. This is the number the whole
    decision turns on, and nobody has it.
 2. **Does the git host accept claim refs?** Push, list and delete a ref under a
    custom namespace on the hosting service in use; confirm no CI run starts and
