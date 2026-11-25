@@ -152,17 +152,24 @@ L4 is not recommended.
    Device clocks are not assumed to agree, and the error is recorded
    throughout the pilot, not measured once at the end. Every claim event
    carries three readings: the wall clock in UTC; a monotonic clock reading
-   with a boot id; and, when a time server can be reached, the wall clock's
-   offset from it. From these:
+   with a boot id; and, when the pilot's time server can be reached, the wall
+   clock's offset from it. Every device reads the same time server, named
+   once for the whole pilot, and each reading records the server it used. A
+   reading against any other server, or one that does not name its server,
+   does not count. With one common reference the server's own error is the
+   same for both devices and cancels in their difference. From these:
 
-   - The skew bound is computed for each pair of claims being compared, not
-     assumed and not one figure for the pilot. It is the sum, over the two
-     devices, of three terms: the size of the device's nearest offset
-     reading; that reading's own error, taken as the round trip to the time
-     server; and a drift allowance for the time between the reading and the
-     claim, at a stated worst-case drift rate. Two clocks wrong in opposite
-     directions therefore add. If either device has no offset reading, there
-     is no bound and the comparison is uncertain.
+   - Each claim has two endpoints: its start, and its finish; for a claim
+     that expired, its last renewal plus the time-to-live. The device's error
+     at one endpoint is the sum of three terms: the size of the nearest
+     offset reading; that reading's own error, taken as its round trip to
+     the server; and a drift allowance for the time between that reading and
+     that endpoint, at a stated worst-case drift rate.
+   - The skew bound for a pair of claims is the larger error of the first
+     claim's two endpoints plus the larger error of the second claim's two.
+     Every endpoint the comparison uses is covered, and two clocks wrong in
+     opposite directions add. If any of the four endpoints has no counted
+     offset reading, there is no bound and the comparison is uncertain.
    - A clock step is detected when, between two events of one boot, the wall
      clock and the monotonic clock advance by different amounts. A backward
      step shows as wall time falling while monotonic time rises.

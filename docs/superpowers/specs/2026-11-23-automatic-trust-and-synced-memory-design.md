@@ -256,12 +256,26 @@ In order:
 **More than one root commit.** A new project takes the lexicographically
 smallest root SHA as its key. The rule reads commit ids only, never author or
 committer dates, which can be skewed or forged. Each project folder also
-records every root SHA it has been seen with. A checkout resolves to an
-existing project when any of its roots is recorded there, so a clone that
-fetched only some branches, and holds only some of the roots, still lands in
-the same project. If a checkout's roots match two different projects, the
-harness picks neither: `doctor` names both and the operator joins them or sets
-an explicit key.
+records every root SHA it has been seen with, and every remote URL.
+
+One shared root is not enough evidence to join: a repository that merged
+another repository's history (`--allow-unrelated-histories`, a subtree import)
+holds that other project's root too. A checkout joins an existing project
+automatically only on one of these:
+
+- every one of its roots is recorded in that project, and in no other; a
+  clone that fetched only some branches holds a subset and still qualifies;
+- its smallest root is that project's key and one of its remote URLs is
+  recorded there; the checkout's other roots are then added to the project.
+
+Anything else that matches a project selects no project: some roots matched
+but not all, roots matching two projects, or a smallest root that names a
+project the checkout did not qualify for. The checkout then gets a key local
+to the machine, as a shallow clone without a match does, and `doctor` names
+every partial match. The operator joins one of them, which carries the
+local-key memory in by the Joining rule below, or sets an explicit key. A
+checkout whose roots match nothing recorded starts a new project under its
+smallest root.
 
 **Shallow clones.** A shallow clone does not contain the root commit; git
 reports its oldest fetched commit as parentless, which would give a different
@@ -437,13 +451,27 @@ Design documents are held to the same gate as code.
    together, so no reader is ever on the fold while some writer is still on
    `inbox.jsonl`. The harness takes the writer lock of every known old store,
    in a fixed order; runs reconcile on each and repeats until a full round
-   writes nothing; moves the shadow logs into `store_root` as this device's
-   logs; and writes one machine marker. It releases no lock until the marker
-   is written. Every writer and reader checks the marker under its store's
-   lock. Without it, a writer writes both forms and a reader reads
-   `inbox.jsonl`; with it, a writer writes the event only and a reader reads
-   the fold. If any store cannot come clean, nothing is moved, no marker is
-   written, the machine stays on `inbox.jsonl`, and `doctor` names the store.
+   writes nothing; writes a cut-over journal; moves the shadow logs into
+   `store_root` as this device's logs; and writes one machine marker. It
+   releases no lock until the marker is written. Every writer and reader
+   checks the marker under its store's lock. Without it, a writer writes both
+   forms and a reader reads `inbox.jsonl`; with it, a writer writes the event
+   only and a reader reads the fold. If any store cannot come clean, nothing
+   is moved, no journal or marker is written, the machine stays on
+   `inbox.jsonl`, and `doctor` names the store.
+
+   The journal makes an interrupted cut-over safe to finish. It lives under
+   `~/.agent-harness/`, is written and flushed before the first log moves,
+   and lists every shadow log with its size and destination. Each log moves
+   by copying to a temporary name in `store_root`, flushing, renaming into
+   place, and only then removing the shadow copy. Any harness process that
+   finds a journal without a marker writes nothing, in either form, until it
+   has finished the cut-over itself: it takes the same locks (the dead
+   process's locks are recoverable after their timeout), and for each listed
+   log keeps the copy in `store_root` if it is complete and moves the shadow
+   copy otherwise, then writes the marker and removes the journal. No writer
+   can create a second shadow log in between, so nothing is lost or
+   duplicated.
 
    Reconcile never runs after the marker. An old store found later, such as a
    checkout restored from a backup, is static, because no code writes
@@ -453,6 +481,18 @@ Design documents are held to the same gate as code.
    only after its own cut-over. Each device therefore migrates alone and joins
    with finished logs, and the ordering rules above apply only between devices
    that are all on the fold.
+
+   Changing `store_root` is a command, not a bare edit of `config.json`,
+   because the device's logs must arrive in the new folder before it becomes
+   active. The command takes this device's log locks, copies this device's
+   own logs and archives into the new folder by the same journal and
+   copy-flush-rename steps as cut-over, verifies each copy's size, then
+   switches `config.json` and leaves a marker in the old folder naming where
+   the logs went. It copies only files this device wrote, so one writer per
+   file still holds. `config.json` also records the device's last active
+   root; if someone edits the setting by hand, the harness finds this
+   device's logs missing from the new folder, writes nothing, and `doctor`
+   says to run the command.
 7. Aging, `memory_retract`, `source.session` / `source.agent` / `source.device`.
 8. Make automatic acceptance the default; supersede ADR 0003 and ADR 0004 with
    new records; update the templates and installed agent instructions.
