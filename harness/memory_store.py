@@ -264,6 +264,25 @@ def has_evidence(source: Mapping | None) -> bool:
     return any(source.get(key) for key in ("commit", "file"))
 
 
+def is_auto_accepted(source: object) -> bool:
+    """Whether `source` carries the mark of acceptance by policy, not review."""
+    return isinstance(source, Mapping) and source.get("auto") is True
+
+
+def status_flag(entry: Mapping) -> str:
+    """The marker a rendered entry must carry, or "" when it needs none.
+
+    A reviewed, accepted entry is the unmarked case. Anything else says what it
+    is: its status when not accepted, and ``auto`` when it was accepted by
+    policy. One function for every renderer, so an unreviewed entry cannot be
+    labelled in the context packet and unlabelled in the session-start list.
+    """
+    status = str(entry.get("status") or "")
+    if status != "accepted":
+        return status
+    return "auto" if is_auto_accepted(entry.get("source")) else ""
+
+
 def validate_entry(entry: dict, now: datetime | None = None) -> dict:
     """Validate one entry against the schema-1 contract and return a
     normalized copy (never mutates the input).
@@ -324,7 +343,13 @@ def validate_entry(entry: dict, now: datetime | None = None) -> dict:
 
     # Trust rules. Order matters: an inferred entry is refused before we ever
     # ask whether it has a source, so the diagnostic names the real problem.
-    if status == "accepted":
+    #
+    # `source.auto` is the one exception, and it is a label rather than
+    # evidence: curation writes it when the operator's acceptance policy is
+    # `auto` (see `memory_policy`). Such an entry is accepted while staying
+    # `inferred`, so nothing downstream can mistake it for one a human
+    # confirmed, and `has_evidence` still answers False for it.
+    if status == "accepted" and not is_auto_accepted(source):
         if confidence == "inferred":
             raise ValueError(
                 "an inferred entry cannot be accepted directly; it stays "
@@ -719,6 +744,20 @@ def is_trusted_store(project_root: Path) -> bool:
     return is_enrolled(project_root) and not tracked_memory_files(project_root)
 
 
+def trust_established(project_root: Path) -> bool:
+    """`is_trusted_store`, but failing closed when git cannot answer.
+
+    `is_trusted_store` reads a failed git call (timeout, missing binary,
+    non-zero exit) as "nothing tracked": right for deciding whether to show
+    stored notes, where the worst case is a note the operator can see came
+    from the store. Accepting entries without a person is different -- a
+    store that may have arrived in a commit must not be promoted because git
+    happened not to reply. A project outside any repository is still
+    trusted: there is nothing git could be tracking.
+    """
+    return is_enrolled(project_root) and inspect_tracked_files(project_root, ".agent-harness") == ()
+
+
 def register_project(project_root: Path, now: datetime | None = None) -> str:
     """Record `project_root` in the machine registry and return its id.
 
@@ -1095,4 +1134,27 @@ def tracked_files(project_root: Path, relative_dir: str) -> tuple[str, ...]:
     out = _git_stdout(root, "ls-files", "-z", "--", f":(icase){relative_dir}")
     if not out:
         return ()
+    return tuple(p for p in out.split("\0") if p)
+
+
+def _inside_git_repository(directory: Path) -> bool:
+    """Whether `directory` or one of its parents has a ``.git`` entry (a
+    directory, or the file a linked worktree or submodule carries)."""
+    current = Path(directory).resolve()
+    return any((candidate / ".git").exists() for candidate in (current, *current.parents))
+
+
+def inspect_tracked_files(project_root: Path, relative_dir: str) -> tuple[str, ...] | None:
+    """`tracked_files`, except that it says when it could not find out.
+
+    Returns ``()`` when the project is outside any repository or git lists
+    nothing, the tracked paths when it lists some, and None when the project
+    is inside a repository and git gave no answer.
+    """
+    root = Path(project_root)
+    if not _inside_git_repository(root):
+        return ()
+    out = _git_stdout(root, "ls-files", "-z", "--", f":(icase){relative_dir}")
+    if out is None:
+        return None
     return tuple(p for p in out.split("\0") if p)

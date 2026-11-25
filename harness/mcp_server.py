@@ -387,7 +387,8 @@ MEMORY_TOOL_DESCRIPTIONS: dict[str, str] = {
         "Run deterministic memory curation: auto-accept only ingested document "
         "pointers whose source file still matches its recorded digest, reject "
         "exact duplicate proposals, and show the bounded exception queue. "
-        "This does not auto-accept agent conclusions."
+        "This does not auto-accept agent conclusions unless the operator has "
+        "set the `auto` acceptance policy in ~/.agent-harness/config.json."
     ),
 }
 
@@ -757,7 +758,9 @@ def dispatch_memory(tool_name: str, arguments: dict) -> str:
                 # observation is exactly the "inferred" case, and the design's
                 # central trust rule is that nothing automatic may make itself
                 # authoritative. Promotion is `review`, which is deliberately
-                # not exposed as a tool.
+                # not exposed as a tool. (Under the operator's `auto`
+                # acceptance policy curation accepts the entry later; it still
+                # enters here as proposed and stays labelled `source.auto`.)
                 "status": "proposed",
                 "confidence": "inferred",
                 "source": {"project": memory_store.project_id_for(root)},

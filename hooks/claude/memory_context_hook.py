@@ -198,8 +198,8 @@ def _clip(text: str, limit: int) -> str:
 
 def _entry_line(entry: dict, limit: int) -> str:
     fold = _harness()[3].one_line
-    status = fold(entry.get("status") or "")
-    flag = f" ({status})" if status and status != "accepted" else ""
+    status = fold(_harness()[3].status_flag(entry))
+    flag = f" ({status})" if status else ""
     return f"- `{fold(entry.get('id', '?'))}` [{fold(entry.get('type', '?'))}]{flag} {_clip(fold(entry.get('summary', '')), limit)}"
 
 

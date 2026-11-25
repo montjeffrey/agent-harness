@@ -225,11 +225,17 @@ def is_terminal(entry: Mapping) -> bool:
 def is_promotable(entry: Mapping) -> bool:
     """Whether `entry` is confirmed knowledge worth writing into `durable.md`.
 
-    Status alone is the gate. The trust model already guarantees that accepted
-    implies evidence and that an inferred entry can never be accepted, so no
-    separate confidence check is needed here.
+    An accepted entry carries evidence and a human's confirmation unless it
+    was accepted by the `auto` policy, which marks it `source.auto`. Those are
+    excluded: `durable.md` is the file a person reads and commits, so nothing
+    reaches it that no person has looked at. They remain accepted in the inbox
+    and are still served by `memory_context`.
     """
-    return entry.get("status") == "accepted" and entry.get("type") in PROMOTABLE_TYPES
+    return (
+        entry.get("status") == "accepted"
+        and entry.get("type") in PROMOTABLE_TYPES
+        and not memory_store.is_auto_accepted(entry.get("source"))
+    )
 
 
 def detail_rank(entry: Mapping) -> tuple[int, ...]:
