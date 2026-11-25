@@ -121,12 +121,46 @@ def _git(directory: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
+def _identity(start: Path) -> tuple[Path, Path, str]:
+    """Worktree root, common Git directory and HEAD, in one Git process.
+
+    ``rev-parse`` answers all three in one call (``--show-toplevel`` is always
+    absolute; ``--path-format`` applies to the arguments after it). It fails
+    exactly where the separate calls did: outside a worktree, and on an unborn
+    HEAD, which prints ``HEAD`` and exits 128.
+
+    Git prints a newline inside a path unescaped, so a repository under such a
+    directory gives more than three lines and the answers cannot be told
+    apart. That case asks one question per call instead, as the code before
+    the combined call did. Raising would be wrong: the claim guard treats a
+    ``WorkError`` here as "not a repository" and allows the edit.
+    """
+    # Split on "\n" only: ``str.splitlines`` also breaks on U+2028, U+0085 and
+    # other characters that are legal in a directory name.
+    lines = _git(
+        start, "rev-parse", "--show-toplevel", "--path-format=absolute", "--git-common-dir", "HEAD"
+    ).split("\n")
+    if len(lines) == 3:
+        root, common, head = (line.strip() for line in lines)
+        return Path(root).resolve(), Path(common).resolve(), head
+    top = Path(_git(start, "rev-parse", "--show-toplevel")).resolve()
+    common_dir = Path(_git(top, "rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
+    return top, common_dir, _git(top, "rev-parse", "HEAD")
+
+
+def repository_root_for(directory: Path) -> Repository:
+    """``repository_for`` without the branch lookup: ``current_branch`` is None.
+
+    For a hot path that needs only the root and the repository identity (the
+    claim guard), one Git process instead of two.
+    """
+    root, common, head = _identity(Path(directory).expanduser().resolve())
+    return Repository(root=root, common_git_dir=common, head=head, current_branch=None)
+
+
 def repository_for(directory: Path) -> Repository:
     """Resolve the Git repository and common Git directory for ``directory``."""
-    start = Path(directory).expanduser().resolve()
-    root = Path(_git(start, "rev-parse", "--show-toplevel")).resolve()
-    common = Path(_git(root, "rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
-    head = _git(root, "rev-parse", "HEAD")
+    root, common, head = _identity(Path(directory).expanduser().resolve())
     # ``symbolic-ref`` exits 1 on a detached HEAD, which is valid task input.
     try:
         branch_result = subprocess.run(

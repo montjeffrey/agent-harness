@@ -337,8 +337,9 @@ def test_diff_survives_utf8_bytes_the_locale_cannot_decode(repo: Path) -> None:
 def test_repository_for_closes_stdin_on_every_git_call(
     monkeypatch: pytest.MonkeyPatch, repo: Path
 ) -> None:
-    """Whole-path guard: `repository_for` runs four git commands, including the
-    branch-resolution call that bypasses `_git`. None may inherit stdin."""
+    """Whole-path guard: `repository_for` runs two git commands, the combined
+    rev-parse and the branch-resolution call that bypasses `_git`. Neither may
+    inherit stdin; the narrower `repository_root_for` is held to the same."""
     calls: list[dict] = []
     real_run = subprocess.run
 
@@ -349,8 +350,10 @@ def test_repository_for_closes_stdin_on_every_git_call(
     monkeypatch.setattr(work.subprocess, "run", recording_run)
 
     work.repository_for(repo)
+    assert len(calls) == 2, f"expected every git call to be recorded, saw {len(calls)}"
+    work.repository_root_for(repo)
+    assert len(calls) == 3
 
-    assert len(calls) >= 4, f"expected every git call to be recorded, saw {len(calls)}"
     for kwargs in calls:
         assert kwargs["stdin"] is subprocess.DEVNULL
         assert kwargs.get("encoding") == "utf-8"
