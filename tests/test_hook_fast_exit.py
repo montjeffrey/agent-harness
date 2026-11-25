@@ -227,3 +227,50 @@ def test_repository_root_for_keeps_line_separator_characters_in_a_path(
 
     assert separator in str(found.root)
     assert found.head == "0" * 40
+
+def test_repository_root_for_keeps_a_newline_in_a_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Git prints a newline inside a path unescaped, so the combined answer has
+    # more than three lines and cannot be separated. Raising there would make
+    # the claim guard allow an edit it should have checked, so the lookup falls
+    # back to one question per call, where each answer is read whole.
+    root = tmp_path / "odd\nname"
+    common = root / ".git"
+    head = "0" * 40
+    calls: list[tuple[str, ...]] = []
+
+    def fake_git(_directory: Path, *args: str) -> str:
+        calls.append(args)
+        if "--show-toplevel" in args and "HEAD" in args:
+            return "\n".join([root.as_posix(), common.as_posix(), head])
+        if args == ("rev-parse", "--show-toplevel"):
+            return root.as_posix()
+        if args == ("rev-parse", "--path-format=absolute", "--git-common-dir"):
+            return common.as_posix()
+        if args == ("rev-parse", "HEAD"):
+            return head
+        raise AssertionError(f"unexpected git call: {args!r}")
+
+    monkeypatch.setattr(work, "_git", fake_git)
+
+    found = work.repository_root_for(tmp_path)
+
+    assert "\n" in str(found.root)
+    assert "\n" in str(found.common_git_dir)
+    assert found.head == head
+    assert len(calls) == 4
+
+
+def test_repository_root_for_asks_git_once_for_an_ordinary_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake_git(_directory: Path, *args: str) -> str:
+        calls.append(args)
+        return "\n".join([tmp_path.as_posix(), (tmp_path / ".git").as_posix(), "0" * 40])
+
+    monkeypatch.setattr(work, "_git", fake_git)
+
+    work.repository_root_for(tmp_path)
+
+    assert len(calls) == 1

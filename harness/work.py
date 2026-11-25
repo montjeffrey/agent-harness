@@ -128,16 +128,24 @@ def _identity(start: Path) -> tuple[Path, Path, str]:
     absolute; ``--path-format`` applies to the arguments after it). It fails
     exactly where the separate calls did: outside a worktree, and on an unborn
     HEAD, which prints ``HEAD`` and exits 128.
+
+    Git prints a newline inside a path unescaped, so a repository under such a
+    directory gives more than three lines and the answers cannot be told
+    apart. That case asks one question per call instead, as the code before
+    the combined call did. Raising would be wrong: the claim guard treats a
+    ``WorkError`` here as "not a repository" and allows the edit.
     """
     # Split on "\n" only: ``str.splitlines`` also breaks on U+2028, U+0085 and
     # other characters that are legal in a directory name.
     lines = _git(
         start, "rev-parse", "--show-toplevel", "--path-format=absolute", "--git-common-dir", "HEAD"
     ).split("\n")
-    if len(lines) != 3:
-        raise WorkError(f"git rev-parse returned an unexpected answer: {lines!r}")
-    root, common, head = (line.strip() for line in lines)
-    return Path(root).resolve(), Path(common).resolve(), head
+    if len(lines) == 3:
+        root, common, head = (line.strip() for line in lines)
+        return Path(root).resolve(), Path(common).resolve(), head
+    top = Path(_git(start, "rev-parse", "--show-toplevel")).resolve()
+    common_dir = Path(_git(top, "rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
+    return top, common_dir, _git(top, "rev-parse", "HEAD")
 
 
 def repository_root_for(directory: Path) -> Repository:
