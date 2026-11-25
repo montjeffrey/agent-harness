@@ -126,7 +126,13 @@ Not a decision. The order that risks least:
    and in the `work_start` reply as a warning. Nothing is refused. Each device
    appends a start event and a finish event for every claim, with paths and
    times, and keeps them after the claim ends. Overlap is then computed from
-   the intervals once the logs have synced. A list of currently active claims
+   the intervals once the logs have synced: two claims from different devices
+   overlap only when their intervals intersect and their paths overlap, by the
+   same path rule `work_start` uses. Each renewal is appended too, with the
+   time-to-live in force, so a claim whose session died still has an end: its
+   last renewal plus the time-to-live. A session that takes over an expired
+   claim appends an expiry event naming it. Times are UTC from the device's
+   own clock. A list of currently active claims
    would miss two tasks that both started and finished before either device
    synced, and would make overlap look rarer than it is.
 3. **Decide enforcement from that record.** If cross-device overlap is rare,
@@ -139,8 +145,56 @@ L4 is not recommended.
 ## Experiments that decide it
 
 1. **How often does it happen?** Two weeks of L1 visibility on real work, and a
-   count of claim intervals that overlapped between devices, taken from the
-   retained start and finish events. This is the number the whole
+   count of claims that overlapped between devices in both time and paths,
+   taken from the retained start and finish events. Two devices working at the
+   same time on different files do not count.
+
+   Device clocks are not assumed to agree, and the error is recorded
+   throughout the pilot, not measured once at the end. Every claim event
+   carries three readings: the wall clock in UTC; a monotonic clock reading
+   with a boot id; and, when the pilot's time server can be reached, the wall
+   clock's offset from it. Every device reads the same time server, named
+   once for the whole pilot, and each reading records the server it used. A
+   reading against any other server, or one that does not name its server,
+   does not count. One common reference removes differences between
+   servers, but the server's own error can still change between two
+   readings. So each reading also records the error the server reports for
+   itself against UTC: its root distance, half its root delay plus its root
+   dispersion, as the time protocol defines it. A reading from a server that
+   reports itself unsynchronised does not count. From these:
+
+   - Each claim has two endpoints: its start, and its finish; for a claim
+     that expired, its last renewal plus the time-to-live. The device's error
+     at one endpoint is the sum of four terms: the size of the nearest
+     offset reading; that reading's own error, taken as its round trip to
+     the server; the server's root distance at that reading, which bounds
+     how far the server itself was from UTC, and so how far it can have
+     moved between any two readings; and a drift allowance for the time
+     between that reading and that endpoint, at a stated worst-case drift
+     rate.
+   - The skew bound for a pair of claims is the larger error of the first
+     claim's two endpoints plus the larger error of the second claim's two.
+     Every endpoint the comparison uses is covered, and two clocks wrong in
+     opposite directions add. If any of the four endpoints has no counted
+     offset reading, there is no bound and the comparison is uncertain.
+   - Ordinary drift is not a step. Between two events of one boot, the wall
+     clock and the monotonic clock always differ a little, because of drift
+     and because a time service slews the clock gradually. The tolerance for
+     that is the same worst-case rate used for the endpoint bound, which must
+     be at least the time service's maximum slew rate, times the monotonic
+     time elapsed, plus one clock-reading resolution on each reading. A
+     difference within the tolerance is drift and is already inside the
+     bound. A difference beyond it is a step; a backward step shows as wall
+     time falling while monotonic time rises. Any interval with an
+     endpoint between two readings that disagree beyond the tolerance has
+     no bound on that device, so its comparisons are uncertain.
+   - An overlap is *certain* only when it is longer than that pair's bound
+     and no step was detected on either device across either interval. Every
+     other overlap, and every near miss within the bound, is *uncertain*.
+
+   The result is reported as both counts. If the decision would differ
+   between "certain only" and "certain plus uncertain", the pilot is extended
+   and no decision is taken on it. This is the number the whole
    decision turns on, and nobody has it.
 2. **Does the git host accept claim refs?** Push, list and delete a ref under a
    custom namespace on the hosting service in use; confirm no CI run starts and

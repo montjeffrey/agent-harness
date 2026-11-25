@@ -202,14 +202,29 @@ another device wrote. So:
 - The current state of a store is the fold of every log: entries, with the
   events that target them applied in order.
 - Order comes from what each writer had seen, not from wall clocks. Every event
-  carries a per-target sequence number: one more than the highest sequence the
-  writer had observed for that entry when it wrote. An event written after
-  seeing another always sorts after it, whatever either device's clock says.
-- Two events with the same sequence number were written without seeing each
-  other. Between those, an operator's review outranks an agent's event; then
-  the timestamp decides, then the device id. A fast clock on one device
-  therefore cannot push an agent's change past a human correction that was
-  made knowing about it, and cannot beat a concurrent human correction either.
+  has an id, `<device>:<n>`, where `n` counts the lines that device has written
+  to that log. Every event also carries `seen`: for each device, the highest
+  `n` among the events on the same entry that the writer had folded when it
+  wrote. A log is append-only and a sync tool delivers whole files, so a device
+  always holds a prefix of every other log and `seen` is well defined.
+- Event A is *before* event B only when B's `seen` covers A, directly or
+  through an event B had seen. Otherwise the two are concurrent. A single
+  counter cannot say this: an agent that writes twice offline would otherwise
+  sort its second event after a review it never saw.
+- The fold works one field at a time. An event sets named fields only: a
+  review sets `status`, a claim sets `claim`, and so on. For each field the
+  fold takes the events that set it and drops every one that another event
+  setting the same field is after. A later claim therefore never removes an
+  earlier review, because it does not set `status`.
+- If one event remains for a field, it gives that field's value. If several
+  remain they are concurrent, and an operator's review outranks an agent's
+  event; then the timestamp decides, then the device id, then the event's
+  own counter `n`, higher winning. Two agents on one device can write
+  concurrent events in the same second; the counter is unique within a log,
+  so the order is always total.
+- An agent's event therefore replaces an operator's review only when the agent
+  had that review in `seen`. No clock setting, and no number of offline writes,
+  moves an agent's change past a human correction it had not seen.
 - Two devices changing the same entry both keep their event. The fold picks one
   winner deterministically and the loser stays readable in the log.
 
@@ -229,26 +244,77 @@ The device id is a short random string created once per machine and stored in
 
 In order:
 
-1. An explicit key in the project's `scope.md` front matter, for the cases
-   below that need an override.
-2. The repository's root commit SHA. It is the same in every clone, on every
-   device and in every worktree, needs no remote and no network.
+1. An explicit key in the clone's own git configuration
+   (`git config agent-harness.projectKey <key>`), for the cases below that need
+   an override. It is read before any project folder is opened, is never
+   committed, and is shared by every worktree of that clone.
+2. The repository's root commit SHA. It is the same in every full clone, on
+   every device and in every worktree, needs no remote and no network.
 3. For a folder that is not a git repository: today's folder-name-and-path hash,
    which stays local to that machine until an explicit key is set.
 
-A repository with more than one root commit uses the oldest.
+A folder that is not a git repository has no git configuration, so its
+explicit key lives in the harness's own per-machine settings instead:
+`~/.agent-harness/config.json` maps the folder's absolute path to a key. Like
+the git setting it is read before any project folder is opened, is never
+inside the folder, and is set once on each device that has a copy of it.
+Setting it is what lets a non-git folder share a project, and it triggers the
+Joining rule below like any other explicit key.
 
-A shallow clone does not contain the root commit; git reports its oldest
-fetched commit as parentless, which would give a different key. The harness
-detects a shallow repository (`git rev-parse --is-shallow-repository`) and does
-not derive a key from it. Each project folder in the store records the remote
-URLs it has been seen with, so a shallow clone whose remote matches a known
-project joins that project. With no match it gets a key local to the machine
-and `doctor` says how to join: set the explicit key, or deepen the clone.
+**More than one root commit.** A new project takes the lexicographically
+smallest root SHA as its key. The rule reads commit ids only, never author or
+committer dates, which can be skewed or forged. Each project folder also
+records every root SHA it has been seen with, and every remote URL.
 
-A fork shares its parent's key. That is right only while the fork is the same
-project to the operator. To keep a fork's memory separate, set an explicit key
-in the fork's `scope.md` before recording anything in it.
+One shared root is not enough evidence to join: a repository that merged
+another repository's history (`--allow-unrelated-histories`, a subtree import)
+holds that other project's root too. A checkout joins an existing project
+automatically only on one of these:
+
+- every one of its roots is recorded in that project, and in no other; a
+  clone that fetched only some branches holds a subset and still qualifies;
+- its smallest root is that project's key and one of its remote URLs is
+  recorded there; the checkout's other roots are then added to the project.
+
+Anything else that matches a project selects no project: some roots matched
+but not all, roots matching two projects, or a smallest root that names a
+project the checkout did not qualify for. The checkout then gets a key local
+to the machine, as a shallow clone without a match does, and `doctor` names
+every partial match. The operator joins one of them, which carries the
+local-key memory in by the Joining rule below, or sets an explicit key. A
+checkout whose roots match nothing recorded starts a new project under its
+smallest root.
+
+**Shallow clones.** A shallow clone does not contain the root commit; git
+reports its oldest fetched commit as parentless, which would give a different
+key. The harness detects a shallow repository
+(`git rev-parse --is-shallow-repository`) and does not derive a key from it.
+Each project folder records the remote URLs it has been seen with, so a shallow
+clone whose remote matches exactly one known project joins that project. A
+remote can match more than one, because a fork's folder may have recorded its
+parent's URL. Then, as with roots, no project is selected: the checkout gets a
+key local to the machine and `doctor` names every match. With no match it also
+gets a local key. In both cases `doctor` says how to join: set the explicit
+key, or deepen the clone.
+
+**Joining.** A checkout that recorded memory under a local key and later
+resolves to a shared project (the clone was deepened, a remote was added, an
+explicit key was set, or `doctor` found two folders for one repository) does
+not leave that memory behind. The device carries its own log from the local-key
+folder into its own log in the resolved project, by the same rules as the
+migration below: new ids with the old one kept as `legacy_id`, references
+rewritten in the same pass, and a record of what was taken so that a second run
+adds nothing. Only the device that wrote a log carries it, so one writer per
+file still holds. The old folder is left in place with a marker naming where
+its entries went.
+
+**Forks.** A fork shares its parent's roots, and so its parent's key. That is
+right only while the fork is the same project to the operator. To keep a fork's
+memory separate, set `agent-harness.projectKey` in the fork's clone before
+recording anything in it. The setting lives in the clone, so it cannot change
+the parent's project, and each device with a clone of the fork sets it once.
+`doctor` warns when a checkout's remote URL is not one the resolved project has
+been seen with, which is how an unmarked fork shows up.
 
 ### Compaction
 
@@ -279,10 +345,16 @@ lands after the log format, and only with a benchmark that shows it paying.
 
 ### Migration
 
-A one-time, repeatable import per machine: each existing `inbox.jsonl` is
+A repeatable import per machine, kept current by the reconcile pass of build
+step 4 until cut-over: each existing `inbox.jsonl` is
 appended to this device's log for the project key its folder resolves to.
 Stores that belonged to worktrees of one repository merge into one. The old
 files are left in place.
+
+Migration and sync never overlap. A machine migrates alone, into a local
+shadow, and may join a shared `store_root` only after it has cut over (build
+steps 4 to 6). The old single-file store and another device's events are
+therefore never live on one machine at the same time.
 
 Ids are not carried over unchanged. Every old store numbered its entries from
 001 each day, so two worktree stores of one repository routinely hold different
@@ -325,24 +397,137 @@ entries under the same id. On import:
 Each step is its own pull request, tests first, under the repository's review
 policy.
 
+### Review gate for every step
+
+A step merges only when all of these hold:
+
+- CI is green on the head commit.
+- Every finding from the automated reviewers on the pull request has an answer
+  on its thread: fixed, with the commit, or declined, with the reason. This
+  includes findings that arrive after the last push; the threads are re-read
+  immediately before merging.
+- A finding about data integrity or security is fixed in that pull request, or
+  the step does not merge. It is not carried forward as a follow-up.
+- A step that touches a trust decision, the store's write path, a hook, or
+  configuration loading also gets the maintainer's own security review, run
+  beside the automated one. Neither replaces the other.
+
+Design documents are held to the same gate as code.
+
+### Steps
+
 1. Land the acceptance policy (PR #16).
 2. Stop the progress hook writing entries; add the read-time "Recent work"
    section.
 3. Backlog migration command with a dry run.
 4. Storage layer in shadow: device id, per-device logs, event fold, root-commit
    project key, import of existing stores. `inbox.jsonl` stays the store of
-   record and every reader keeps reading it. The fold is built beside it and a
-   parity check compares the two on every read in tests and on demand from
-   `doctor`. Nothing an agent sees changes.
+   record and every reader keeps reading it. Nothing an agent sees changes.
+
+   The shadow is local and single-device by rule. It is written under
+   `~/.agent-harness/shadow/`, never under `store_root`, and nothing syncs it.
+   Until this machine has cut over (5a), the harness refuses a `store_root`
+   that already holds another device's log. So during steps 4 and 5 the shadow
+   holds only what this machine derived from its own `inbox.jsonl` files:
+   there are no events from another device to order against, protect or
+   overwrite. Nothing reads the shadow except the parity check.
+
+   A *reconcile* pass keeps the shadow current. It runs once per old store,
+   under that store's writer lock, and compares that store's `inbox.jsonl`
+   with the shadow entries whose `legacy_store` names it. For every
+   difference it appends what brings the shadow up to date, marked
+   `"origin": "reconcile"`: the entry, when `inbox.jsonl` has one the shadow
+   lacks, or an event, when a status, claim or text differs. An entry the old
+   store dropped in compaction becomes a closing event. `inbox.jsonl` is the
+   only source of truth in this phase, so a reconcile event is always right
+   to win. The shadow may lag between passes; the parity check runs reconcile
+   first, in tests and on demand from `doctor`.
 5. Move every in-place writer to events, one pull request per module. During
-   this step each moved writer writes both the event and the old in-place
-   change, so `inbox.jsonl` remains complete and parity holds after every
-   pull request.
-5a. Cut over: readers switch to the fold and the in-place writes stop, in one
-   pull request, only once parity has held across all six writers. Until this
-   lands no write can be visible in one place and missing from the other.
+   this step each moved writer writes both the old in-place change and the
+   event, in that order and under the one writer lock. If the in-place write
+   fails, no event is written. If the process stops between the two,
+   `inbox.jsonl` is ahead and the next reconcile pass writes the missing
+   event. Every line in the shadow comes from a local dual write or from
+   reconcile, so the shadow never holds a change that `inbox.jsonl` lacks.
+
+   A module's pull request is done when, in its tests, reconcile writes
+   nothing for that module's kind of change: every such change already reached
+   the shadow through the module's own event.
+5a. Cut over: readers switch to the fold and the in-place writes stop. The
+   code ships in one pull request after all six writers have moved. The
+   switch happens at run time, once per machine, for every store on it
+   together, so no reader is ever on the fold while some writer is still on
+   `inbox.jsonl`. The harness takes the writer lock of every known old store,
+   in a fixed order; runs reconcile on each and repeats until a full round
+   writes nothing; writes a cut-over journal; moves the shadow logs into
+   `store_root` as this device's logs; and writes one machine marker. It
+   releases no lock until the marker is written. Every writer and reader
+   checks the marker under its store's lock. Without it, a writer writes both
+   forms and a reader reads `inbox.jsonl`; with it, a writer writes the event
+   only and a reader reads the fold. If any store cannot come clean, nothing
+   is moved, no journal or marker is written, the machine stays on
+   `inbox.jsonl`, and `doctor` names the store.
+
+   The journal makes an interrupted cut-over safe to finish. It lives under
+   `~/.agent-harness/`, is written and flushed before the first log moves,
+   and lists every shadow log with its size and destination. Each log moves
+   by copying to a temporary name in `store_root`, flushing, renaming into
+   place, and only then removing the shadow copy. Any harness process that
+   finds a journal without a marker writes nothing, in either form, until it
+   has finished the cut-over itself: it takes the same locks (the dead
+   process's locks are recoverable after their timeout), and for each listed
+   log keeps the copy in `store_root` if it is complete and moves the shadow
+   copy otherwise, then writes the marker and removes the journal. No writer
+   can create a second shadow log in between, so nothing is lost or
+   duplicated.
+
+   Reconcile never runs after the marker. An old store found later, such as a
+   checkout restored from a backup, is static, because no code writes
+   `inbox.jsonl` any more. It is imported once, as new entries.
 6. `store_root` setting, `doctor` checks for the store folder, and a documented
-   two-device walkthrough.
+   two-device walkthrough. A machine may point `store_root` at a shared folder
+   only after its own cut-over. Each device therefore migrates alone and joins
+   with finished logs, and the ordering rules above apply only between devices
+   that are all on the fold.
+
+   Changing `store_root` is a command, not a bare edit of `config.json`,
+   because the device's logs must arrive in the new folder before it becomes
+   active. The command takes this device's log locks and writes a
+   root-change journal under `~/.agent-harness/`, naming the old root, the
+   new root, and every file it will copy. It then copies this device's own
+   logs and archives into the new folder by the same copy-flush-rename steps
+   as cut-over, verifies each copy's size, switches `config.json`, leaves a
+   marker in the old folder naming where the logs went, and removes the
+   journal. It copies only files this device wrote, so one writer per file
+   still holds.
+
+   While a root-change journal exists, no writer on this device writes
+   anything, so the old root stays the only current copy and nothing can be
+   written after a log was copied. Any harness process that finds the
+   journal finishes the change before doing anything else: it copies every
+   listed file again from the old root, replacing whatever copy the new
+   folder already holds, then switches `config.json`, setting `store_root`
+   and the last active root to the new folder in one write, and removes the
+   journal. A peer reading the new folder sees either a temporary name,
+   which no reader opens, or a complete and current copy.
+
+   If the new folder cannot be reached, the operator can cancel with the
+   same command, but only before the switch. The command reads
+   `config.json` to tell which side of the switch it is on. If `store_root`
+   still names the old root, cancel deletes this device's copies in the new
+   folder, by their device-named file names, and removes the journal,
+   leaving the old root in use. If `store_root` already names the new root,
+   the new folder holds complete copies, so cancel is refused, deletes
+   nothing, and the command finishes the change instead. Cancel never edits
+   `config.json`, so it can never leave the device pointing at a folder
+   from which its logs were removed.
+
+   `config.json` records the device's last active root beside `store_root`.
+   Writers compare the two. If they differ, because the setting was edited
+   by hand, the harness writes nothing, whatever logs the configured folder
+   holds: an old root still has this device's earlier logs, so finding them
+   there proves nothing. `doctor` says to run the command, which moves the
+   logs from the last active root to the configured one.
 7. Aging, `memory_retract`, `source.session` / `source.agent` / `source.device`.
 8. Make automatic acceptance the default; supersede ADR 0003 and ADR 0004 with
    new records; update the templates and installed agent instructions.
