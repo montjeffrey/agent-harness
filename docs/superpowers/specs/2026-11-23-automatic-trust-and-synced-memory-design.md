@@ -253,6 +253,14 @@ In order:
 3. For a folder that is not a git repository: today's folder-name-and-path hash,
    which stays local to that machine until an explicit key is set.
 
+A folder that is not a git repository has no git configuration, so its
+explicit key lives in the harness's own per-machine settings instead:
+`~/.agent-harness/config.json` maps the folder's absolute path to a key. Like
+the git setting it is read before any project folder is opened, is never
+inside the folder, and is set once on each device that has a copy of it.
+Setting it is what lets a non-git folder share a project, and it triggers the
+Joining rule below like any other explicit key.
+
 **More than one root commit.** A new project takes the lexicographically
 smallest root SHA as its key. The rule reads commit ids only, never author or
 committer dates, which can be skewed or forged. Each project folder also
