@@ -147,11 +147,27 @@ L4 is not recommended.
 1. **How often does it happen?** Two weeks of L1 visibility on real work, and a
    count of claims that overlapped between devices in both time and paths,
    taken from the retained start and finish events. Two devices working at the
-   same time on different files do not count. Device clocks are not assumed
-   to agree: the count is reported with a stated skew bound, as overlaps
-   longer than the bound (certain), and overlaps or near misses within it
-   (uncertain). If the decision would differ between the two ends of that
-   range, the clocks are measured before deciding. This is the number the whole
+   same time on different files do not count.
+
+   Device clocks are not assumed to agree, and the error is recorded
+   throughout the pilot, not measured once at the end. Every claim event
+   carries three readings: the wall clock in UTC; a monotonic clock reading
+   with a boot id; and, when a time server can be reached, the wall clock's
+   offset from it. From these:
+
+   - The skew bound is the largest offset any device recorded during the
+     two weeks, not an assumed figure.
+   - A clock step is detected when, between two events of one boot, the wall
+     clock and the monotonic clock advance by different amounts. A backward
+     step shows as wall time falling while monotonic time rises.
+   - An overlap is *certain* only when it is longer than the bound, both
+     claims have an offset reading taken within the hour, and no step was
+     detected on either device across either interval. Every other overlap
+     or near miss within the bound is *uncertain*.
+
+   The result is reported as both counts. If the decision would differ
+   between "certain only" and "certain plus uncertain", the pilot is extended
+   and no decision is taken on it. This is the number the whole
    decision turns on, and nobody has it.
 2. **Does the git host accept claim refs?** Push, list and delete a ref under a
    custom namespace on the hosting service in use; confirm no CI run starts and

@@ -218,7 +218,10 @@ another device wrote. So:
   earlier review, because it does not set `status`.
 - If one event remains for a field, it gives that field's value. If several
   remain they are concurrent, and an operator's review outranks an agent's
-  event; then the timestamp decides, then the device id.
+  event; then the timestamp decides, then the device id, then the event's
+  own counter `n`, higher winning. Two agents on one device can write
+  concurrent events in the same second; the counter is unique within a log,
+  so the order is always total.
 - An agent's event therefore replaces an operator's review only when the agent
   had that review in `seen`. No clock setting, and no number of offline writes,
   moves an agent's change past a human correction it had not seen.
@@ -326,6 +329,11 @@ appended to this device's log for the project key its folder resolves to.
 Stores that belonged to worktrees of one repository merge into one. The old
 files are left in place.
 
+Migration and sync never overlap. A machine migrates alone, into a local
+shadow, and may join a shared `store_root` only after it has cut over (build
+steps 4 to 6). The old single-file store and another device's events are
+therefore never live on one machine at the same time.
+
 Ids are not carried over unchanged. Every old store numbered its entries from
 001 each day, so two worktree stores of one repository routinely hold different
 entries under the same id. On import:
@@ -392,46 +400,59 @@ Design documents are held to the same gate as code.
 3. Backlog migration command with a dry run.
 4. Storage layer in shadow: device id, per-device logs, event fold, root-commit
    project key, import of existing stores. `inbox.jsonl` stays the store of
-   record and every reader keeps reading it. The fold is built beside it and a
-   parity check compares the two on every read in tests and on demand from
-   `doctor`. Nothing an agent sees changes.
+   record and every reader keeps reading it. Nothing an agent sees changes.
 
-   The import is not a one-time copy. Until cut-over a *reconcile* pass keeps
-   the fold current. It runs once per old store, under that store's writer
-   lock, and compares that store's `inbox.jsonl` with only the fold entries
-   whose `legacy_store` names it. Entries that came from another worktree's
-   store, or from another device, are outside the comparison and are never
-   touched. For every difference inside it, reconcile appends to this device's
-   log what brings the fold up to date, marked `"origin": "reconcile"`: the
-   entry, when `inbox.jsonl` has one the fold lacks, or an event, when a
-   status, claim or text differs. An entry the old store dropped in compaction
-   becomes a closing event, never a deletion from the log. Reconcile runs
-   before every parity check, and parity is checked per old store in the same
-   scope, so a writer that has not moved yet cannot leave the fold stale. It
-   only ever changes the fold: `inbox.jsonl` is the store of record until 5a.
+   The shadow is local and single-device by rule. It is written under
+   `~/.agent-harness/shadow/`, never under `store_root`, and nothing syncs it.
+   Until this machine has cut over (5a), the harness refuses a `store_root`
+   that already holds another device's log. So during steps 4 and 5 the shadow
+   holds only what this machine derived from its own `inbox.jsonl` files:
+   there are no events from another device to order against, protect or
+   overwrite. Nothing reads the shadow except the parity check.
+
+   A *reconcile* pass keeps the shadow current. It runs once per old store,
+   under that store's writer lock, and compares that store's `inbox.jsonl`
+   with the shadow entries whose `legacy_store` names it. For every
+   difference it appends what brings the shadow up to date, marked
+   `"origin": "reconcile"`: the entry, when `inbox.jsonl` has one the shadow
+   lacks, or an event, when a status, claim or text differs. An entry the old
+   store dropped in compaction becomes a closing event. `inbox.jsonl` is the
+   only source of truth in this phase, so a reconcile event is always right
+   to win. The shadow may lag between passes; the parity check runs reconcile
+   first, in tests and on demand from `doctor`.
 5. Move every in-place writer to events, one pull request per module. During
    this step each moved writer writes both the old in-place change and the
    event, in that order and under the one writer lock. If the in-place write
    fails, no event is written. If the process stops between the two,
    `inbox.jsonl` is ahead and the next reconcile pass writes the missing
-   event. The fold can therefore never hold a change that `inbox.jsonl` lacks.
+   event. Every line in the shadow comes from a local dual write or from
+   reconcile, so the shadow never holds a change that `inbox.jsonl` lacks.
 
    A module's pull request is done when, in its tests, reconcile writes
    nothing for that module's kind of change: every such change already reached
-   the fold through the module's own event.
+   the shadow through the module's own event.
 5a. Cut over: readers switch to the fold and the in-place writes stop. The
-   code ships in one pull request after all six writers have moved, but the
-   switch itself happens per old store, at run time, and is atomic: the
-   harness takes that store's writer lock, runs reconcile, repeats it until a
-   pass writes nothing, and then writes a cut-over marker for the store, all
-   without releasing the lock. Every writer and reader checks the marker
-   under the same lock. Without it, a writer writes both forms and a reader
-   reads `inbox.jsonl`; with it, a writer writes the event only and a reader
-   reads the fold. No write can fall between the clean pass and the switch,
-   because both are inside one lock hold. A store whose reconcile cannot come
-   clean stays on `inbox.jsonl` and `doctor` reports it.
+   code ships in one pull request after all six writers have moved. The
+   switch happens at run time, once per machine, for every store on it
+   together, so no reader is ever on the fold while some writer is still on
+   `inbox.jsonl`. The harness takes the writer lock of every known old store,
+   in a fixed order; runs reconcile on each and repeats until a full round
+   writes nothing; moves the shadow logs into `store_root` as this device's
+   logs; and writes one machine marker. It releases no lock until the marker
+   is written. Every writer and reader checks the marker under its store's
+   lock. Without it, a writer writes both forms and a reader reads
+   `inbox.jsonl`; with it, a writer writes the event only and a reader reads
+   the fold. If any store cannot come clean, nothing is moved, no marker is
+   written, the machine stays on `inbox.jsonl`, and `doctor` names the store.
+
+   Reconcile never runs after the marker. An old store found later, such as a
+   checkout restored from a backup, is static, because no code writes
+   `inbox.jsonl` any more. It is imported once, as new entries.
 6. `store_root` setting, `doctor` checks for the store folder, and a documented
-   two-device walkthrough.
+   two-device walkthrough. A machine may point `store_root` at a shared folder
+   only after its own cut-over. Each device therefore migrates alone and joins
+   with finished logs, and the ordering rules above apply only between devices
+   that are all on the fold.
 7. Aging, `memory_retract`, `source.session` / `source.agent` / `source.device`.
 8. Make automatic acceptance the default; supersede ADR 0003 and ADR 0004 with
    new records; update the templates and installed agent instructions.
