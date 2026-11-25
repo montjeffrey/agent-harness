@@ -484,15 +484,33 @@ Design documents are held to the same gate as code.
 
    Changing `store_root` is a command, not a bare edit of `config.json`,
    because the device's logs must arrive in the new folder before it becomes
-   active. The command takes this device's log locks, copies this device's
-   own logs and archives into the new folder by the same journal and
-   copy-flush-rename steps as cut-over, verifies each copy's size, then
-   switches `config.json` and leaves a marker in the old folder naming where
-   the logs went. It copies only files this device wrote, so one writer per
-   file still holds. `config.json` also records the device's last active
-   root; if someone edits the setting by hand, the harness finds this
-   device's logs missing from the new folder, writes nothing, and `doctor`
-   says to run the command.
+   active. The command takes this device's log locks and writes a
+   root-change journal under `~/.agent-harness/`, naming the old root, the
+   new root, and every file it will copy. It then copies this device's own
+   logs and archives into the new folder by the same copy-flush-rename steps
+   as cut-over, verifies each copy's size, switches `config.json`, leaves a
+   marker in the old folder naming where the logs went, and removes the
+   journal. It copies only files this device wrote, so one writer per file
+   still holds.
+
+   While a root-change journal exists, no writer on this device writes
+   anything, so the old root stays the only current copy and nothing can be
+   written after a log was copied. Any harness process that finds the
+   journal finishes the change before doing anything else: it copies every
+   listed file again from the old root, replacing whatever copy the new
+   folder already holds, then switches `config.json` and removes the
+   journal. A peer reading the new folder sees either a temporary name,
+   which no reader opens, or a complete and current copy. If the new folder
+   cannot be reached, the operator can cancel with the same command: it
+   deletes this device's copies in the new folder, by their device-named
+   file names, and removes the journal, leaving the old root in use.
+
+   `config.json` records the device's last active root beside `store_root`.
+   Writers compare the two. If they differ, because the setting was edited
+   by hand, the harness writes nothing, whatever logs the configured folder
+   holds: an old root still has this device's earlier logs, so finding them
+   there proves nothing. `doctor` says to run the command, which moves the
+   logs from the last active root to the configured one.
 7. Aging, `memory_retract`, `source.session` / `source.agent` / `source.device`.
 8. Make automatic acceptance the default; supersede ADR 0003 and ADR 0004 with
    new records; update the templates and installed agent instructions.

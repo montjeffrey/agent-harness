@@ -170,9 +170,17 @@ L4 is not recommended.
      Every endpoint the comparison uses is covered, and two clocks wrong in
      opposite directions add. If any of the four endpoints has no counted
      offset reading, there is no bound and the comparison is uncertain.
-   - A clock step is detected when, between two events of one boot, the wall
-     clock and the monotonic clock advance by different amounts. A backward
-     step shows as wall time falling while monotonic time rises.
+   - Ordinary drift is not a step. Between two events of one boot, the wall
+     clock and the monotonic clock always differ a little, because of drift
+     and because a time service slews the clock gradually. The tolerance for
+     that is the same worst-case rate used for the endpoint bound, which must
+     be at least the time service's maximum slew rate, times the monotonic
+     time elapsed, plus one clock-reading resolution on each reading. A
+     difference within the tolerance is drift and is already inside the
+     bound. A difference beyond it is a step; a backward step shows as wall
+     time falling while monotonic time rises. Any interval with an
+     endpoint between two readings that disagree beyond the tolerance has
+     no bound on that device, so its comparisons are uncertain.
    - An overlap is *certain* only when it is longer than that pair's bound
      and no step was detected on either device across either interval. Every
      other overlap, and every near miss within the bound, is *uncertain*.
