@@ -155,15 +155,20 @@ L4 is not recommended.
    with a boot id; and, when a time server can be reached, the wall clock's
    offset from it. From these:
 
-   - The skew bound is the largest offset any device recorded during the
-     two weeks, not an assumed figure.
+   - The skew bound is computed for each pair of claims being compared, not
+     assumed and not one figure for the pilot. It is the sum, over the two
+     devices, of three terms: the size of the device's nearest offset
+     reading; that reading's own error, taken as the round trip to the time
+     server; and a drift allowance for the time between the reading and the
+     claim, at a stated worst-case drift rate. Two clocks wrong in opposite
+     directions therefore add. If either device has no offset reading, there
+     is no bound and the comparison is uncertain.
    - A clock step is detected when, between two events of one boot, the wall
      clock and the monotonic clock advance by different amounts. A backward
      step shows as wall time falling while monotonic time rises.
-   - An overlap is *certain* only when it is longer than the bound, both
-     claims have an offset reading taken within the hour, and no step was
-     detected on either device across either interval. Every other overlap
-     or near miss within the bound is *uncertain*.
+   - An overlap is *certain* only when it is longer than that pair's bound
+     and no step was detected on either device across either interval. Every
+     other overlap, and every near miss within the bound, is *uncertain*.
 
    The result is reported as both counts. If the decision would differ
    between "certain only" and "certain plus uncertain", the pilot is extended
