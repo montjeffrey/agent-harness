@@ -156,15 +156,22 @@ L4 is not recommended.
    clock's offset from it. Every device reads the same time server, named
    once for the whole pilot, and each reading records the server it used. A
    reading against any other server, or one that does not name its server,
-   does not count. With one common reference the server's own error is the
-   same for both devices and cancels in their difference. From these:
+   does not count. One common reference removes differences between
+   servers, but the server's own error can still change between two
+   readings. So each reading also records the error the server reports for
+   itself against UTC: its root distance, half its root delay plus its root
+   dispersion, as the time protocol defines it. A reading from a server that
+   reports itself unsynchronised does not count. From these:
 
    - Each claim has two endpoints: its start, and its finish; for a claim
      that expired, its last renewal plus the time-to-live. The device's error
-     at one endpoint is the sum of three terms: the size of the nearest
+     at one endpoint is the sum of four terms: the size of the nearest
      offset reading; that reading's own error, taken as its round trip to
-     the server; and a drift allowance for the time between that reading and
-     that endpoint, at a stated worst-case drift rate.
+     the server; the server's root distance at that reading, which bounds
+     how far the server itself was from UTC, and so how far it can have
+     moved between any two readings; and a drift allowance for the time
+     between that reading and that endpoint, at a stated worst-case drift
+     rate.
    - The skew bound for a pair of claims is the larger error of the first
      claim's two endpoints plus the larger error of the second claim's two.
      Every endpoint the comparison uses is covered, and two clocks wrong in

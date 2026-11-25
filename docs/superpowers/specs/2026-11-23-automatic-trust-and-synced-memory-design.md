@@ -498,12 +498,21 @@ Design documents are held to the same gate as code.
    written after a log was copied. Any harness process that finds the
    journal finishes the change before doing anything else: it copies every
    listed file again from the old root, replacing whatever copy the new
-   folder already holds, then switches `config.json` and removes the
+   folder already holds, then switches `config.json`, setting `store_root`
+   and the last active root to the new folder in one write, and removes the
    journal. A peer reading the new folder sees either a temporary name,
-   which no reader opens, or a complete and current copy. If the new folder
-   cannot be reached, the operator can cancel with the same command: it
-   deletes this device's copies in the new folder, by their device-named
-   file names, and removes the journal, leaving the old root in use.
+   which no reader opens, or a complete and current copy.
+
+   If the new folder cannot be reached, the operator can cancel with the
+   same command, but only before the switch. The command reads
+   `config.json` to tell which side of the switch it is on. If `store_root`
+   still names the old root, cancel deletes this device's copies in the new
+   folder, by their device-named file names, and removes the journal,
+   leaving the old root in use. If `store_root` already names the new root,
+   the new folder holds complete copies, so cancel is refused, deletes
+   nothing, and the command finishes the change instead. Cancel never edits
+   `config.json`, so it can never leave the device pointing at a folder
+   from which its logs were removed.
 
    `config.json` records the device's last active root beside `store_root`.
    Writers compare the two. If they differ, because the setting was edited
