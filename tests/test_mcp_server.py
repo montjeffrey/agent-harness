@@ -696,6 +696,8 @@ def test_main_warms_imports_before_serving(monkeypatch):
     """The warm-up runs before the event loop starts, which is the whole point."""
     from harness import mcp_server
 
+    # An empty project would skip the warm-up; this test is about its order.
+    monkeypatch.setenv("AGENT_HARNESS_MCP_SEMANTIC", "always")
     order = []
     monkeypatch.setattr(
         mcp_server, "_warm_optional_native_imports", lambda: order.append("warm")
@@ -721,6 +723,7 @@ def test_main_pins_openblas_before_the_warm_up_imports_numpy(monkeypatch):
     """
     from harness import mcp_server
 
+    monkeypatch.setenv("AGENT_HARNESS_MCP_SEMANTIC", "always")
     monkeypatch.delenv("OPENBLAS_NUM_THREADS", raising=False)
     seen = []
     monkeypatch.setattr(
@@ -1142,3 +1145,313 @@ def test_help_prints_usage_and_exits_zero_without_serving(capsys, monkeypatch) -
     for flag in ("--help", "-h"):
         assert mcp_server.main([flag]) == 0
         assert "usage: agent-harness-mcp" in capsys.readouterr().out
+
+
+# --- lazy semantic warm-up ------------------------------------------------
+#
+# The 2026-09-11 hang forbids importing chromadb on a worker thread; the
+# 2026-11 per-process memory measurement (~70 MB x 25 sessions) forbids paying
+# for it in sessions that never rank semantically. The server therefore decides
+# ONCE, on the main thread before it serves, with the SessionStart hook's own
+# adaptive rule -- and a process that skipped the import must answer every
+# later semantic request deterministically instead of importing on a worker.
+
+
+def _objective(root: Path, text: str = "Improve retrieval quality") -> None:
+    (root / ".agent-harness" / "scope.md").write_text(
+        f"# Project scope\n\n## Active objective\n\n{text}\n", encoding="utf-8"
+    )
+
+
+@pytest.fixture()
+def clean_semantic_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (
+        "AGENT_HARNESS_MCP_SEMANTIC",
+        "AGENT_HARNESS_HOOK_STRATEGY",
+        "AGENT_HARNESS_ADAPTIVE_MIN_ENTRIES",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture()
+def semantic_skipped(monkeypatch: pytest.MonkeyPatch):
+    """Put the module in the state `main()` leaves after skipping the warm-up."""
+    from harness import mcp_server
+
+    monkeypatch.setattr(mcp_server, "_SEMANTIC_SKIPPED_REASON", "test: skipped at startup")
+
+
+def test_semantic_skip_reason_when_the_project_has_no_objective(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clean_semantic_env: None
+) -> None:
+    from harness import mcp_server
+
+    project = _memory_project(tmp_path / "p")
+    for n in range(12):
+        _remember(project, f"entry number {n}")
+    monkeypatch.chdir(project)
+    reason = mcp_server._semantic_skip_reason()
+    assert reason is not None and "no active objective" in reason
+
+
+def test_semantic_skip_reason_when_the_store_is_small(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clean_semantic_env: None
+) -> None:
+    from harness import mcp_server
+
+    project = _memory_project(tmp_path / "p")
+    _objective(project)
+    for n in range(3):
+        _remember(project, f"entry number {n}")
+    monkeypatch.chdir(project)
+    reason = mcp_server._semantic_skip_reason()
+    assert reason is not None and "fewer than 8" in reason
+
+
+def test_semantic_skip_reason_is_none_for_an_objective_and_a_real_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clean_semantic_env: None
+) -> None:
+    from harness import mcp_server
+
+    project = _memory_project(tmp_path / "p")
+    _objective(project)
+    for n in range(8):
+        _remember(project, f"entry number {n}")
+    monkeypatch.chdir(project)
+    assert mcp_server._semantic_skip_reason() is None
+
+
+def test_semantic_skip_reason_follows_the_adaptive_threshold_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clean_semantic_env: None
+) -> None:
+    from harness import mcp_server
+
+    project = _memory_project(tmp_path / "p")
+    _objective(project)
+    monkeypatch.chdir(project)
+    monkeypatch.setenv("AGENT_HARNESS_ADAPTIVE_MIN_ENTRIES", "0")
+    assert mcp_server._semantic_skip_reason() is None
+
+
+def test_semantic_skip_reason_honours_the_deterministic_hook_strategy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clean_semantic_env: None
+) -> None:
+    from harness import mcp_server
+
+    project = _memory_project(tmp_path / "p")
+    _objective(project)
+    for n in range(10):
+        _remember(project, f"entry number {n}")
+    monkeypatch.chdir(project)
+    monkeypatch.setenv("AGENT_HARNESS_HOOK_STRATEGY", "deterministic")
+    reason = mcp_server._semantic_skip_reason()
+    assert reason is not None and "deterministic" in reason
+
+
+def test_semantic_override_env_forces_the_warm_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clean_semantic_env: None
+) -> None:
+    from harness import mcp_server
+
+    project = _memory_project(tmp_path / "p")  # no objective, empty store
+    monkeypatch.chdir(project)
+    assert mcp_server._semantic_skip_reason() is not None
+    monkeypatch.setenv("AGENT_HARNESS_MCP_SEMANTIC", "always")
+    assert mcp_server._semantic_skip_reason() is None
+
+
+def test_semantic_skip_reason_fails_open_when_the_store_is_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clean_semantic_env: None
+) -> None:
+    """An undecidable project must keep the old always-warm behaviour."""
+    from harness import mcp_server, memory_context
+
+    def explode(*_a, **_k):
+        raise OSError("simulated unreadable store")
+
+    monkeypatch.setattr(memory_context, "load_entries", explode)
+    monkeypatch.chdir(tmp_path)
+    assert mcp_server._semantic_skip_reason() is None
+
+
+def _run_main_with_fake_server(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    from harness import mcp_server
+
+    order: list[str] = []
+    monkeypatch.setattr(
+        mcp_server, "_warm_optional_native_imports", lambda: order.append("warm")
+    )
+
+    class FakeServer:
+        def run(self, transport):
+            order.append("run")
+
+    monkeypatch.setattr(mcp_server, "_build_server", lambda: FakeServer())
+    monkeypatch.setitem(sys.modules, "mcp", types.ModuleType("mcp"))
+    monkeypatch.setattr(mcp_server, "_SEMANTIC_SKIPPED_REASON", None)
+    assert mcp_server.main([]) == 0
+    return order
+
+
+def test_main_skips_the_warm_up_for_a_project_with_no_semantic_need(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clean_semantic_env: None
+) -> None:
+    from harness import mcp_server
+
+    monkeypatch.chdir(_memory_project(tmp_path / "p"))
+    assert _run_main_with_fake_server(monkeypatch) == ["run"]
+    assert mcp_server._SEMANTIC_SKIPPED_REASON is not None
+
+
+def test_main_warms_for_a_project_that_needs_semantic_ranking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clean_semantic_env: None
+) -> None:
+    from harness import mcp_server
+
+    project = _memory_project(tmp_path / "p")
+    _objective(project)
+    for n in range(9):
+        _remember(project, f"entry number {n}")
+    monkeypatch.chdir(project)
+    assert _run_main_with_fake_server(monkeypatch) == ["warm", "run"]
+    assert mcp_server._SEMANTIC_SKIPPED_REASON is None
+
+
+def test_main_warms_unconditionally_with_the_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clean_semantic_env: None
+) -> None:
+    monkeypatch.chdir(_memory_project(tmp_path / "p"))
+    monkeypatch.setenv("AGENT_HARNESS_MCP_SEMANTIC", "always")
+    assert _run_main_with_fake_server(monkeypatch) == ["warm", "run"]
+
+
+def _forbid_chromadb(monkeypatch: pytest.MonkeyPatch) -> None:
+    from harness import memory_index
+
+    def boom():
+        raise AssertionError("chromadb must not be imported after a skipped warm-up")
+
+    monkeypatch.setattr(memory_index, "chromadb_status", boom)
+
+
+def test_memory_context_after_a_skipped_warm_up_is_deterministic_and_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, semantic_skipped: None
+) -> None:
+    from harness import mcp_server
+
+    project = _memory_project(tmp_path / "p")
+    for n in range(12):  # past the adaptive gate, so only the skip can decline
+        _remember(project, f"retry policy note {n}")
+    _forbid_chromadb(monkeypatch)
+    text = mcp_server.dispatch_memory(
+        "memory_context", {"project": str(project), "query": "retry policy"}
+    )
+    assert "deterministic" in text
+    assert "not loaded at startup" in text and "AGENT_HARNESS_MCP_SEMANTIC=always" in text
+
+
+def test_cross_check_after_a_skipped_warm_up_does_not_import_chromadb(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, semantic_skipped: None
+) -> None:
+    from harness import mcp_server
+
+    project = _memory_project(tmp_path / "p")
+    for n in range(12):
+        _remember(project, f"retry policy note {n}")
+    _forbid_chromadb(monkeypatch)
+    text = mcp_server.dispatch_memory(
+        "memory_context",
+        {"project": str(project), "query": "retry policy", "cross_check": True},
+    )
+    assert "not loaded at startup" in text
+
+
+def test_memory_search_after_a_skipped_warm_up_does_not_import_chromadb(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, semantic_skipped: None
+) -> None:
+    from harness import mcp_server
+
+    project = _memory_project(tmp_path / "p")
+    for n in range(12):
+        _remember(project, f"retry policy note {n}")
+    _forbid_chromadb(monkeypatch)
+    text = mcp_server.dispatch_memory(
+        "memory_search", {"project": str(project), "query": "retry policy"}
+    )
+    assert "retry policy note" in text
+    assert "not loaded at startup" in text
+
+
+def test_task_packet_after_a_skipped_warm_up_does_not_import_chromadb(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, semantic_skipped: None
+) -> None:
+    from harness import mcp_server
+
+    project = _memory_project(tmp_path / "p")
+    for n in range(12):
+        _remember(project, f"retry policy note {n}")
+    _forbid_chromadb(monkeypatch)
+    text = mcp_server._task_packet(project, "fix retry policy", "")
+    assert "not loaded at startup" in text
+
+
+def test_a_small_store_keeps_its_own_adaptive_note_after_a_skipped_warm_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, semantic_skipped: None
+) -> None:
+    """When the adaptive gate already declines, its more specific note wins."""
+    from harness import mcp_server
+
+    project = _memory_project(tmp_path / "p")
+    _remember(project, "only entry")
+    _forbid_chromadb(monkeypatch)
+    text = mcp_server.dispatch_memory(
+        "memory_context", {"project": str(project), "query": "only"}
+    )
+    assert "semantic selection skipped (only 1 entries recorded" in text
+
+
+def test_startup_imports_chromadb_only_when_needed_in_a_real_process(tmp_path: Path) -> None:
+    """The end-to-end claim, measured by an import hook in a fresh interpreter.
+
+    `main()` runs with a fake server so nothing serves; a meta-path finder
+    records any import of chromadb or onnxruntime. Run on the main thread, as
+    the real server does.
+    """
+    import subprocess
+
+    script = tmp_path / "probe.py"
+    script.write_text(
+        "import json, sys, types\n"
+        "seen = []\n"
+        "class Spy:\n"
+        "    def find_spec(self, name, path=None, target=None):\n"
+        "        if name.split('.')[0] in ('chromadb', 'onnxruntime'):\n"
+        "            seen.append(name)\n"
+        "        return None\n"
+        "sys.meta_path.insert(0, Spy())\n"
+        "sys.modules.setdefault('mcp', types.ModuleType('mcp'))\n"
+        "from harness import mcp_server\n"
+        "class Fake:\n"
+        "    def run(self, transport): pass\n"
+        "mcp_server._build_server = lambda: Fake()\n"
+        "assert mcp_server.main([]) == 0\n"
+        "print(json.dumps(sorted(set(seen))))\n",
+        encoding="utf-8",
+    )
+
+    def probe(project: Path, **extra: str) -> list[str]:
+        env = {k: v for k, v in os.environ.items() if not k.startswith("AGENT_HARNESS_")}
+        env.update(extra)
+        env["PYTHONPATH"] = str(Path(__file__).resolve().parent.parent)
+        done = subprocess.run(
+            [sys.executable, str(script)], cwd=project, env=env, text=True,
+            capture_output=True, timeout=120, stdin=subprocess.DEVNULL, check=False,
+        )
+        assert done.returncode == 0, done.stderr
+        return json.loads(done.stdout.strip().splitlines()[-1])
+
+    project = _memory_project(tmp_path / "p")
+    assert probe(project) == []  # no objective, tiny store: nothing imported
+    # With the override the warm-up runs, so the import is attempted (it may
+    # fail when the optional extra is absent -- the attempt is the point).
+    assert probe(project, AGENT_HARNESS_MCP_SEMANTIC="always")[:1] == ["chromadb"]

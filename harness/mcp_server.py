@@ -497,6 +497,47 @@ def _resolve_project(arguments: dict) -> Path:
 TASK_PACKET_MAX_CHARS = 1500
 
 
+# Set by `main()` when it decided not to import the semantic stack at startup.
+# While it is a string, no tool may reach `chromadb`: the only safe place for
+# that import is the main thread before serving (see
+# `_warm_optional_native_imports`), and a tool call runs on a worker thread.
+# None -- the default, and the state of every in-process caller -- means "no
+# restriction", so `resolve_selector` behaves exactly as it always has.
+_SEMANTIC_SKIPPED_REASON: str | None = None
+
+
+def _resolve_selector(project_id: str, strategy: str, **kwargs: Any):
+    """`memory_index.resolve_selector`, safe in a process that skipped the warm-up.
+
+    Every tool resolves its selector through here. After a skipped warm-up a
+    request that would otherwise try semantic ranking is served by the
+    deterministic selector and says so in its notes -- never by importing
+    chromadb on a worker thread, which hangs. A call the adaptive gate already
+    declines keeps its own, more specific note, and is answered without any
+    import either way.
+    """
+    from harness import memory_index
+
+    if _SEMANTIC_SKIPPED_REASON is None:
+        return memory_index.resolve_selector(project_id, strategy, **kwargs)
+    if strategy == "adaptive" and memory_index.semantic_pointless_reason(
+        kwargs.get("query"), kwargs.get("entry_count")
+    ):
+        return memory_index.resolve_selector(project_id, strategy, **kwargs)
+    selector, used, notes = memory_index.resolve_selector(project_id, "deterministic")
+    return (
+        selector,
+        used,
+        [
+            *notes,
+            "semantic selection skipped (the semantic stack was not loaded at "
+            f"startup: {_SEMANTIC_SKIPPED_REASON}); results are deterministic. "
+            "Set AGENT_HARNESS_MCP_SEMANTIC=always and restart the server to "
+            "enable it",
+        ],
+    )
+
+
 def _search_selector_resolver(current_project_id: str, query: str, client_factory: Any = None):
     """A `memory_context.SelectorResolver` that routes each search source to
     its own semantic index -- another project's index for its inbox, the one
@@ -510,7 +551,7 @@ def _search_selector_resolver(current_project_id: str, query: str, client_factor
 
     def resolve(source: str, entry_count: int):
         if source == memory_context.MACHINE_SOURCE:
-            return memory_index.resolve_selector(
+            return _resolve_selector(
                 current_project_id,
                 "adaptive",
                 client_factory=client_factory,
@@ -518,7 +559,7 @@ def _search_selector_resolver(current_project_id: str, query: str, client_factor
                 entry_count=entry_count,
                 scopes=("machine",),
             )
-        return memory_index.resolve_selector(
+        return _resolve_selector(
             source,
             "adaptive",
             client_factory=client_factory,
@@ -549,7 +590,7 @@ def _task_packet(project: Path, summary: str, tags: str) -> str:
         if not (store / "inbox.jsonl").is_file():
             return f"memory: no project memory at {store}; nothing to attach"
         loaded = memory_context.load_entries(project)
-        selector, strategy, notes = memory_index.resolve_selector(
+        selector, strategy, notes = _resolve_selector(
             memory_store.project_id_for(project),
             "adaptive",
             query=query,
@@ -635,7 +676,7 @@ def dispatch_memory(tool_name: str, arguments: dict) -> str:
             # returns the deterministic answer either way.
             wanted = "auto" if arguments.get("cross_check") else "adaptive"
             try:
-                selector, strategy, notes = memory_index.resolve_selector(
+                selector, strategy, notes = _resolve_selector(
                     project_id,
                     wanted,
                     query=query,
@@ -1272,6 +1313,41 @@ def _warm_optional_native_imports() -> str | None:
         return f"{type(exc).__name__}: {exc}"
 
 
+SEMANTIC_ENV = "AGENT_HARNESS_MCP_SEMANTIC"
+
+
+def _semantic_skip_reason() -> str | None:
+    """Why this server should not import the semantic stack, or None if it should.
+
+    Importing chromadb pulls in onnxruntime, numpy, grpc and pydantic: about
+    70 MB of resident memory in every per-session server, measured at 2.9 GB
+    across 25 sessions. It buys nothing in a session that never ranks
+    semantically, and the project's `adaptive` rule already says which those
+    are -- no active objective, or fewer than `ADAPTIVE_MIN_ENTRIES` entries
+    (`memory_index.semantic_pointless_reason`). This applies that rule to the
+    project the server was started in, once, using stdlib file reads only.
+
+    `AGENT_HARNESS_MCP_SEMANTIC=always` forces the old always-warm behaviour,
+    and `AGENT_HARNESS_HOOK_STRATEGY=deterministic` is honoured because the
+    operator has already said they want no semantic selection. Anything that
+    cannot be decided fails OPEN to warming: a wrong "skip" costs ranking
+    quality for the session, a wrong "warm" only costs the memory it always did.
+    """
+    if os.environ.get(SEMANTIC_ENV, "").strip().lower() == "always":
+        return None
+    if os.environ.get("AGENT_HARNESS_HOOK_STRATEGY", "").strip().lower() == "deterministic":
+        return "AGENT_HARNESS_HOOK_STRATEGY=deterministic"
+    try:
+        from harness import memory_context, memory_index
+
+        root = Path.cwd()
+        return memory_index.semantic_pointless_reason(
+            memory_context.active_objective(root), memory_context.load_entries(root).count
+        )
+    except Exception:  # noqa: BLE001 -- undecidable: keep the safe, old behaviour
+        return None
+
+
 USAGE = (
     "usage: agent-harness-mcp [--graph PATH]\n"
     "\n"
@@ -1284,7 +1360,7 @@ USAGE = (
 
 
 def main(argv: list[str] | None = None) -> int:
-    global _GRAPH_OVERRIDE
+    global _GRAPH_OVERRIDE, _SEMANTIC_SKIPPED_REASON
 
     args = sys.argv[1:] if argv is None else argv
     if any(a in ("-h", "--help") for a in args):
@@ -1305,7 +1381,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     _cap_native_thread_pools()
-    _warm_optional_native_imports()
+    _SEMANTIC_SKIPPED_REASON = _semantic_skip_reason()
+    if _SEMANTIC_SKIPPED_REASON is None:
+        _warm_optional_native_imports()
 
     server = _build_server()
     server.run(transport="stdio")
