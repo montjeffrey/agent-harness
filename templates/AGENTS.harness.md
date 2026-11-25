@@ -65,6 +65,7 @@ the bug, then the fix that makes it pass.
 Do not stack a PR on another open PR: a branch cut from an unmerged branch
 shows the reviewer both diffs at once. Wait for the parent to merge and
 rebase onto the base branch, or keep the follow-up as a draft until then.
-This policy is an advisory convention; nothing in the harness measures PR
-size yet.
+Before opening a PR, run `agent-harness-pr size`: it counts the changed lines
+the reviewer will see. This policy is an advisory convention; nothing blocks
+an oversized PR yet.
 <!-- agent-harness:end -->
